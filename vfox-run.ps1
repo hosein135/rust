@@ -89,15 +89,37 @@ function Write-DownloadProgressLine {
     }
 }
 
+function Get-UrlContentLength {
+    param([string]$Uri)
+    try {
+        $req = [System.Net.HttpWebRequest]::Create($Uri)
+        $req.Method = "HEAD"
+        $req.UserAgent = "verilog-ide-vfox-run"
+        $req.AllowAutoRedirect = $true
+        $req.Timeout = 1000 * 60
+        $resp = $null
+        try {
+            $resp = $req.GetResponse()
+            return [long]$resp.ContentLength
+        } finally {
+            if ($resp) { $resp.Dispose() }
+        }
+    } catch {
+        return -1
+    }
+}
+
 function Save-UrlToFile {
     <#
     .SYNOPSIS
-      Download a URL to disk with a live console progress bar (bytes + %).
+      Download a URL with a live progress bar. Resumes via HTTP Range when the
+      server supports it (writes to OutFile.partial until complete).
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Uri,
         [Parameter(Mandatory = $true)][string]$OutFile,
-        [string]$Label = "download"
+        [string]$Label = "download",
+        [int]$MaxAttempts = 5
     )
 
     $parent = Split-Path -Parent $OutFile
@@ -105,64 +127,162 @@ function Save-UrlToFile {
         New-Item -ItemType Directory -Force -Path $parent | Out-Null
     }
 
+    $partial = "$OutFile.partial"
+
+    # Already finished on a previous run
+    if ((Test-Path -LiteralPath $OutFile) -and -not $ForceSetup) {
+        $existingLen = [long](Get-Item -LiteralPath $OutFile).Length
+        if ($existingLen -gt 0) {
+            $remoteLen = Get-UrlContentLength -Uri $Uri
+            if ($remoteLen -gt 0 -and $existingLen -eq $remoteLen) {
+                Write-Info ("$Label already downloaded ({0}) - skip" -f (Format-ByteSize $existingLen))
+                return
+            }
+        }
+    }
+
+    if ($ForceSetup -and (Test-Path -LiteralPath $partial)) {
+        Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+    }
+    if ($ForceSetup -and (Test-Path -LiteralPath $OutFile)) {
+        Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+    }
+
     Write-Step "Downloading $Label ..."
     Write-Host "  $Uri" -ForegroundColor DarkGray
 
-    $request = [System.Net.HttpWebRequest]::Create($Uri)
-    $request.UserAgent = "verilog-ide-vfox-run"
-    $request.AllowAutoRedirect = $true
-    $request.Timeout = 1000 * 60 * 30
-    $request.ReadWriteTimeout = 1000 * 60 * 30
-
-    $response = $null
-    $inStream = $null
-    $outStream = $null
-    try {
-        $response = $request.GetResponse()
-        $total = [long]$response.ContentLength
-        if ($total -gt 0) {
-            Write-Host ("  Size: {0}" -f (Format-ByteSize $total)) -ForegroundColor DarkGray
-        }
-        $inStream = $response.GetResponseStream()
-        $outStream = [System.IO.File]::Create($OutFile)
-
-        $buffer = New-Object byte[] (256KB)
-        $received = [long]0
-        $lastPct = -1
-        $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $lastUi = [System.Diagnostics.Stopwatch]::StartNew()
-
-        while ($true) {
-            $read = $inStream.Read($buffer, 0, $buffer.Length)
-            if ($read -le 0) { break }
-            $outStream.Write($buffer, 0, $read)
-            $received += $read
-
-            # Refresh UI at least ~4x/sec so large downloads always look alive
-            if ($lastUi.ElapsedMilliseconds -ge 250 -or $read -ge $buffer.Length) {
-                $elapsedSec = [Math]::Max($sw.Elapsed.TotalSeconds, 0.001)
-                $speed = [long]($received / $elapsedSec)
-                Write-DownloadProgressLine -Label $Label -Received $received -Total $total `
-                    -SpeedBytesPerSec $speed -LastPct ([ref]$lastPct)
-                $lastUi.Restart()
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $response = $null
+        $inStream = $null
+        $outStream = $null
+        try {
+            $have = [long]0
+            if (Test-Path -LiteralPath $partial) {
+                $have = [long](Get-Item -LiteralPath $partial).Length
             }
-        }
 
-        Write-Host ""
-        Write-Progress -Activity "Downloading $Label" -Completed
-        Write-Info ("Downloaded {0} ({1})" -f $Label, (Format-ByteSize $received))
-    } catch {
-        Write-Host ""
-        Write-Progress -Activity "Downloading $Label" -Completed
-        if (Test-Path -LiteralPath $OutFile) {
-            Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+            $request = [System.Net.HttpWebRequest]::Create($Uri)
+            $request.UserAgent = "verilog-ide-vfox-run"
+            $request.AllowAutoRedirect = $true
+            $request.Timeout = 1000 * 60 * 30
+            $request.ReadWriteTimeout = 1000 * 60 * 30
+            if ($have -gt 0) {
+                $request.AddRange($have)
+                Write-Info ("Resuming $Label from {0} (attempt {1}/{2})" -f (Format-ByteSize $have), $attempt, $MaxAttempts)
+            } elseif ($attempt -gt 1) {
+                Write-Warn2 ("Retrying $Label from start (attempt {0}/{1})" -f $attempt, $MaxAttempts)
+            }
+
+            $response = $request.GetResponse()
+            $statusCode = [int]$response.StatusCode
+            $contentLength = [long]$response.ContentLength
+
+            # 206 = resume OK; 200 = server sent full body (restart / no range support)
+            if ($have -gt 0 -and $statusCode -eq 200) {
+                Write-Warn2 "Server ignored resume request - restarting download from beginning"
+                if (Test-Path -LiteralPath $partial) {
+                    Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+                }
+                $have = 0
+                $total = $contentLength
+            } elseif ($statusCode -eq 206 -or ($have -gt 0 -and $contentLength -ge 0)) {
+                # Partial content: ContentLength is remaining bytes
+                if ($contentLength -ge 0) {
+                    $total = $have + $contentLength
+                } else {
+                    $total = -1
+                }
+            } else {
+                $total = $contentLength
+            }
+
+            if ($total -gt 0) {
+                Write-Host ("  Size: {0}" -f (Format-ByteSize $total)) -ForegroundColor DarkGray
+            }
+
+            # Complete enough already?
+            if ($total -gt 0 -and $have -ge $total) {
+                Write-Info ("$Label partial already complete ({0})" -f (Format-ByteSize $have))
+                Move-Item -LiteralPath $partial -Destination $OutFile -Force
+                return
+            }
+
+            $inStream = $response.GetResponseStream()
+            if ($have -gt 0 -and $statusCode -eq 206) {
+                $outStream = [System.IO.File]::Open($partial, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            } else {
+                $outStream = [System.IO.File]::Create($partial)
+                $have = 0
+            }
+
+            $buffer = New-Object byte[] (256KB)
+            $received = $have
+            $sessionStart = $have
+            $lastPct = -1
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $lastUi = [System.Diagnostics.Stopwatch]::StartNew()
+
+            while ($true) {
+                $read = $inStream.Read($buffer, 0, $buffer.Length)
+                if ($read -le 0) { break }
+                $outStream.Write($buffer, 0, $read)
+                $received += $read
+
+                if ($lastUi.ElapsedMilliseconds -ge 250 -or $read -ge $buffer.Length) {
+                    $elapsedSec = [Math]::Max($sw.Elapsed.TotalSeconds, 0.001)
+                    $speed = [long](($received - $sessionStart) / $elapsedSec)
+                    Write-DownloadProgressLine -Label $Label -Received $received -Total $total `
+                        -SpeedBytesPerSec $speed -LastPct ([ref]$lastPct)
+                    $lastUi.Restart()
+                }
+            }
+
+            $outStream.Flush()
+            $outStream.Dispose(); $outStream = $null
+            $inStream.Dispose(); $inStream = $null
+            $response.Dispose(); $response = $null
+
+            Write-Host ""
+            Write-Progress -Activity "Downloading $Label" -Completed
+
+            $finalLen = [long](Get-Item -LiteralPath $partial).Length
+            if ($total -gt 0 -and $finalLen -lt $total) {
+                throw ("Incomplete download ({0} of {1}) - will resume" -f (Format-ByteSize $finalLen), (Format-ByteSize $total))
+            }
+
+            if (Test-Path -LiteralPath $OutFile) {
+                Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+            }
+            Move-Item -LiteralPath $partial -Destination $OutFile -Force
+            Write-Info ("Downloaded {0} ({1})" -f $Label, (Format-ByteSize $finalLen))
+            return
+        } catch {
+            $lastError = $_.Exception.Message
+            Write-Host ""
+            Write-Progress -Activity "Downloading $Label" -Completed
+            # Keep .partial so the next attempt can resume
+            $kept = 0
+            if (Test-Path -LiteralPath $partial) {
+                $kept = [long](Get-Item -LiteralPath $partial).Length
+            }
+            Write-Warn2 ("Download interrupted for {0}: {1}" -f $Label, $lastError)
+            if ($kept -gt 0) {
+                Write-Info ("Kept partial file ({0}) for resume" -f (Format-ByteSize $kept))
+            }
+            if ($attempt -lt $MaxAttempts) {
+                $delay = [Math]::Min(30, 2 * $attempt)
+                Write-Warn2 "Retrying in ${delay}s ..."
+                Start-Sleep -Seconds $delay
+            }
+        } finally {
+            if ($outStream) { $outStream.Dispose() }
+            if ($inStream) { $inStream.Dispose() }
+            if ($response) { $response.Dispose() }
         }
-        throw "Download failed for ${Label}: $($_.Exception.Message)"
-    } finally {
-        if ($outStream) { $outStream.Dispose() }
-        if ($inStream) { $inStream.Dispose() }
-        if ($response) { $response.Dispose() }
     }
+
+    throw ("Download failed for {0} after {1} attempts: {2}" -f $Label, $MaxAttempts, $lastError)
 }
 
 # ---------------------------------------------------------------------------
@@ -528,14 +648,119 @@ function Test-VfoxSdkInstalled {
     return $false
 }
 
-function Get-VfoxRustCacheRoot {
-    foreach ($root in @(
-            (Join-Path $env:USERPROFILE ".vfox\cache\rust"),
-            (Join-Path $env:USERPROFILE ".version-fox\cache\rust")
+function Get-VfoxHome {
+    # Current vfox default is ~/.version-fox; older layouts used ~/.vfox
+    foreach ($h in @(
+            (Join-Path $env:USERPROFILE ".version-fox"),
+            (Join-Path $env:USERPROFILE ".vfox")
         )) {
-        if (Test-Path (Split-Path $root -Parent)) { return $root }
+        if (Test-Path -LiteralPath $h) { return $h }
     }
-    return (Join-Path $env:USERPROFILE ".vfox\cache\rust")
+    return (Join-Path $env:USERPROFILE ".version-fox")
+}
+
+function Get-VfoxRustCacheRoot {
+    $home = Get-VfoxHome
+    $preferred = Join-Path $home "cache\rust"
+    if (Test-Path -LiteralPath (Split-Path $preferred -Parent)) { return $preferred }
+
+    foreach ($root in @(
+            (Join-Path $env:USERPROFILE ".version-fox\cache\rust"),
+            (Join-Path $env:USERPROFILE ".vfox\cache\rust")
+        )) {
+        if (Test-Path -LiteralPath (Split-Path $root -Parent)) { return $root }
+    }
+    return $preferred
+}
+
+function Import-VfoxEnv {
+    <#
+    .SYNOPSIS
+      Apply vfox-managed PATH / CARGO_HOME to this PowerShell session.
+      `vfox use` alone does not update $env:Path until env is evaluated.
+    #>
+    try {
+        $snippet = & vfox env -s pwsh 2>$null | Out-String
+        if ($snippet -and $snippet.Trim()) {
+            Invoke-Expression $snippet
+            Write-Info "Applied vfox env (PATH + SDK vars) to this session"
+            return $true
+        }
+    } catch {
+        Write-Warn2 "vfox env failed: $($_.Exception.Message)"
+    }
+    return $false
+}
+
+function Resolve-RustSdkRoot {
+    param([string]$Version)
+
+    $candidates = [System.Collections.Generic.List[string]]::new()
+
+    $proj = Join-Path $PSScriptRoot ".vfox\sdks\rust"
+    if (Test-Path -LiteralPath $proj) {
+        try {
+            $item = Get-Item -LiteralPath $proj -Force -ErrorAction Stop
+            if ($item.LinkType -and $item.Target) {
+                foreach ($t in @($item.Target)) {
+                    if ($t) { [void]$candidates.Add("$t") }
+                }
+            }
+            [void]$candidates.Add($item.FullName)
+        } catch {
+            [void]$candidates.Add($proj)
+        }
+    }
+
+    foreach ($root in @(
+            (Join-Path (Get-VfoxHome) "cache\rust\v-$Version\rust-$Version"),
+            (Join-Path $env:USERPROFILE ".version-fox\cache\rust\v-$Version\rust-$Version"),
+            (Join-Path $env:USERPROFILE ".vfox\cache\rust\v-$Version\rust-$Version")
+        )) {
+        [void]$candidates.Add($root)
+    }
+
+    foreach ($c in $candidates) {
+        if (-not $c) { continue }
+        $rustc = Join-Path $c "rustc\bin\rustc.exe"
+        $cargo = Join-Path $c "cargo\bin\cargo.exe"
+        if ((Test-Path -LiteralPath $rustc) -and (Test-Path -LiteralPath $cargo)) {
+            return $c
+        }
+    }
+    return $null
+}
+
+function Add-RustBinsToPath {
+    param([string]$SdkRoot)
+    if (-not $SdkRoot) { return $false }
+
+    $ok = $false
+    foreach ($sub in @(
+            "rustc\bin",
+            "cargo\bin",
+            "clippy-preview\bin",
+            "rustfmt-preview\bin",
+            "rust-analyzer-preview\bin"
+        )) {
+        $p = Join-Path $SdkRoot $sub
+        if (Test-Path -LiteralPath $p) {
+            Add-PathFront $p
+            $ok = $true
+        }
+    }
+
+    $cargoHome = Join-Path $SdkRoot "cargo"
+    if (Test-Path -LiteralPath $cargoHome) {
+        $env:CARGO_HOME = $cargoHome
+    }
+
+    Merge-RustStdIntoSysroot -SdkRoot $SdkRoot
+    return $ok
+}
+
+function Test-RustBinsAvailable {
+    return ((Test-Command rustc) -and (Test-Command cargo))
 }
 
 function Clear-VfoxRustCache {
@@ -573,11 +798,19 @@ function Install-RustWithProgress {
     .SYNOPSIS
       Download the single pinned Rust stable with a live progress bar, unpack into
       the vfox cache layout, then let vfox register/use it. No version fallbacks.
+      Downloads are resumable (.partial + HTTP Range) across disconnects / retries.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Version,
         [int]$Attempts = 3
     )
+
+    $url = Get-RustDistUrl -Version $Version
+    $triple = Get-RustDistTriple
+    # Stable location so .partial survives script retries and re-runs
+    $dlRoot = Join-Path $env:TEMP "verilog-ide-downloads"
+    $tmpTar = Join-Path $dlRoot "rust-$Version-$triple.tar.gz"
+    $extractRoot = Join-Path $env:TEMP "verilog-ide-rust-$Version-extract"
 
     for ($i = 1; $i -le $Attempts; $i++) {
         if ((-not $ForceSetup) -and (Test-VfoxSdkInstalled -Name "rust" -Version $Version)) {
@@ -586,26 +819,29 @@ function Install-RustWithProgress {
         }
 
         Write-Step "Installing rust@$Version (attempt $i/$Attempts) - single stable pin ..."
-        if ($ForceSetup) { Clear-VfoxRustCache -Version $Version }
+        if ($ForceSetup) {
+            Clear-VfoxRustCache -Version $Version
+            foreach ($f in @($tmpTar, "$tmpTar.partial")) {
+                if (Test-Path -LiteralPath $f) {
+                    Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
 
-        $url = Get-RustDistUrl -Version $Version
-        $triple = Get-RustDistTriple
-        $tmpRoot = Join-Path $env:TEMP "verilog-ide-rust-$Version"
-        $tmpTar = Join-Path $tmpRoot "rust-$Version-$triple.tar.gz"
-        $extractRoot = Join-Path $tmpRoot "extract"
         $cacheRoot = Get-VfoxRustCacheRoot
         $pkgDir = Join-Path $cacheRoot "v-$Version"
         $destDir = Join-Path $pkgDir "rust-$Version"
 
         try {
-            if (Test-Path $tmpRoot) { Remove-Item $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue }
-            New-Item -ItemType Directory -Force -Path $tmpRoot | Out-Null
+            New-Item -ItemType Directory -Force -Path $dlRoot | Out-Null
 
-            Save-UrlToFile -Uri $url -OutFile $tmpTar -Label "Rust $Version ($triple)"
+            Save-UrlToFile -Uri $url -OutFile $tmpTar -Label "Rust $Version ($triple)" -MaxAttempts 5
 
             Write-Step "Unpacking Rust $Version ..."
             Write-Host "  This can take a minute for a ~400 MB archive." -ForegroundColor DarkGray
-            if (Test-Path $extractRoot) { Remove-Item $extractRoot -Recurse -Force }
+            if (Test-Path -LiteralPath $extractRoot) {
+                Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
             New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
 
             if (-not (Test-Command tar)) {
@@ -619,40 +855,57 @@ function Install-RustWithProgress {
             if (-not $inner) { throw "Unexpected Rust archive layout (no top-level folder)" }
 
             Write-Step "Installing into vfox cache: $destDir"
-            if (Test-Path $pkgDir) { Remove-Item $pkgDir -Recurse -Force }
+            if (Test-Path -LiteralPath $pkgDir) { Remove-Item -LiteralPath $pkgDir -Recurse -Force }
             New-Item -ItemType Directory -Force -Path $destDir | Out-Null
             Get-ChildItem -LiteralPath $inner.FullName -Force | ForEach-Object {
                 Move-Item -LiteralPath $_.FullName -Destination $destDir -Force
             }
 
-            # Prefer vfox install so metadata/hooks stay consistent; cache hit should be instant
-            # if layout already matches. If vfox still tries a network fetch, PreInstall uses HTTPS
-            # — we already have files, so CheckRuntimeExist should short-circuit.
             $prev = $ErrorActionPreference
             $ErrorActionPreference = "Continue"
             $out = & vfox install "rust@$Version" 2>&1 | Out-String
             $code = $LASTEXITCODE
             $ErrorActionPreference = $prev
-            if ($out) { Write-Host $out }
+            if ($out) {
+                $filtered = ($out -split "`r?`n" | Where-Object {
+                    $_ -and ($_ -notmatch '(?i)^failed to install rust\s*$')
+                }) -join "`n"
+                if ($filtered.Trim()) { Write-Host $filtered }
+            }
 
-            if ($code -eq 0 -or (Test-Path (Join-Path $destDir "rustc"))) {
+            $rustcExe = Join-Path $destDir "rustc\bin\rustc.exe"
+            $cargoExe = Join-Path $destDir "cargo\bin\cargo.exe"
+            if (($code -eq 0) -or ((Test-Path -LiteralPath $rustcExe) -and (Test-Path -LiteralPath $cargoExe))) {
+                if ($code -ne 0 -and (Test-Path -LiteralPath $rustcExe)) {
+                    Write-Warn2 "vfox install reported failure, but rustc/cargo are present in cache - continuing"
+                }
+                # Archive no longer needed after a successful install
+                foreach ($f in @($tmpTar, "$tmpTar.partial")) {
+                    if (Test-Path -LiteralPath $f) {
+                        Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
+                    }
+                }
+                if (Test-Path -LiteralPath $extractRoot) {
+                    Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
+                }
                 Write-Info "rust@$Version installed"
                 return $true
             }
 
-            Write-Warn2 "rust@$Version install failed (exit $code)"
+            Write-Warn2 "rust@$Version install failed (exit $code); missing $rustcExe or cargo.exe"
         } catch {
             Write-Warn2 "rust@$Version install error: $($_.Exception.Message)"
         } finally {
-            if (Test-Path $tmpRoot) {
-                Remove-Item $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
+            # Keep $tmpTar / .partial for resume; only drop extract workspace
+            if (Test-Path -LiteralPath $extractRoot) {
+                Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
             }
         }
 
         Clear-VfoxRustCache -Version $Version
         if ($i -lt $Attempts) {
             $delay = 3 * $i
-            Write-Warn2 "Retrying in ${delay}s ..."
+            Write-Warn2 "Retrying in ${delay}s (download will resume from partial if present) ..."
             Start-Sleep -Seconds $delay
         }
     }
@@ -760,43 +1013,59 @@ function Install-ProjectSdks {
     Write-Step "Activating project-local SDK versions (.vfox/sdks) ..."
     foreach ($name in $resolved.Keys) {
         $ver = $resolved[$name]
-        & vfox use -p "$name@$ver" 2>$null
-        $bin = Join-Path $PSScriptRoot ".vfox\sdks\$name\bin"
-        if (Test-Path $bin) { Add-PathFront $bin }
+        Write-Step "vfox use -p $name@$ver ..."
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $useOut = & vfox use -p "$name@$ver" 2>&1 | Out-String
+        $ErrorActionPreference = $prev
+        if ($useOut) { Write-Host $useOut.TrimEnd() }
+    }
+
+    # Critical: vfox use updates symlinks/config but does NOT mutate $env:Path until env is applied
+    [void](Import-VfoxEnv)
+
+    foreach ($name in $resolved.Keys) {
+        $ver = $resolved[$name]
         $sdkLink = Join-Path $PSScriptRoot ".vfox\sdks\$name"
-        if (Test-Path $sdkLink) {
-            if ($name -eq "rust") {
-                Merge-RustStdIntoSysroot -SdkRoot $sdkLink
+        if ($name -eq "rust") {
+            if (Test-RustBinsAvailable) {
+                $sdkRoot = Resolve-RustSdkRoot -Version $ver
+                if ($sdkRoot) {
+                    Write-Info "Rust SDK root: $sdkRoot"
+                    Merge-RustStdIntoSysroot -SdkRoot $sdkRoot
+                }
+                continue
             }
-            $nested = Join-Path $sdkLink "bin"
-            if (Test-Path $nested) { Add-PathFront $nested }
+
+            $sdkRoot = Resolve-RustSdkRoot -Version $ver
+            if ($sdkRoot) {
+                Write-Warn2 "vfox env did not put rustc on PATH - adding bins from $sdkRoot"
+                [void](Add-RustBinsToPath -SdkRoot $sdkRoot)
+            } else {
+                Write-Warn2 "Could not resolve rust@$ver SDK root with rustc.exe/cargo.exe"
+            }
+            continue
+        }
+
+        if (Test-Path -LiteralPath $sdkLink) {
+            $bin = Join-Path $sdkLink "bin"
+            if (Test-Path -LiteralPath $bin) { Add-PathFront $bin }
             Add-PathFront $sdkLink
         }
     }
 
-    $sdksRoot = Join-Path $PSScriptRoot ".vfox\sdks"
-    if (Test-Path $sdksRoot) {
-        Get-ChildItem $sdksRoot -Directory | ForEach-Object {
-            $b = Join-Path $_.FullName "bin"
-            if (Test-Path $b) { Add-PathFront $b }
-            Add-PathFront $_.FullName
-            foreach ($sub in @("rustc\bin", "cargo\bin", "clippy-preview\bin", "rustfmt-preview\bin")) {
-                $p = Join-Path $_.FullName $sub
-                if (Test-Path $p) { Add-PathFront $p }
-            }
-            Get-ChildItem $_.FullName -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-                $innerBin = Join-Path $_.FullName "bin"
-                if (Test-Path $innerBin) { Add-PathFront $innerBin }
-            }
+    if (-not (Test-RustBinsAvailable)) {
+        $ver = $resolved["rust"]
+        $looked = @(
+            (Join-Path $PSScriptRoot ".vfox\sdks\rust\rustc\bin\rustc.exe"),
+            (Join-Path (Get-VfoxHome) "cache\rust\v-$ver\rust-$ver\rustc\bin\rustc.exe"),
+            (Join-Path $env:USERPROFILE ".version-fox\cache\rust\v-$ver\rust-$ver\rustc\bin\rustc.exe"),
+            (Join-Path $env:USERPROFILE ".vfox\cache\rust\v-$ver\rust-$ver\rustc\bin\rustc.exe")
+        )
+        foreach ($p in $looked) {
+            Write-Warn2 ("looked for rustc at: {0} (exists={1})" -f $p, (Test-Path -LiteralPath $p))
         }
-    }
-
-    $cargoHome = Join-Path $PSScriptRoot ".vfox\sdks\rust\cargo"
-    if (Test-Path $cargoHome) {
-        $env:CARGO_HOME = $cargoHome
-    }
-
-    if (-not (Test-Command rustc) -or -not (Test-Command cargo)) {
+        Write-Warn2 ("PATH head: {0}" -f (($env:Path -split ";" | Select-Object -First 8) -join "; "))
         throw "rustc/cargo not on PATH after vfox install. Check .vfox.toml and plugin layout."
     }
     Write-Info "rustc $(rustc --version)"
