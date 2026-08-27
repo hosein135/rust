@@ -528,7 +528,7 @@ function Resolve-VfoxPath {
 
     foreach ($p in @(
             (Join-Path $env:LOCALAPPDATA "vfox"),
-            (Join-Path $HOME "AppData\Local\vfox"),
+            (Join-Path $env:USERPROFILE "AppData\Local\vfox"),
             (Join-Path $env:ProgramFiles "vfox")
         )) {
         $candidate = Join-Path $p "vfox.exe"
@@ -584,7 +584,14 @@ function Ensure-Vfox {
     }
 
     Write-Info "Activating vfox PowerShell hook ..."
-    Invoke-Expression "$( & vfox activate pwsh )"
+    try {
+        $activate = & vfox activate pwsh 2>$null | Out-String
+        Invoke-VfoxPwshSnippet -Snippet $activate
+    } catch {
+        Write-Warn2 "vfox activate warning: $($_.Exception.Message)"
+        # Fallback: still try raw activate for PATH hooks
+        try { Invoke-Expression "$( & vfox activate pwsh )" } catch { }
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -673,6 +680,31 @@ function Get-VfoxRustCacheRoot {
     return $preferred
 }
 
+function Invoke-VfoxPwshSnippet {
+    <#
+    .SYNOPSIS
+      Evaluate vfox-generated PowerShell safely.
+      Some vfox builds emit `$HOME=...` which conflicts with PowerShell's
+      read-only automatic $HOME variable — rewrite those to $env:HOME.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Snippet)
+
+    if (-not $Snippet -or -not $Snippet.Trim()) { return }
+
+    # Rewrite bare $HOME assignments (read-only automatic variable in Windows PowerShell)
+    $safe = [regex]::Replace(
+        $Snippet,
+        '(?m)(?<!\$env:)(?<![\w])\$HOME\s*=',
+        '$env:HOME='
+    )
+    # Drop other known automatic/read-only targets if ever emitted
+    $safe = ($safe -split "`r?`n" | Where-Object {
+        $_ -notmatch '(?i)^\s*\$(PID|PWD|PSScriptRoot|PSVersionTable|Host|true|false|null)\s*='
+    }) -join "`n"
+
+    Invoke-Expression $safe
+}
+
 function Import-VfoxEnv {
     <#
     .SYNOPSIS
@@ -682,7 +714,7 @@ function Import-VfoxEnv {
     try {
         $snippet = & vfox env -s pwsh 2>$null | Out-String
         if ($snippet -and $snippet.Trim()) {
-            Invoke-Expression $snippet
+            Invoke-VfoxPwshSnippet -Snippet $snippet
             Write-Info "Applied vfox env (PATH + SDK vars) to this session"
             return $true
         }
