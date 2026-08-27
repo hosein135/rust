@@ -16,10 +16,10 @@ See [`.vfox.toml`](.vfox.toml):
 
 ```toml
 [tools]
-rust = "1.90.0"
+rust = "1.98.0"
 ```
 
-`vfox-run.ps1` retries failed downloads and falls back through other stables (`1.89`, `1.88`, …) if needed, then updates `.vfox.toml` to the version that worked.
+`vfox-run.ps1` installs **only this single Rust stable** (current stable release). Downloads show a live progress bar (bytes, %, speed). Failed downloads retry the same version — there is no multi-version fallback.
 ## Windows: setup and run
 
 Double-click `run.cmd`, or from an **elevated** PowerShell:
@@ -33,7 +33,7 @@ What the script does (winget → vfox → rust stack):
 
 1. Install **winget** only if missing (AppX deps: VCLibs, UI.Xaml, DesktopAppInstaller)
 2. Install **vfox** via winget if missing
-3. `vfox add rust` + install Rust from `.vfox.toml` (retries + latest-stable fallbacks)
+3. `vfox add rust` + download/install Rust **1.98.0** from `.vfox.toml` (progress bar + retries)
 4. Install **VS 2022 Build Tools** (MSVC) if `link.exe` is missing
 5. `cargo run` the IDE
 
@@ -55,7 +55,7 @@ Useful flags:
 
 ```powershell
 vfox activate pwsh
-vfox use -p rust@1.90.0
+vfox use -p rust@1.98.0
 cargo run
 ```
 

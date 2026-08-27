@@ -15,7 +15,7 @@
 #      winget is missing.
 #
 # Then:
-#   8. vfox (via winget) + tools from .vfox.toml (rust, with retry + stable fallbacks)
+#   8. vfox (via winget) + tools from .vfox.toml (single pinned rust, download w/ progress)
 #   9. Visual Studio 2022 Build Tools (MSVC linker for pc-windows-msvc)
 #  10. cargo build / cargo run  (Ctrl+C stops the IDE process tree)
 #
@@ -62,10 +62,37 @@ function Format-ByteSize {
     return "$Bytes B"
 }
 
+function Write-DownloadProgressLine {
+    param(
+        [string]$Label,
+        [long]$Received,
+        [long]$Total,
+        [long]$SpeedBytesPerSec,
+        [ref]$LastPct
+    )
+    if ($Total -gt 0) {
+        $pct = [int][Math]::Min(100, ($Received * 100) / $Total)
+        if ($pct -eq $LastPct.Value -and ($Received % (512KB)) -ge 256KB) { return }
+        $LastPct.Value = $pct
+        $status = "{0} / {1}  ({2}/s)" -f (Format-ByteSize $Received), (Format-ByteSize $Total), (Format-ByteSize $SpeedBytesPerSec)
+        Write-Progress -Activity "Downloading $Label" -Status $status -PercentComplete $pct
+        $barWidth = 28
+        $filled = [int](($barWidth * $pct) / 100)
+        $bar = ("#" * $filled).PadRight($barWidth, "-")
+        Write-Host ("`r  [{0}] {1,3}%  {2}" -f $bar, $pct, $status) -NoNewline
+        try { [Console]::Out.Flush() } catch { }
+    } else {
+        $status = "{0} received  ({1}/s)" -f (Format-ByteSize $Received), (Format-ByteSize $SpeedBytesPerSec)
+        Write-Progress -Activity "Downloading $Label" -Status $status -PercentComplete -1
+        Write-Host ("`r  [---------- unknown size ----------]  {0}" -f $status) -NoNewline
+        try { [Console]::Out.Flush() } catch { }
+    }
+}
+
 function Save-UrlToFile {
     <#
     .SYNOPSIS
-      Download a URL to disk with a Write-Progress bar (bytes + %).
+      Download a URL to disk with a live console progress bar (bytes + %).
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Uri,
@@ -84,8 +111,8 @@ function Save-UrlToFile {
     $request = [System.Net.HttpWebRequest]::Create($Uri)
     $request.UserAgent = "verilog-ide-vfox-run"
     $request.AllowAutoRedirect = $true
-    $request.Timeout = 1000 * 60 * 10
-    $request.ReadWriteTimeout = 1000 * 60 * 10
+    $request.Timeout = 1000 * 60 * 30
+    $request.ReadWriteTimeout = 1000 * 60 * 30
 
     $response = $null
     $inStream = $null
@@ -93,6 +120,9 @@ function Save-UrlToFile {
     try {
         $response = $request.GetResponse()
         $total = [long]$response.ContentLength
+        if ($total -gt 0) {
+            Write-Host ("  Size: {0}" -f (Format-ByteSize $total)) -ForegroundColor DarkGray
+        }
         $inStream = $response.GetResponseStream()
         $outStream = [System.IO.File]::Create($OutFile)
 
@@ -100,6 +130,7 @@ function Save-UrlToFile {
         $received = [long]0
         $lastPct = -1
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $lastUi = [System.Diagnostics.Stopwatch]::StartNew()
 
         while ($true) {
             $read = $inStream.Read($buffer, 0, $buffer.Length)
@@ -107,24 +138,13 @@ function Save-UrlToFile {
             $outStream.Write($buffer, 0, $read)
             $received += $read
 
-            $elapsedSec = [Math]::Max($sw.Elapsed.TotalSeconds, 0.001)
-            $speed = $received / $elapsedSec
-
-            if ($total -gt 0) {
-                $pct = [int][Math]::Min(100, ($received * 100) / $total)
-                if ($pct -ne $lastPct -or ($received % (512KB)) -lt $read) {
-                    $lastPct = $pct
-                    $status = "{0} / {1}  ({2}/s)" -f (Format-ByteSize $received), (Format-ByteSize $total), (Format-ByteSize ([long]$speed))
-                    Write-Progress -Activity "Downloading $Label" -Status $status -PercentComplete $pct
-                    $barWidth = 28
-                    $filled = [int](($barWidth * $pct) / 100)
-                    $bar = ("#" * $filled).PadRight($barWidth, "-")
-                    Write-Host ("`r  [{0}] {1,3}%  {2}" -f $bar, $pct, $status) -NoNewline
-                }
-            } else {
-                $status = "{0} received  ({1}/s)" -f (Format-ByteSize $received), (Format-ByteSize ([long]$speed))
-                Write-Progress -Activity "Downloading $Label" -Status $status -PercentComplete -1
-                Write-Host ("`r  [---------- unknown size ----------]  {0}" -f $status) -NoNewline
+            # Refresh UI at least ~4x/sec so large downloads always look alive
+            if ($lastUi.ElapsedMilliseconds -ge 250 -or $read -ge $buffer.Length) {
+                $elapsedSec = [Math]::Max($sw.Elapsed.TotalSeconds, 0.001)
+                $speed = [long]($received / $elapsedSec)
+                Write-DownloadProgressLine -Label $Label -Received $received -Total $total `
+                    -SpeedBytesPerSec $speed -LastPct ([ref]$lastPct)
+                $lastUi.Restart()
             }
         }
 
@@ -508,53 +528,135 @@ function Test-VfoxSdkInstalled {
     return $false
 }
 
-function Get-VfoxInstalledVersions {
-    param([string]$Name)
-    $found = [System.Collections.Generic.List[string]]::new()
-    try {
-        $list = & vfox list $Name 2>$null | Out-String
-        [regex]::Matches($list, "\d+\.\d+\.\d+") | ForEach-Object {
-            if (-not $found.Contains($_.Value)) { [void]$found.Add($_.Value) }
-        }
-    } catch { }
-    return @($found)
+function Get-VfoxRustCacheRoot {
+    foreach ($root in @(
+            (Join-Path $env:USERPROFILE ".vfox\cache\rust"),
+            (Join-Path $env:USERPROFILE ".version-fox\cache\rust")
+        )) {
+        if (Test-Path (Split-Path $root -Parent)) { return $root }
+    }
+    return (Join-Path $env:USERPROFILE ".vfox\cache\rust")
 }
 
 function Clear-VfoxRustCache {
     param([string]$Version)
-    $roots = @(
-        (Join-Path $env:USERPROFILE ".vfox\cache\rust"),
-        (Join-Path $env:USERPROFILE ".version-fox\cache\rust")
-    )
-    foreach ($root in $roots) {
-        if (-not (Test-Path $root)) { continue }
-        Get-ChildItem $root -ErrorAction SilentlyContinue | Where-Object {
-            $_.Name -match [regex]::Escape($Version) -or $_.Name -eq "v-$Version"
-        } | ForEach-Object {
-            Write-Warn2 "Clearing corrupt cache: $($_.FullName)"
-            Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-        }
-        # Partial download artifacts
-        Get-ChildItem $root -Filter "*.tmp" -ErrorAction SilentlyContinue |
-            Remove-Item -Force -ErrorAction SilentlyContinue
-        Get-ChildItem $root -Filter "*$Version*.tar.gz*" -ErrorAction SilentlyContinue |
-            Remove-Item -Force -ErrorAction SilentlyContinue
+    $root = Get-VfoxRustCacheRoot
+    if (-not (Test-Path $root)) { return }
+    Get-ChildItem $root -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -match [regex]::Escape($Version) -or $_.Name -eq "v-$Version"
+    } | ForEach-Object {
+        Write-Warn2 "Clearing corrupt cache: $($_.FullName)"
+        Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
     }
+    Get-ChildItem $root -Filter "*.tmp" -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem $root -Filter "*$Version*.tar.gz*" -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
-function Set-VfoxTomlRustVersion {
-    param([string]$Version)
-    $toml = Join-Path $PSScriptRoot ".vfox.toml"
-    $content = Get-Content -LiteralPath $toml -Raw
-    $updated = [regex]::Replace(
-        $content,
-        '(?m)^(\s*rust\s*=\s*")([^"]+)("\s*)$',
-        "`${1}$Version`${3}"
-    )
-    if ($updated -ne $content) {
-        Set-Content -LiteralPath $toml -Value $updated -NoNewline
-        Write-Info "Updated .vfox.toml rust = `"$Version`""
+function Get-RustDistTriple {
+    $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
+        "ARM64" { "aarch64" }
+        "x86"   { "i686" }
+        default { "x86_64" }
     }
+    return "$arch-pc-windows-msvc"
+}
+
+function Get-RustDistUrl {
+    param([string]$Version)
+    return ("https://static.rust-lang.org/dist/rust-{0}-{1}.tar.gz" -f $Version, (Get-RustDistTriple))
+}
+
+function Install-RustWithProgress {
+    <#
+    .SYNOPSIS
+      Download the single pinned Rust stable with a live progress bar, unpack into
+      the vfox cache layout, then let vfox register/use it. No version fallbacks.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Version,
+        [int]$Attempts = 3
+    )
+
+    for ($i = 1; $i -le $Attempts; $i++) {
+        if ((-not $ForceSetup) -and (Test-VfoxSdkInstalled -Name "rust" -Version $Version)) {
+            Write-Info "rust@$Version already installed - skip download"
+            return $true
+        }
+
+        Write-Step "Installing rust@$Version (attempt $i/$Attempts) - single stable pin ..."
+        if ($ForceSetup) { Clear-VfoxRustCache -Version $Version }
+
+        $url = Get-RustDistUrl -Version $Version
+        $triple = Get-RustDistTriple
+        $tmpRoot = Join-Path $env:TEMP "verilog-ide-rust-$Version"
+        $tmpTar = Join-Path $tmpRoot "rust-$Version-$triple.tar.gz"
+        $extractRoot = Join-Path $tmpRoot "extract"
+        $cacheRoot = Get-VfoxRustCacheRoot
+        $pkgDir = Join-Path $cacheRoot "v-$Version"
+        $destDir = Join-Path $pkgDir "rust-$Version"
+
+        try {
+            if (Test-Path $tmpRoot) { Remove-Item $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue }
+            New-Item -ItemType Directory -Force -Path $tmpRoot | Out-Null
+
+            Save-UrlToFile -Uri $url -OutFile $tmpTar -Label "Rust $Version ($triple)"
+
+            Write-Step "Unpacking Rust $Version ..."
+            Write-Host "  This can take a minute for a ~400 MB archive." -ForegroundColor DarkGray
+            if (Test-Path $extractRoot) { Remove-Item $extractRoot -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
+
+            if (-not (Test-Command tar)) {
+                throw "tar.exe is required to unpack Rust (built into Windows 10 1809+)."
+            }
+            & tar -xzf $tmpTar -C $extractRoot
+            if ($LASTEXITCODE -ne 0) { throw "tar extract failed (exit $LASTEXITCODE)" }
+
+            $inner = Get-ChildItem -LiteralPath $extractRoot -Directory -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if (-not $inner) { throw "Unexpected Rust archive layout (no top-level folder)" }
+
+            Write-Step "Installing into vfox cache: $destDir"
+            if (Test-Path $pkgDir) { Remove-Item $pkgDir -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+            Get-ChildItem -LiteralPath $inner.FullName -Force | ForEach-Object {
+                Move-Item -LiteralPath $_.FullName -Destination $destDir -Force
+            }
+
+            # Prefer vfox install so metadata/hooks stay consistent; cache hit should be instant
+            # if layout already matches. If vfox still tries a network fetch, PreInstall uses HTTPS
+            # — we already have files, so CheckRuntimeExist should short-circuit.
+            $prev = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            $out = & vfox install "rust@$Version" 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            $ErrorActionPreference = $prev
+            if ($out) { Write-Host $out }
+
+            if ($code -eq 0 -or (Test-Path (Join-Path $destDir "rustc"))) {
+                Write-Info "rust@$Version installed"
+                return $true
+            }
+
+            Write-Warn2 "rust@$Version install failed (exit $code)"
+        } catch {
+            Write-Warn2 "rust@$Version install error: $($_.Exception.Message)"
+        } finally {
+            if (Test-Path $tmpRoot) {
+                Remove-Item $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        Clear-VfoxRustCache -Version $Version
+        if ($i -lt $Attempts) {
+            $delay = 3 * $i
+            Write-Warn2 "Retrying in ${delay}s ..."
+            Start-Sleep -Seconds $delay
+        }
+    }
+    return $false
 }
 
 function Install-VfoxSdkWithRetry {
@@ -563,6 +665,10 @@ function Install-VfoxSdkWithRetry {
         [Parameter(Mandatory = $true)][string]$Version,
         [int]$Attempts = 3
     )
+    if ($Name -eq "rust") {
+        return (Install-RustWithProgress -Version $Version -Attempts $Attempts)
+    }
+
     for ($i = 1; $i -le $Attempts; $i++) {
         if ((-not $ForceSetup) -and (Test-VfoxSdkInstalled -Name $Name -Version $Version)) {
             Write-Info "$Name@$Version already installed - skip download"
@@ -582,36 +688,44 @@ function Install-VfoxSdkWithRetry {
         }
 
         Write-Warn2 "$Name@$Version install failed (exit $code)"
-        if ($Name -eq "rust") { Clear-VfoxRustCache -Version $Version }
         if ($i -lt $Attempts) {
             $delay = 3 * $i
-            Write-Warn2 "Retrying in ${delay}s (network PROTOCOL_ERROR / stream errors are often transient) ..."
+            Write-Warn2 "Retrying in ${delay}s ..."
             Start-Sleep -Seconds $delay
         }
     }
     return $false
 }
 
-function Get-RustVersionCandidates {
-    param([string]$Preferred)
-    # Preferred pin first, then latest stable, then recent stables, then anything already cached/installed.
-    # Rust has no formal LTS channel; "latest" (1.90.0) is the closest stable track.
-    $ordered = [System.Collections.Generic.List[string]]::new()
-    foreach ($v in @(
-            $Preferred,
-            "1.90.0",  # latest stable (vfox)
-            "1.89.0",
-            "1.88.0",
-            "1.87.0",
-            "1.85.1",
-            "1.85.0"
-        )) {
-        if ($v -and -not $ordered.Contains($v)) { [void]$ordered.Add($v) }
+function Merge-RustStdIntoSysroot {
+    param([string]$SdkRoot)
+    if (-not $SdkRoot -or -not (Test-Path $SdkRoot)) { return }
+
+    $rustcLib = Join-Path $SdkRoot "rustc\lib\rustlib"
+    $candidates = @(
+        (Get-ChildItem -Path $SdkRoot -Directory -Filter "rust-std-*" -ErrorAction SilentlyContinue)
+    ) | Where-Object { $_ }
+
+    foreach ($stdComp in $candidates) {
+        $stdLib = Join-Path $stdComp.FullName "lib\rustlib"
+        if (-not (Test-Path $stdLib)) { continue }
+        $marker = Get-ChildItem -Path $stdLib -Directory -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Name -like "*-pc-windows-msvc" -or
+                $_.Name -like "*-unknown-linux-*" -or
+                $_.Name -like "*-apple-darwin"
+            } |
+            Select-Object -First 1
+        if ($marker -and (Test-Path (Join-Path $rustcLib $marker.Name))) {
+            Write-Info "rust-std already merged into rustc sysroot ($($marker.Name))"
+            return
+        }
+        Write-Step "Merging $($stdComp.Name) into rustc sysroot (vfox standalone layout) ..."
+        New-Item -ItemType Directory -Force -Path $rustcLib | Out-Null
+        Copy-Item -Path (Join-Path $stdLib "*") -Destination $rustcLib -Recurse -Force
+        Write-Info "rust-std merged into $rustcLib"
+        return
     }
-    foreach ($v in (Get-VfoxInstalledVersions -Name "rust")) {
-        if (-not $ordered.Contains($v)) { [void]$ordered.Add($v) }
-    }
-    return @($ordered)
 }
 
 function Install-ProjectSdks {
@@ -629,24 +743,11 @@ function Install-ProjectSdks {
     foreach ($name in $tools.Keys) {
         $ver = $tools[$name]
         if ($name -eq "rust") {
-            $ok = $false
-            $used = $null
-            foreach ($candidate in (Get-RustVersionCandidates -Preferred $ver)) {
-                if (Install-VfoxSdkWithRetry -Name "rust" -Version $candidate -Attempts 3) {
-                    $ok = $true
-                    $used = $candidate
-                    break
-                }
-                Write-Warn2 "Giving up on rust@$candidate - trying next candidate ..."
+            Write-Info "Using single pinned Rust stable: $ver (no version fallbacks)"
+            if (-not (Install-VfoxSdkWithRetry -Name "rust" -Version $ver -Attempts 3)) {
+                throw "Failed to install rust@$ver. Check network / DNS for static.rust-lang.org and re-run."
             }
-            if (-not $ok) {
-                throw "Failed to install rust (tried pin + latest stable fallbacks). Check network / proxy and re-run."
-            }
-            if ($used -ne $ver) {
-                Write-Warn2 "Pinned rust@$ver unavailable; using rust@$used instead"
-                Set-VfoxTomlRustVersion -Version $used
-            }
-            $resolved[$name] = $used
+            $resolved[$name] = $ver
             continue
         }
 
