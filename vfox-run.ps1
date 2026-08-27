@@ -15,7 +15,7 @@
 #      winget is missing.
 #
 # Then:
-#   8. vfox (via winget) + tools from .vfox.toml (rust = "1.88.0")
+#   8. vfox (via winget) + tools from .vfox.toml (rust, with retry + stable fallbacks)
 #   9. Visual Studio 2022 Build Tools (MSVC linker for pc-windows-msvc)
 #  10. cargo build / cargo run  (Ctrl+C stops the IDE process tree)
 #
@@ -484,43 +484,134 @@ function Test-VfoxSdkInstalled {
     param([string]$Name, [string]$Version)
     try {
         $list = & vfox list $Name 2>$null | Out-String
+        # Match "1.88.0" as a whole version token (vfox marks current with ->)
+        if ($list -match "(?m)(?:^|\s|->\s*)$([regex]::Escape($Version))(?:\s|<|$)") {
+            return $true
+        }
         if ($list -match [regex]::Escape($Version)) { return $true }
     } catch { }
     $sdk = Join-Path $PSScriptRoot ".vfox\sdks\$Name"
     if (Test-Path $sdk) {
         try {
-            $target = (Get-Item $sdk).Target
-            if ($target -and ($target -match [regex]::Escape($Version))) { return $true }
+            $item = Get-Item $sdk -ErrorAction SilentlyContinue
+            $target = $null
+            if ($item.LinkType) { $target = $item.Target }
+            if (-not $target) { $target = $item.FullName }
+            if ($target -and ("$target" -match [regex]::Escape($Version))) { return $true }
         } catch { }
+    }
+    # Usable rustc already at this version
+    if ($Name -eq "rust" -and (Test-Command rustc)) {
+        $rv = (& rustc --version 2>$null | Out-String)
+        if ($rv -match [regex]::Escape($Version)) { return $true }
     }
     return $false
 }
 
-function Merge-RustStdIntoSysroot {
-    param([string]$SdkRoot)
-    if (-not $SdkRoot -or -not (Test-Path $SdkRoot)) { return }
-
-    $rustcLib = Join-Path $SdkRoot "rustc\lib\rustlib"
-    $candidates = @(
-        (Get-ChildItem -Path $SdkRoot -Directory -Filter "rust-std-*" -ErrorAction SilentlyContinue)
-    ) | Where-Object { $_ }
-
-    foreach ($stdComp in $candidates) {
-        $stdLib = Join-Path $stdComp.FullName "lib\rustlib"
-        if (-not (Test-Path $stdLib)) { continue }
-        $marker = Get-ChildItem -Path $stdLib -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -like "*-pc-windows-msvc" -or $_.Name -like "*-unknown-linux-*" -or $_.Name -like "*-apple-darwin" } |
-            Select-Object -First 1
-        if ($marker -and (Test-Path (Join-Path $rustcLib $marker.Name))) {
-            Write-Info "rust-std already merged into rustc sysroot ($($marker.Name))"
-            return
+function Get-VfoxInstalledVersions {
+    param([string]$Name)
+    $found = [System.Collections.Generic.List[string]]::new()
+    try {
+        $list = & vfox list $Name 2>$null | Out-String
+        [regex]::Matches($list, "\d+\.\d+\.\d+") | ForEach-Object {
+            if (-not $found.Contains($_.Value)) { [void]$found.Add($_.Value) }
         }
-        Write-Step "Merging $($stdComp.Name) into rustc sysroot (vfox standalone layout) ..."
-        New-Item -ItemType Directory -Force -Path $rustcLib | Out-Null
-        Copy-Item -Path (Join-Path $stdLib "*") -Destination $rustcLib -Recurse -Force
-        Write-Info "rust-std merged into $rustcLib"
-        return
+    } catch { }
+    return @($found)
+}
+
+function Clear-VfoxRustCache {
+    param([string]$Version)
+    $roots = @(
+        (Join-Path $env:USERPROFILE ".vfox\cache\rust"),
+        (Join-Path $env:USERPROFILE ".version-fox\cache\rust")
+    )
+    foreach ($root in $roots) {
+        if (-not (Test-Path $root)) { continue }
+        Get-ChildItem $root -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -match [regex]::Escape($Version) -or $_.Name -eq "v-$Version"
+        } | ForEach-Object {
+            Write-Warn2 "Clearing corrupt cache: $($_.FullName)"
+            Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        # Partial download artifacts
+        Get-ChildItem $root -Filter "*.tmp" -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+        Get-ChildItem $root -Filter "*$Version*.tar.gz*" -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Set-VfoxTomlRustVersion {
+    param([string]$Version)
+    $toml = Join-Path $PSScriptRoot ".vfox.toml"
+    $content = Get-Content -LiteralPath $toml -Raw
+    $updated = [regex]::Replace(
+        $content,
+        '(?m)^(\s*rust\s*=\s*")([^"]+)("\s*)$',
+        "`${1}$Version`${3}"
+    )
+    if ($updated -ne $content) {
+        Set-Content -LiteralPath $toml -Value $updated -NoNewline
+        Write-Info "Updated .vfox.toml rust = `"$Version`""
+    }
+}
+
+function Install-VfoxSdkWithRetry {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Version,
+        [int]$Attempts = 3
+    )
+    for ($i = 1; $i -le $Attempts; $i++) {
+        if ((-not $ForceSetup) -and (Test-VfoxSdkInstalled -Name $Name -Version $Version)) {
+            Write-Info "$Name@$Version already installed - skip download"
+            return $true
+        }
+        Write-Step "Installing $Name@$Version (attempt $i/$Attempts) ..."
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $out = & vfox install "$Name@$Version" 2>&1 | Out-String
+        $code = $LASTEXITCODE
+        $ErrorActionPreference = $prev
+        if ($out) { Write-Host $out }
+
+        if ($code -eq 0 -or (Test-VfoxSdkInstalled -Name $Name -Version $Version)) {
+            Write-Info "$Name@$Version installed"
+            return $true
+        }
+
+        Write-Warn2 "$Name@$Version install failed (exit $code)"
+        if ($Name -eq "rust") { Clear-VfoxRustCache -Version $Version }
+        if ($i -lt $Attempts) {
+            $delay = 3 * $i
+            Write-Warn2 "Retrying in ${delay}s (network PROTOCOL_ERROR / stream errors are often transient) ..."
+            Start-Sleep -Seconds $delay
+        }
+    }
+    return $false
+}
+
+function Get-RustVersionCandidates {
+    param([string]$Preferred)
+    # Preferred pin first, then latest stable, then recent stables, then anything already cached/installed.
+    # Rust has no formal LTS channel; "latest" (1.90.0) is the closest stable track.
+    $ordered = [System.Collections.Generic.List[string]]::new()
+    foreach ($v in @(
+            $Preferred,
+            "1.90.0",  # latest stable (vfox)
+            "1.89.0",
+            "1.88.0",
+            "1.87.0",
+            "1.85.1",
+            "1.85.0"
+        )) {
+        if ($v -and -not $ordered.Contains($v)) { [void]$ordered.Add($v) }
+    }
+    foreach ($v in (Get-VfoxInstalledVersions -Name "rust")) {
+        if (-not $ordered.Contains($v)) { [void]$ordered.Add($v) }
+    }
+    return @($ordered)
 }
 
 function Install-ProjectSdks {
@@ -534,22 +625,40 @@ function Install-ProjectSdks {
         Write-Info "rust plugin already installed - skip"
     }
 
+    $resolved = @{}
     foreach ($name in $tools.Keys) {
         $ver = $tools[$name]
-        if ((-not $ForceSetup) -and (Test-VfoxSdkInstalled -Name $name -Version $ver)) {
-            Write-Info "$name@$ver already installed - skip download"
+        if ($name -eq "rust") {
+            $ok = $false
+            $used = $null
+            foreach ($candidate in (Get-RustVersionCandidates -Preferred $ver)) {
+                if (Install-VfoxSdkWithRetry -Name "rust" -Version $candidate -Attempts 3) {
+                    $ok = $true
+                    $used = $candidate
+                    break
+                }
+                Write-Warn2 "Giving up on rust@$candidate - trying next candidate ..."
+            }
+            if (-not $ok) {
+                throw "Failed to install rust (tried pin + latest stable fallbacks). Check network / proxy and re-run."
+            }
+            if ($used -ne $ver) {
+                Write-Warn2 "Pinned rust@$ver unavailable; using rust@$used instead"
+                Set-VfoxTomlRustVersion -Version $used
+            }
+            $resolved[$name] = $used
             continue
         }
-        Write-Step "Installing $name@$ver ..."
-        & vfox install "$name@$ver"
-        if ($LASTEXITCODE -ne 0) {
+
+        if (-not (Install-VfoxSdkWithRetry -Name $name -Version $ver -Attempts 3)) {
             throw "Failed to install $name@$ver"
         }
+        $resolved[$name] = $ver
     }
 
     Write-Step "Activating project-local SDK versions (.vfox/sdks) ..."
-    foreach ($name in $tools.Keys) {
-        $ver = $tools[$name]
+    foreach ($name in $resolved.Keys) {
+        $ver = $resolved[$name]
         & vfox use -p "$name@$ver" 2>$null
         $bin = Join-Path $PSScriptRoot ".vfox\sdks\$name\bin"
         if (Test-Path $bin) { Add-PathFront $bin }
@@ -570,7 +679,6 @@ function Install-ProjectSdks {
             $b = Join-Path $_.FullName "bin"
             if (Test-Path $b) { Add-PathFront $b }
             Add-PathFront $_.FullName
-            # Official Rust standalone layout: rustc/bin, cargo/bin
             foreach ($sub in @("rustc\bin", "cargo\bin", "clippy-preview\bin", "rustfmt-preview\bin")) {
                 $p = Join-Path $_.FullName $sub
                 if (Test-Path $p) { Add-PathFront $p }
@@ -582,7 +690,6 @@ function Install-ProjectSdks {
         }
     }
 
-    # Ensure CARGO_HOME points at the vfox cargo tree when present
     $cargoHome = Join-Path $PSScriptRoot ".vfox\sdks\rust\cargo"
     if (Test-Path $cargoHome) {
         $env:CARGO_HOME = $cargoHome
