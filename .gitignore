@@ -1,0 +1,25 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# vfox local SDK links
+.vfox/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.o
+*.exe
+!vfox-run.ps1
+!run.cmd
+
+# Local data
+.verilog-ide-data/
+*.log
