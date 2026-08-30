@@ -3,7 +3,7 @@
 # run.sh — Auto setup-or-run for Verilog IDE (Linux / macOS / WSL)
 #
 # Host bootstrap (no OS package manager): curl (static binary if missing) + Nix
-# (official installer). Rust, GPUI build deps, and the rest come from flake.nix
+# (official installer). Rust, iced build deps, and the rest come from flake.nix
 # (nixpkgs 25.05). Never apt/dnf/pacman/brew. Never Docker.
 #
 # Package policy: besides curl + Nix, every tool must be a flake/Nix package.
@@ -583,16 +583,6 @@ setup_first_time() {
 }
 
 run_gui() {
-    if is_linux && [ ! -f /etc/NIXOS ]; then
-        for wrapper in nixVulkanIntel nixGLIntel nixVulkanMesa nixGL; do
-            if command -v "${wrapper}" >/dev/null 2>&1; then
-                info "Using ${wrapper} for GPU/Vulkan ..."
-                exec "${wrapper}" "$@"
-            fi
-        done
-        warn "No nixGL wrapper found — GUI may fail on non-NixOS Linux."
-        warn "Install nixGL, e.g.: nix profile install github:nix-community/nixGL#nixVulkanIntel"
-    fi
     exec "$@"
 }
 

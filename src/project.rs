@@ -35,12 +35,6 @@ impl IdeProject {
         Self { name, root }
     }
 
-    pub fn relative(&self, path: &Path) -> String {
-        path.strip_prefix(&self.root)
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"))
-    }
-
     pub fn build_tree(&self) -> TreeNode {
         build_dir_tree(&self.root)
     }
@@ -61,20 +55,6 @@ pub fn is_verilog_path(path: &Path) -> bool {
         path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()).as_deref(),
         Some("v" | "vh" | "sv" | "svh" | "vl")
     )
-}
-
-pub fn is_testbench_path(path: &Path) -> bool {
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    is_verilog_path(path)
-        && (name.contains("_tb")
-            || name.contains("tb_")
-            || name.ends_with("tb.v")
-            || name.ends_with("tb.sv")
-            || name.contains("testbench"))
 }
 
 fn should_skip(name: &str) -> bool {
@@ -130,46 +110,14 @@ fn build_dir_tree(dir: &Path) -> TreeNode {
 }
 
 pub fn load_file(path: &Path) -> Result<OpenFile, String> {
-    let content = std::fs::read_to_string(path).map_err(|e| format!("Read {}: {e}", path.display()))?;
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("Read {}: {e}", path.display()))?;
     Ok(OpenFile {
         path: path.to_path_buf(),
         content,
         dirty: false,
         cursor: 0,
     })
-}
-
-pub fn build_tree_items(root: &Path, dir: &Path) -> Vec<gpui_component::tree::TreeItem> {
-    use gpui_component::tree::TreeItem;
-
-    let mut items = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-        entries.sort_by_key(|e| {
-            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            (!is_dir, e.file_name().to_string_lossy().to_lowercase())
-        });
-        for entry in entries {
-            let path = entry.path();
-            let fname = entry.file_name().to_string_lossy().to_string();
-            if should_skip(&fname) || fname.starts_with('.') {
-                continue;
-            }
-            let id = path.to_string_lossy().to_string();
-            if path.is_dir() {
-                let children = build_tree_items(root, &path);
-                items.push(TreeItem::new(id, fname).children(children));
-            } else if is_verilog_path(&path)
-                || matches!(
-                    path.extension().and_then(|e| e.to_str()),
-                    Some("md" | "toml" | "txt" | "json" | "cfg" | "do" | "tcl")
-                )
-            {
-                items.push(TreeItem::new(id, fname));
-            }
-        }
-    }
-    items
 }
 
 pub fn save_file(file: &mut OpenFile) -> Result<(), String> {

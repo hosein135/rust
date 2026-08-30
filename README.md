@@ -1,6 +1,6 @@
 # Verilog IDE
 
-Desktop IDE for **Verilog** HDL and **testbenches**, written in Rust with [GPUI Component](https://github.com/longbridge/gpui-component).
+Desktop IDE for **Verilog** HDL and **testbenches**, written in Rust with [iced](https://github.com/iced-rs/iced) (CPU software renderer — no GPU required).
 
 ## Features
 
@@ -21,7 +21,7 @@ What `run.sh` does (same pattern as [jadex_django/run.sh](../jadex_django/run.sh
 
 1. Install **curl** (static binary) if missing
 2. Install **Nix** (official installer) if missing
-3. Enter a **nixpkgs 25.05** dev shell from `devops/flake.nix` (Rust, GPUI build deps)
+3. Enter a **nixpkgs 25.05** dev shell from `devops/flake.nix` (Rust, iced build deps)
 4. Cache the Nix environment under `~/.cache/verilog-ide/` for fast later runs
 5. `cargo run` the IDE inside that shell
 
@@ -53,7 +53,7 @@ cargo run --release
 ## Layout
 
 ```
-src/              Rust IDE sources (GPUI Component)
+src/              Rust IDE sources (iced)
 samples/          Example counter + testbench
 devops/flake.nix  Nix dev shell (nixpkgs 25.05)
 run.sh            Bootstrap Nix + run inside flake env
@@ -61,7 +61,7 @@ run.sh            Bootstrap Nix + run inside flake env
 
 ## GUI stack
 
-- [GPUI](https://gpui.rs) — GPU-accelerated UI framework
-- [gpui-component](https://github.com/longbridge/gpui-component) — styled components, editor, resizable panels
+- [iced](https://github.com/iced-rs/iced) with the **tiny-skia** software renderer (CPU-only, no Vulkan/OpenGL/nixGL)
+- `ICED_BACKEND=tiny-skia` is set in `.cargo/config.toml` and the Nix shell hook
 
-On non-NixOS Linux, if the GUI fails to start, install a [nixGL](https://github.com/nix-community/nixGL) Vulkan wrapper (e.g. `nixVulkanIntel`) — `run.sh` will use it automatically when available.
+Works on non-NixOS Linux without [nixGL](https://github.com/nix-community/nixGL) or GPU drivers.

@@ -1,23 +1,19 @@
-//! Main IDE application state and UI (GPUI Component).
+//! Main IDE application (iced, CPU software renderer).
 
-use crate::editor::{cursor_line_col, position_from_cursor};
-use crate::project::{build_tree_items, load_file, save_file, IdeProject, OpenFile};
+use crate::editor::{cursor_from_line_col, cursor_line_col};
+use crate::project::{load_file, save_file, IdeProject, OpenFile, TreeNode};
 use crate::templates::{self, counter_example};
-use gpui::prelude::FluentBuilder as _;
-use gpui::*;
-use gpui_component::{
-    ActiveTheme, IconName, Root, TitleBar,
-    button::{Button, ButtonVariants as _},
-    h_flex, v_flex,
-    input::{
-        Editor, EditorState, Input, InputEvent, InputState, TabSize, Textarea, TextareaState,
-    },
-    list::ListItem,
-    resizable::{h_resizable, resizable_panel, v_resizable},
-    status_bar::StatusBar,
-    tree::{TreeState, tree},
-    *,
+use iced::highlighter;
+use iced::widget::{
+    button, column, container, horizontal_space, row, scrollable, text, text_editor,
+    text_input, Space,
 };
+use iced::{Element, Fill, Font, Length, Task, Theme};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+const SIDEBAR_WIDTH: f32 = 240.0;
+const BOTTOM_HEIGHT: f32 = 180.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BottomTab {
@@ -25,85 +21,91 @@ enum BottomTab {
     Problems,
 }
 
+#[derive(Clone)]
+enum Dialog {
+    NewModule { name: String },
+    NewTestbench { dut: String },
+    Find { query: String },
+    About,
+}
+
 pub struct VerilogIde {
     project: Option<IdeProject>,
-    tree_state: Entity<TreeState>,
+    tree: Option<TreeNode>,
+    expanded: HashSet<PathBuf>,
     open: Vec<OpenFile>,
     active: Option<usize>,
-    editor: Entity<EditorState>,
-    console: Entity<TextareaState>,
+    editor_content: text_editor::Content,
+    editor_theme: highlighter::Theme,
+    console: String,
     problems: Vec<String>,
     bottom: BottomTab,
-    status: SharedString,
-    dialog_module_input: Entity<InputState>,
-    dialog_tb_input: Entity<InputState>,
-    dialog_search_input: Entity<InputState>,
+    status: String,
+    dialog: Option<Dialog>,
     search_query: String,
-    bottom_height: Pixels,
-    _subscriptions: Vec<Subscription>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Message {
+    OpenProject,
+    ProjectPicked(Result<Option<PathBuf>, DialogError>),
+    CreateSample,
+    SampleFolderPicked(Result<Option<PathBuf>, DialogError>),
+    OpenFile(PathBuf),
+    ToggleDir(PathBuf),
+    SelectTab(usize),
+    CloseTab(usize),
+    EditorAction(text_editor::Action),
+    Save,
+    SaveAll,
+    ShowNewModule,
+    ShowNewTestbench,
+    ShowFind,
+    ShowAbout,
+    DialogInput(String),
+    DialogConfirm,
+    DialogCancel,
+    BottomTabSelected(BottomTab),
+    ClearBottom,
+    FindNext,
+}
+
+#[derive(Debug, Clone)]
+pub enum DialogError {
+    Cancelled,
+}
+
+pub fn run() -> iced::Result {
+    iced::application("Verilog IDE", VerilogIde::update, VerilogIde::view)
+        .theme(|_| Theme::Dark)
+        .default_font(Font::MONOSPACE)
+        .window(iced::window::Settings {
+            size: iced::Size::new(1280.0, 800.0),
+            min_size: Some(iced::Size::new(900.0, 560.0)),
+            ..Default::default()
+        })
+        .run_with(VerilogIde::new)
 }
 
 impl VerilogIde {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let editor = cx.new(|cx| {
-            EditorState::new(window, cx)
-                .language("c")
-                .line_number(true)
-                .indent_guides(true)
-                .soft_wrap(false)
-                .tab_size(TabSize {
-                    tab_size: 4,
-                    hard_tabs: false,
-                })
-                .placeholder("Open a Verilog file to start editing...")
-        });
-
-        let console = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .rows(6)
-                .default_value(
-                    "Verilog IDE ready.\nOpen a folder or create a sample project.\n",
-                )
-        });
-
-        let tree_state = cx.new(|cx| TreeState::new(cx));
-        let dialog_module_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("module_name"));
-        let dialog_tb_input = cx.new(|cx| InputState::new(window, cx).placeholder("dut_name"));
-        let dialog_search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find..."));
-
+    fn new() -> (Self, Task<Message>) {
         let mut ide = Self {
             project: None,
-            tree_state,
+            tree: None,
+            expanded: HashSet::new(),
             open: Vec::new(),
             active: None,
-            editor,
-            console,
+            editor_content: text_editor::Content::with_text(
+                "Open a Verilog file to start editing...\n",
+            ),
+            editor_theme: highlighter::Theme::Base16Ocean,
+            console: "Verilog IDE ready.\nOpen a folder or create a sample project.\n".into(),
             problems: Vec::new(),
             bottom: BottomTab::Console,
             status: "Ready".into(),
-            dialog_module_input,
-            dialog_tb_input,
-            dialog_search_input,
+            dialog: None,
             search_query: String::new(),
-            bottom_height: px(180.),
-            _subscriptions: Vec::new(),
         };
-
-        ide._subscriptions.push(cx.subscribe(&ide.editor, {
-            move |this, editor, ev: &InputEvent, _, cx| {
-                if matches!(ev, InputEvent::Change) {
-                    if let Some(i) = this.active {
-                        if let Some(file) = this.open.get_mut(i) {
-                            file.content = editor.read(cx).value().to_string();
-                            file.dirty = true;
-                            file.cursor = editor.read(cx).cursor();
-                        }
-                    }
-                    cx.notify();
-                }
-            }
-        }));
 
         for candidate in [
             PathBuf::from("samples"),
@@ -114,90 +116,202 @@ impl VerilogIde {
                 .unwrap_or_default(),
         ] {
             if candidate.is_dir() {
-                ide.open_project(candidate, window, cx);
+                ide.open_project(candidate);
                 break;
             }
         }
 
-        ide
+        (ide, Task::none())
     }
 
-    fn refresh_tree(&mut self, cx: &mut Context<Self>) {
-        if let Some(project) = self.project.as_ref() {
-            let items = build_tree_items(&project.root, &project.root);
-            self.tree_state.update(cx, |state, cx| {
-                state.set_items(items, cx);
-            });
-        }
-    }
-
-    fn sync_editor_to_active(&mut self, cx: &mut Context<Self>) {
-        if let Some(i) = self.active {
-            if let Some(file) = self.open.get_mut(i) {
-                file.content = self.editor.read(cx).value().to_string();
-                file.cursor = self.editor.read(cx).cursor();
+    fn update(&mut self, message: Message) -> Task<Message> {
+        match message {
+            Message::OpenProject => {
+                Task::perform(pick_folder("Open project folder"), Message::ProjectPicked)
+            }
+            Message::ProjectPicked(Ok(Some(path))) => {
+                self.open_project(path);
+                Task::none()
+            }
+            Message::ProjectPicked(_) => Task::none(),
+            Message::CreateSample => Task::perform(
+                pick_folder("Choose parent folder for sample project"),
+                Message::SampleFolderPicked,
+            ),
+            Message::SampleFolderPicked(Ok(Some(parent))) => {
+                let root = parent.join("verilog-sample");
+                if let Err(e) = std::fs::create_dir_all(&root) {
+                    self.log_err(&e.to_string());
+                } else {
+                    let (n1, c1, n2, c2) = counter_example();
+                    let _ = std::fs::write(root.join(n1), c1);
+                    let _ = std::fs::write(root.join(n2), c2);
+                    self.open_project(root);
+                    self.log("Created sample counter + testbench project.\n");
+                }
+                Task::none()
+            }
+            Message::SampleFolderPicked(_) => Task::none(),
+            Message::OpenFile(path) => {
+                self.open_path(&path);
+                Task::none()
+            }
+            Message::ToggleDir(path) => {
+                if self.expanded.contains(&path) {
+                    self.expanded.remove(&path);
+                } else {
+                    self.expanded.insert(path);
+                }
+                Task::none()
+            }
+            Message::SelectTab(idx) => {
+                self.sync_editor_to_active();
+                self.active = Some(idx);
+                self.load_active_into_editor();
+                Task::none()
+            }
+            Message::CloseTab(idx) => {
+                self.sync_editor_to_active();
+                if self.open.get(idx).map(|f| f.dirty).unwrap_or(false) {
+                    let _ = save_file(&mut self.open[idx]);
+                }
+                self.open.remove(idx);
+                self.active = if self.open.is_empty() {
+                    None
+                } else {
+                    Some(idx.min(self.open.len() - 1))
+                };
+                self.load_active_into_editor();
+                Task::none()
+            }
+            Message::EditorAction(action) => {
+                if action.is_edit() {
+                    if let Some(i) = self.active {
+                        if let Some(file) = self.open.get_mut(i) {
+                            file.dirty = true;
+                        }
+                    }
+                }
+                self.editor_content.perform(action);
+                self.sync_editor_to_active();
+                Task::none()
+            }
+            Message::Save => {
+                self.sync_editor_to_active();
+                if let Some(i) = self.active {
+                    match save_file(&mut self.open[i]) {
+                        Ok(()) => {
+                            let path = self.open[i].path.display().to_string();
+                            self.status = format!("Saved {path}");
+                            self.log(&format!("Saved {path}\n"));
+                        }
+                        Err(e) => self.log_err(&e),
+                    }
+                }
+                Task::none()
+            }
+            Message::SaveAll => {
+                self.sync_editor_to_active();
+                for f in &mut self.open {
+                    if f.dirty {
+                        if let Err(e) = save_file(f) {
+                            self.problems.push(e.clone());
+                            self.log(&format!("ERROR: {e}\n"));
+                        }
+                    }
+                }
+                self.status = "Saved all".into();
+                Task::none()
+            }
+            Message::ShowNewModule => {
+                self.dialog = Some(Dialog::NewModule {
+                    name: String::new(),
+                });
+                Task::none()
+            }
+            Message::ShowNewTestbench => {
+                self.dialog = Some(Dialog::NewTestbench { dut: String::new() });
+                Task::none()
+            }
+            Message::ShowFind => {
+                self.dialog = Some(Dialog::Find {
+                    query: self.search_query.clone(),
+                });
+                Task::none()
+            }
+            Message::ShowAbout => {
+                self.dialog = Some(Dialog::About);
+                Task::none()
+            }
+            Message::DialogInput(value) => {
+                match &mut self.dialog {
+                    Some(Dialog::NewModule { name }) => *name = value,
+                    Some(Dialog::NewTestbench { dut }) => *dut = value,
+                    Some(Dialog::Find { query }) => *query = value,
+                    _ => {}
+                }
+                Task::none()
+            }
+            Message::DialogConfirm => {
+                let dialog = self.dialog.take();
+                if let Some(dialog) = dialog {
+                    match dialog {
+                        Dialog::NewModule { name } => self.create_module(&name),
+                        Dialog::NewTestbench { dut } => self.create_testbench(&dut),
+                        Dialog::Find { query } => {
+                            self.search_query = query;
+                            self.find_next();
+                        }
+                        Dialog::About => {}
+                    }
+                }
+                Task::none()
+            }
+            Message::DialogCancel => {
+                self.dialog = None;
+                Task::none()
+            }
+            Message::BottomTabSelected(tab) => {
+                self.bottom = tab;
+                Task::none()
+            }
+            Message::ClearBottom => {
+                match self.bottom {
+                    BottomTab::Console => self.console.clear(),
+                    BottomTab::Problems => self.problems.clear(),
+                }
+                Task::none()
+            }
+            Message::FindNext => {
+                self.find_next();
+                Task::none()
             }
         }
     }
 
-    fn load_active_into_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(i) = self.active else { return };
-        let Some(file) = self.open.get(i).cloned() else { return };
-        self.editor.update(cx, |state, cx| {
-            state.set_value(file.content.clone(), window, cx);
-            state.set_cursor_position(
-                position_from_cursor(&file.content, file.cursor),
-                window,
-                cx,
-            );
-        });
-    }
-
-    fn log(&mut self, msg: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.console.update(cx, |state, cx| {
-            let mut value = state.value().to_string();
-            value.push_str(msg);
-            state.set_value(value, window, cx);
-        });
-    }
-
-    fn log_err(&mut self, msg: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.console.update(cx, |state, cx| {
-            let mut value = state.value().to_string();
-            value.push_str(&format!("ERROR: {msg}\n"));
-            state.set_value(value, window, cx);
-        });
-        self.status = msg.into();
-    }
-
-    fn open_project(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_project(&mut self, root: PathBuf) {
         let project = IdeProject::new(root);
-        self.log(
-            &format!("Opened project: {}\n", project.root.display()),
-            window,
-            cx,
-        );
+        self.log(&format!("Opened project: {}\n", project.root.display()));
+        self.tree = Some(project.build_tree());
+        self.expanded.insert(project.root.clone());
         self.project = Some(project);
         self.open.clear();
         self.active = None;
-        self.refresh_tree(cx);
         self.status = "Project opened".into();
 
         if let Some(p) = self.project.as_ref() {
             if let Some(first) = p.list_verilog_files().into_iter().next() {
-                self.open_path(&first, window, cx);
+                self.open_path(&first);
             }
         }
-        cx.notify();
     }
 
-    fn open_path(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        self.sync_editor_to_active(cx);
+    fn open_path(&mut self, path: &Path) {
+        self.sync_editor_to_active();
 
         if let Some(idx) = self.open.iter().position(|f| f.path == path) {
             self.active = Some(idx);
-            self.load_active_into_editor(window, cx);
-            cx.notify();
+            self.load_active_into_editor();
             return;
         }
 
@@ -205,620 +319,325 @@ impl VerilogIde {
             Ok(file) => {
                 self.open.push(file);
                 self.active = Some(self.open.len() - 1);
-                self.status = format!("Opened {}", path.display()).into();
-                self.load_active_into_editor(window, cx);
+                self.status = format!("Opened {}", path.display());
+                self.load_active_into_editor();
             }
             Err(e) => {
-                self.log_err(&e, window, cx);
+                self.log_err(&e);
                 self.problems.push(e);
             }
         }
-        cx.notify();
     }
 
-    fn save_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.sync_editor_to_active(cx);
-        let Some(i) = self.active else { return };
-        match save_file(&mut self.open[i]) {
-            Ok(()) => {
-                self.status = format!("Saved {}", self.open[i].path.display()).into();
-                self.log(
-                    &format!("Saved {}\n", self.open[i].path.display()),
-                    window,
-                    cx,
-                );
-            }
-            Err(e) => {
-                self.log_err(&e, window, cx);
-                self.problems.push(e);
+    fn sync_editor_to_active(&mut self) {
+        if let Some(i) = self.active {
+            if let Some(file) = self.open.get_mut(i) {
+                file.content = self.editor_content.text();
+                let (line, col) = self.editor_content.cursor_position();
+                file.cursor = cursor_from_line_col(&file.content, line, col);
             }
         }
-        cx.notify();
     }
 
-    fn save_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.sync_editor_to_active(cx);
-        for f in &mut self.open {
-            if f.dirty {
-                if let Err(e) = save_file(f) {
-                    self.problems.push(e.clone());
-                    self.log(&format!("ERROR: {e}\n"), window, cx);
-                }
+    fn load_active_into_editor(&mut self) {
+        if let Some(i) = self.active {
+            if let Some(file) = self.open.get(i) {
+                self.editor_content = text_editor::Content::with_text(&file.content);
             }
-        }
-        self.status = "Saved all".into();
-        cx.notify();
-    }
-
-    fn close_tab(&mut self, idx: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.open.get(idx).map(|f| f.dirty).unwrap_or(false) {
-            let _ = save_file(&mut self.open[idx]);
-        }
-        self.open.remove(idx);
-        self.active = if self.open.is_empty() {
-            None
         } else {
-            Some(idx.min(self.open.len() - 1))
-        };
-        self.load_active_into_editor(window, cx);
-        cx.notify();
-    }
-
-    fn create_sample_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let path = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Choose parent folder for sample project".into()),
-        });
-        let view = cx.entity();
-        cx.spawn_in(window, async move |_, window| {
-            let Some(parent) = path.await.ok().flatten().and_then(|p| p.into_iter().next()) else {
-                return;
-            };
-            let root = parent.join("verilog-sample");
-            let _ = window.update(|window, cx| {
-                if let Err(e) = std::fs::create_dir_all(&root) {
-                    view.update(cx, |this, cx| {
-                        this.log_err(&e.to_string(), window, cx);
-                        cx.notify();
-                    });
-                    return;
-                }
-                let (n1, c1, n2, c2) = counter_example();
-                let _ = std::fs::write(root.join(n1), c1);
-                let _ = std::fs::write(root.join(n2), c2);
-                view.update(cx, |this, cx| {
-                    this.open_project(root, window, cx);
-                    this.log("Created sample counter + testbench project.\n", window, cx);
-                });
-            });
-        })
-        .detach();
-    }
-
-    fn prompt_open_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let path = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Open project folder".into()),
-        });
-        let view = cx.entity();
-        cx.spawn_in(window, async move |_, window| {
-            let Some(folder) = path.await.ok().flatten().and_then(|p| p.into_iter().next()) else {
-                return;
-            };
-            let _ = window.update(|window, cx| {
-                view.update(cx, |this, cx| {
-                    this.open_project(folder, window, cx);
-                });
-            });
-        })
-        .detach();
-    }
-
-    fn show_new_module_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let input = self.dialog_module_input.clone();
-        let view = cx.entity();
-        window.open_alert_dialog(cx, move |dialog, window, cx| {
-            dialog
-                .title("New Verilog Module")
-                .child(div().child("Module name:"))
-                .child(Input::new(&input))
-                .on_ok(move |_, window, cx| {
-                    let name = input.read(cx).value().to_string();
-                    view.update(cx, |this, cx| {
-                        if name.trim().is_empty() {
-                            return;
-                        }
-                        let Some(project) = this.project.as_ref() else {
-                            this.log_err("Open a project first.", window, cx);
-                            cx.notify();
-                            return;
-                        };
-                        let path = project.root.join(format!("{}.v", name.trim()));
-                        let body = templates::module_template(name.trim());
-                        if let Err(e) = std::fs::write(&path, body) {
-                            this.log_err(&e.to_string(), window, cx);
-                            cx.notify();
-                            return;
-                        }
-                        this.refresh_tree(cx);
-                        this.open_path(&path, window, cx);
-                        this.log(
-                            &format!("Created module {}\n", path.display()),
-                            window,
-                            cx,
-                        );
-                        cx.notify();
-                    });
-                    true
-                });
-        });
-    }
-
-    fn show_new_tb_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let input = self.dialog_tb_input.clone();
-        let view = cx.entity();
-        window.open_alert_dialog(cx, move |dialog, window, cx| {
-            dialog
-                .title("New Testbench")
-                .child(div().child("DUT module name:"))
-                .child(Input::new(&input))
-                .on_ok(move |_, window, cx| {
-                    let dut = input.read(cx).value().to_string();
-                    view.update(cx, |this, cx| {
-                        if dut.trim().is_empty() {
-                            return;
-                        }
-                        let Some(project) = this.project.as_ref() else {
-                            this.log_err("Open a project first.", window, cx);
-                            cx.notify();
-                            return;
-                        };
-                        let path = project.root.join(format!("{}_tb.v", dut.trim()));
-                        let body = templates::testbench_template(dut.trim());
-                        if let Err(e) = std::fs::write(&path, body) {
-                            this.log_err(&e.to_string(), window, cx);
-                            cx.notify();
-                            return;
-                        }
-                        this.refresh_tree(cx);
-                        this.open_path(&path, window, cx);
-                        this.log(
-                            &format!("Created testbench {}\n", path.display()),
-                            window,
-                            cx,
-                        );
-                        cx.notify();
-                    });
-                    true
-                });
-        });
-    }
-
-    fn show_find_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let input = self.dialog_search_input.clone();
-        let view = cx.entity();
-        window.open_alert_dialog(cx, move |dialog, window, cx| {
-            input.update(cx, |state, cx| {
-                state.focus(window, cx);
-            });
-            dialog.title("Find").child(Input::new(&input)).on_ok(
-                move |_, window, cx| {
-                    let search = input.read(cx).value().to_string();
-                    view.update(cx, |this, cx| {
-                        this.search_query = search;
-                        this.find_next(window, cx);
-                    });
-                    true
-                },
+            self.editor_content = text_editor::Content::with_text(
+                "Open a Verilog file to start editing...\n",
             );
-        });
+        }
     }
 
-    fn show_about_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        window.open_alert_dialog(cx, |dialog, _, _| {
-            dialog
-                .title("About Verilog IDE")
-                .child(div().child("Verilog IDE"))
-                .child(div().child("Desktop IDE for Verilog HDL and testbenches."))
-                .child(div().child("Built with Rust + GPUI Component."))
-                .on_ok(|_, _, _| true);
-        });
+    fn log(&mut self, msg: &str) {
+        self.console.push_str(msg);
     }
 
-    fn find_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let needle = self.search_query.clone();
-        if needle.is_empty() {
+    fn log_err(&mut self, msg: &str) {
+        self.console.push_str(&format!("ERROR: {msg}\n"));
+        self.status = msg.to_string();
+        self.problems.push(msg.to_string());
+    }
+
+    fn create_module(&mut self, name: &str) {
+        if name.trim().is_empty() {
             return;
         }
-        self.sync_editor_to_active(cx);
+        let Some(project) = self.project.as_ref() else {
+            self.log_err("Open a project first.");
+            return;
+        };
+        let path = project.root.join(format!("{}.v", name.trim()));
+        let body = templates::module_template(name.trim());
+        if let Err(e) = std::fs::write(&path, body) {
+            self.log_err(&e.to_string());
+            return;
+        }
+        self.tree = Some(project.build_tree());
+        self.open_path(&path);
+        self.log(&format!("Created module {}\n", path.display()));
+    }
+
+    fn create_testbench(&mut self, dut: &str) {
+        if dut.trim().is_empty() {
+            return;
+        }
+        let Some(project) = self.project.as_ref() else {
+            self.log_err("Open a project first.");
+            return;
+        };
+        let path = project.root.join(format!("{}_tb.v", dut.trim()));
+        let body = templates::testbench_template(dut.trim());
+        if let Err(e) = std::fs::write(&path, body) {
+            self.log_err(&e.to_string());
+            return;
+        }
+        self.tree = Some(project.build_tree());
+        self.open_path(&path);
+        self.log(&format!("Created testbench {}\n", path.display()));
+    }
+
+    fn find_next(&mut self) {
+        if self.search_query.is_empty() {
+            return;
+        }
+        self.sync_editor_to_active();
         let Some(i) = self.active else { return };
         let content = self.open[i].content.clone();
         let start = self.open[i].cursor.saturating_add(1).min(content.len());
         let found = content[start..]
-            .find(&needle)
+            .find(&self.search_query)
             .map(|o| start + o)
-            .or_else(|| content.find(&needle));
+            .or_else(|| content.find(&self.search_query));
         if let Some(pos) = found {
             self.open[i].cursor = pos;
-            self.editor.update(cx, |state, cx| {
-                state.set_cursor_position(position_from_cursor(&content, pos), window, cx);
-            });
-            self.status = format!("Found at {pos}").into();
+            self.status = format!("Found at {pos}");
+            self.load_active_into_editor();
         } else {
             self.status = "Not found".into();
         }
-        cx.notify();
     }
 
-    fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex()
-            .gap_2()
-            .p_2()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(
-                Button::new("open-project")
-                    .label("Open")
-                    .small()
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.prompt_open_project(window, cx);
-                    })),
-            )
-            .child(
-                Button::new("save")
-                    .label("Save")
-                    .small()
-                    .disabled(self.active.is_none())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.save_active(window, cx);
-                    })),
-            )
-            .child(
-                Button::new("save-all")
-                    .label("Save All")
-                    .small()
-                    .disabled(self.open.is_empty())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.save_all(window, cx);
-                    })),
-            )
-            .child(
-                Button::new("new-module")
-                    .label("+ Module")
-                    .small()
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.show_new_module_dialog(window, cx);
-                    })),
-            )
-            .child(
-                Button::new("new-tb")
-                    .label("+ Testbench")
-                    .small()
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.show_new_tb_dialog(window, cx);
-                    })),
-            )
-            .child(
-                Button::new("sample")
-                    .label("Sample")
-                    .small()
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.create_sample_project(window, cx);
-                    })),
-            )
-            .child(
-                Button::new("find")
-                    .label("Find")
-                    .small()
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.show_find_dialog(window, cx);
-                    })),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .justify_end()
-                    .items_center()
-                    .when_some(self.project.as_ref(), |this, p| {
-                        this.child(
-                            div()
-                                .text_sm()
-                                .text_color(cx.theme().primary)
-                                .child(p.name.clone()),
-                        )
-                    }),
-            )
+    fn view(&self) -> Element<'_, Message> {
+        column![
+            self.view_toolbar(),
+            row![
+                container(self.view_sidebar())
+                    .width(Length::Fixed(SIDEBAR_WIDTH))
+                    .height(Fill)
+                    .padding(0),
+                column![
+                    container(self.view_editor_area()).height(Fill),
+                    container(self.view_bottom())
+                        .height(Length::Fixed(BOTTOM_HEIGHT))
+                        .width(Fill),
+                ]
+                .width(Fill)
+                .spacing(0),
+            ]
+            .spacing(0)
+            .height(Fill),
+            self.view_status_bar(),
+        ]
+        .spacing(0)
+        .padding(0)
+        .into()
     }
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .h_full()
-            .w_full()
-            .bg(cx.theme().sidebar)
-            .child(
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_sm()
-                    .font_semibold()
-                    .text_color(cx.theme().sidebar_foreground)
-                    .child("Explorer"),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .when(self.project.is_none(), |this| {
-                        this.child(
-                            v_flex()
-                                .gap_2()
-                                .p_3()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child("No project open."),
-                                )
-                                .child(
-                                    Button::new("sidebar-open")
-                                        .label("Open Project...")
-                                        .small()
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.prompt_open_project(window, cx);
-                                        })),
-                                )
-                                .child(
-                                    Button::new("sidebar-sample")
-                                        .label("Create Sample...")
-                                        .small()
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.create_sample_project(window, cx);
-                                        })),
-                                ),
-                        )
-                    })
-                    .when(self.project.is_some(), |this| {
-                        this.child(self.render_file_tree(cx))
-                    }),
-            )
-    }
-
-    fn render_file_tree(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let view = cx.entity();
-        tree(
-            &self.tree_state,
-            move |ix, entry, _selected, window, cx| {
-                let item = entry.item().clone();
-                let icon = if !entry.is_folder() {
-                    IconName::File
-                } else if entry.is_expanded() {
-                    IconName::FolderOpen
+    fn view_toolbar(&self) -> Element<'_, Message> {
+        row![
+            button("Open").on_press(Message::OpenProject),
+            button("Save")
+                .on_press_maybe(self.active.map(|_| Message::Save)),
+            button("Save All")
+                .on_press_maybe(if self.open.is_empty() {
+                    None
                 } else {
-                    IconName::Folder
-                };
-
-                ListItem::new(ix)
-                    .w_full()
-                    .rounded(cx.theme().radius)
-                    .py_0p5()
-                    .px_2()
-                    .pl(px(16.) * entry.depth() + px(8.))
-                    .child(h_flex().gap_2().child(icon).child(item.label.clone()))
-                    .on_click(cx.listener({
-                        move |_, _, window, cx| {
-                            if item.is_folder() {
-                                return;
-                            }
-                            let path = PathBuf::from(item.id.as_str());
-                            view.update(cx, |this, cx| {
-                                this.open_path(&path, window, cx);
-                            });
-                        }
-                    }))
-            },
-        )
-        .text_sm()
-        .p_1()
-        .h_full()
+                    Some(Message::SaveAll)
+                }),
+            button("+ Module").on_press(Message::ShowNewModule),
+            button("+ Testbench").on_press(Message::ShowNewTestbench),
+            button("Sample").on_press(Message::CreateSample),
+            button("Find").on_press(Message::ShowFind),
+            horizontal_space(),
+            text(
+                self.project
+                    .as_ref()
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| "No project".into())
+            )
+            .size(14),
+        ]
+        .spacing(8)
+        .padding(8)
+        .align_y(iced::Alignment::Center)
+        .into()
     }
 
-    fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex()
-            .gap_1()
-            .px_2()
-            .py_1()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .children(self.open.iter().enumerate().map(|(i, f)| {
-                let name = f
-                    .path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("untitled");
-                let title = if f.dirty {
-                    format!("* {name}")
-                } else {
-                    name.to_string()
-                };
-                let selected = self.active == Some(i);
-                h_flex()
-                    .gap_1()
-                    .child(
-                        Button::new(("tab", i))
-                            .label(title)
-                            .small()
-                            .selected(selected)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.sync_editor_to_active(cx);
-                                this.active = Some(i);
-                                this.load_active_into_editor(window, cx);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new(("close-tab", i))
-                            .label("×")
-                            .ghost()
-                            .xsmall()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.close_tab(i, window, cx);
-                            })),
-                    )
-            }))
-    }
-
-    fn render_editor_area(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.open.is_empty() {
-            v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .child(
-                    div()
-                        .text_xl()
-                        .font_bold()
-                        .text_color(cx.theme().primary)
-                        .child("Verilog IDE"),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Edit Verilog modules and testbenches."),
-                )
-                .child(
-                    Button::new("welcome-open")
-                        .label("Open Project Folder")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.prompt_open_project(window, cx);
-                        })),
-                )
-                .child(
-                    Button::new("welcome-sample")
-                        .label("Create Sample Counter Project")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.create_sample_project(window, cx);
-                        })),
-                )
+    fn view_sidebar(&self) -> Element<'_, Message> {
+        let header = text("Explorer").size(14);
+        let body: Element<'_, Message> = if let Some(tree) = &self.tree {
+            scrollable(
+                column(self.render_tree_nodes(tree, 0))
+                    .spacing(2)
+                    .padding(4),
+            )
+            .height(Fill)
+            .into()
         } else {
-            v_flex()
-                .flex_1()
-                .min_h_0()
-                .child(self.render_tabs(cx))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_h_0()
-                        .child(
-                            Editor::new(&self.editor)
-                                .h(relative(1.))
-                                .bordered(false)
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .text_size(cx.theme().mono_font_size),
-                        ),
-                )
+            column![
+                text("No project open.").size(13),
+                button("Open Project...").on_press(Message::OpenProject),
+                button("Create Sample...").on_press(Message::CreateSample),
+            ]
+            .spacing(8)
+            .padding(8)
+            .into()
+        };
+
+        column![header, body].spacing(4).padding(4).into()
+    }
+
+    fn render_tree_nodes<'a>(
+        &'a self,
+        node: &'a TreeNode,
+        depth: usize,
+    ) -> Vec<Element<'a, Message>> {
+        let mut items = Vec::new();
+        if depth > 0 {
+            let indent = depth as f32 * 14.0;
+            if node.is_dir {
+                let expanded = self.expanded.contains(&node.path);
+                let label = if expanded { "▾" } else { "▸" };
+                items.push(
+                    row![
+                        Space::new().width(Length::Fixed(indent)),
+                        button(format!("{label} {}", node.name))
+                            .on_press(Message::ToggleDir(node.path.clone()))
+                            .padding([2, 4]),
+                    ]
+                    .into(),
+                );
+            } else {
+                items.push(
+                    row![
+                        Space::new().width(Length::Fixed(indent)),
+                        button(format!("  {}", node.name))
+                            .on_press(Message::OpenFile(node.path.clone()))
+                            .padding([2, 4]),
+                    ]
+                    .into(),
+                );
+            }
         }
+
+        if node.is_dir && (depth == 0 || self.expanded.contains(&node.path)) {
+            for child in &node.children {
+                items.extend(self.render_tree_nodes(child, depth + 1));
+            }
+        }
+
+        items
     }
 
-    fn render_bottom(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .h_full()
-            .child(
-                h_flex()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        Button::new("console-tab")
-                            .label("Console")
-                            .xsmall()
-                            .ghost()
-                            .selected(self.bottom == BottomTab::Console)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.bottom = BottomTab::Console;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("problems-tab")
-                            .label(format!("Problems ({})", self.problems.len()))
-                            .xsmall()
-                            .ghost()
-                            .selected(self.bottom == BottomTab::Problems)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.bottom = BottomTab::Problems;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div().flex_1().child(
-                            Button::new("clear-bottom")
-                                .label("Clear")
-                                .xsmall()
-                                .ghost()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    match this.bottom {
-                                        BottomTab::Console => {
-                                            this.console.update(cx, |state, cx| {
-                                                state.set_value("", window, cx);
-                                            });
-                                        }
-                                        BottomTab::Problems => this.problems.clear(),
-                                    }
-                                    cx.notify();
-                                })),
-                        ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .when(self.bottom == BottomTab::Console, |this| {
-                        this.child(
-                            Textarea::new(&self.console)
-                                .h_full()
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .text_size(cx.theme().mono_font_size),
-                        )
-                    })
-                    .when(self.bottom == BottomTab::Problems, |this| {
-                        this.child(
-                            v_flex()
-                                .p_2()
-                                .gap_1()
-                                .overflow_y_scroll()
-                                .when(self.problems.is_empty(), |this| {
-                                    this.child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(cx.theme().chart_2)
-                                            .child("No problems."),
-                                    )
-                                })
-                                .children(self.problems.iter().enumerate().map(|(i, p)| {
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().destructive)
-                                        .child(format!("{}. {p}", i + 1))
-                                })),
-                        )
-                    }),
-            )
-    }
-}
+    fn view_editor_area(&self) -> Element<'_, Message> {
+        if self.open.is_empty() {
+            return column![
+                text("Verilog IDE").size(28),
+                text("Edit Verilog modules and testbenches.").size(14),
+                button("Open Project Folder").on_press(Message::OpenProject),
+                button("Create Sample Counter Project").on_press(Message::CreateSample),
+            ]
+            .spacing(12)
+            .padding(24)
+            .width(Fill)
+            .height(Fill)
+            .align_x(iced::Alignment::Center)
+            .align_y(iced::Alignment::Center)
+            .into();
+        }
 
-impl Render for VerilogIde {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let status_line = if let Some(i) = self.active {
+        let tabs = row(self.open.iter().enumerate().map(|(i, f)| {
+            let name = f
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("untitled");
+            let title = if f.dirty {
+                format!("* {name}")
+            } else {
+                name.to_string()
+            };
+            let _selected = self.active == Some(i);
+            row![
+                button(title).on_press(Message::SelectTab(i)),
+                button("×")
+                    .on_press(Message::CloseTab(i))
+                    .padding([2, 6]),
+            ]
+            .spacing(2)
+        }))
+        .spacing(4)
+        .padding([4, 8]);
+
+        let editor = text_editor(&self.editor_content)
+            .height(Fill)
+            .on_action(Message::EditorAction)
+            .highlight("v", self.editor_theme);
+
+        let overlay = self.view_dialog();
+
+        column![tabs, editor, overlay]
+            .spacing(0)
+            .height(Fill)
+            .into()
+    }
+
+    fn view_bottom(&self) -> Element<'_, Message> {
+        let tabs = row![
+            button("Console").on_press(Message::BottomTabSelected(BottomTab::Console)),
+            button(format!("Problems ({})", self.problems.len()))
+                .on_press(Message::BottomTabSelected(BottomTab::Problems)),
+            horizontal_space(),
+            button("Clear").on_press(Message::ClearBottom),
+        ]
+        .spacing(8)
+        .padding([4, 8]);
+
+        let body: Element<'_, Message> = match self.bottom {
+            BottomTab::Console => scrollable(
+                text(self.console.as_str()).size(13).font(Font::MONOSPACE),
+            )
+            .height(Fill)
+            .into(),
+            BottomTab::Problems => {
+                if self.problems.is_empty() {
+                    text("No problems.").size(13).into()
+                } else {
+                    scrollable(
+                        column(
+                            self.problems
+                                .iter()
+                                .enumerate()
+                                .map(|(i, p)| text(format!("{}. {p}", i + 1)).size(13))
+                                .collect::<Vec<_>>(),
+                        )
+                        .spacing(4)
+                        .padding(8),
+                    )
+                    .height(Fill)
+                    .into()
+                }
+            }
+        };
+
+        column![tabs, body].spacing(0).height(Fill).into()
+    }
+
+    fn view_status_bar(&self) -> Element<'_, Message> {
+        let detail = if let Some(i) = self.active {
             if let Some(f) = self.open.get(i) {
                 let (line, col) = cursor_line_col(&f.content, f.cursor);
                 let dirty = if f.dirty { " *" } else { "" };
@@ -830,65 +649,76 @@ impl Render for VerilogIde {
                         .unwrap_or("?")
                 )
             } else {
-                self.status.to_string()
+                self.status.clone()
             }
         } else {
-            self.status.to_string()
+            self.status.clone()
         };
 
-        let dialog_layer = Root::render_dialog_layer(window, cx);
-
-        v_flex()
-            .size_full()
-            .bg(cx.theme().background)
-            .child(
-                TitleBar::new().child(
-                    h_flex()
-                        .gap_3()
-                        .occlude()
-                        .child(div().font_semibold().child("Verilog IDE"))
-                        .child(
-                            Button::new("about")
-                                .label("About")
-                                .ghost()
-                                .xsmall()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.show_about_dialog(window, cx);
-                                })),
-                        ),
-                ),
-            )
-            .child(self.render_toolbar(cx))
-            .child(
-                h_resizable("main-split")
-                    .flex_1()
-                    .min_h_0()
-                    .child(
-                        resizable_panel()
-                            .size(px(240.))
-                            .child(self.render_sidebar(cx)),
-                    )
-                    .child(
-                        v_resizable("editor-bottom")
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                resizable_panel()
-                                    .flex_1()
-                                    .child(self.render_editor_area(cx)),
-                            )
-                            .child(
-                                resizable_panel()
-                                    .size(self.bottom_height)
-                                    .child(self.render_bottom(cx)),
-                            ),
-                    ),
-            )
-            .child(
-                StatusBar::new()
-                    .left(div().text_xs().child(self.status.clone()))
-                    .right(div().text_xs().child(status_line)),
-            )
-            .children(dialog_layer)
+        row![
+            text(&self.status).size(12),
+            horizontal_space(),
+            text(detail).size(12),
+        ]
+        .padding([4, 8])
+        .into()
     }
+
+    fn view_dialog(&self) -> Element<'_, Message> {
+        let Some(dialog) = &self.dialog else {
+            return Space::new().height(Length::Fixed(0.0)).into();
+        };
+
+        let (title, input, show_input): (String, String, bool) = match dialog {
+            Dialog::NewModule { name } => ("New Verilog Module".into(), name.clone(), true),
+            Dialog::NewTestbench { dut } => ("New Testbench".into(), dut.clone(), true),
+            Dialog::Find { query } => ("Find".into(), query.clone(), true),
+            Dialog::About => ("About Verilog IDE".into(), String::new(), false),
+        };
+
+        let content: Element<'_, Message> = if show_input {
+            column![
+                text(title).size(16),
+                text_input("…", &input).on_input(Message::DialogInput),
+                row![
+                    button("OK").on_press(Message::DialogConfirm),
+                    button("Cancel").on_press(Message::DialogCancel),
+                ]
+                .spacing(8),
+            ]
+            .spacing(8)
+            .into()
+        } else {
+            column![
+                text("About Verilog IDE").size(16),
+                text("Desktop IDE for Verilog HDL and testbenches."),
+                text("Built with Rust + iced (software renderer)."),
+                button("OK").on_press(Message::DialogCancel),
+            ]
+            .spacing(8)
+            .into()
+        };
+
+        container(content)
+            .padding(16)
+            .style(|theme: &Theme| container::Style {
+                background: Some(iced::Background::Color(theme.palette().background)),
+                border: iced::Border {
+                    color: theme.palette().text,
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            })
+            .into()
+    }
+}
+
+async fn pick_folder(title: &str) -> Result<Option<PathBuf>, DialogError> {
+    let picked = rfd::AsyncFileDialog::new()
+        .set_title(title)
+        .pick_folder()
+        .await
+        .ok_or(DialogError::Cancelled)?;
+    Ok(Some(picked.path().to_path_buf()))
 }

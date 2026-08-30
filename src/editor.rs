@@ -1,6 +1,4 @@
-//! Editor tab helpers.
-
-use gpui_component::input::Position;
+//! Editor cursor helpers.
 
 pub fn cursor_line_col(content: &str, cursor: usize) -> (usize, usize) {
     let mut line = 1usize;
@@ -19,25 +17,20 @@ pub fn cursor_line_col(content: &str, cursor: usize) -> (usize, usize) {
     (line, col)
 }
 
-pub fn position_from_cursor(content: &str, cursor: usize) -> Position {
-    let (line, col) = cursor_line_col(content, cursor);
-    Position::new(line.saturating_sub(1) as u32, col.saturating_sub(1) as u32)
-}
-
-pub fn cursor_from_position(content: &str, position: Position) -> usize {
-    let target_line = position.line as usize + 1;
-    let target_col = position.character as usize + 1;
-    let mut line = 1usize;
-    let mut col = 1usize;
+pub fn cursor_from_line_col(content: &str, line: usize, col: usize) -> usize {
+    let target_line = line + 1;
+    let target_col = col + 1;
+    let mut current_line = 1usize;
+    let mut current_col = 1usize;
     for (i, ch) in content.chars().enumerate() {
-        if line == target_line && col == target_col {
+        if current_line == target_line && current_col == target_col {
             return i;
         }
         if ch == '\n' {
-            line += 1;
-            col = 1;
+            current_line += 1;
+            current_col = 1;
         } else {
-            col += 1;
+            current_col += 1;
         }
     }
     content.len()

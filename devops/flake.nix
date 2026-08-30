@@ -21,27 +21,13 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
-          linuxGraphics = pkgs.lib.optionals pkgs.stdenv.isLinux [
+          linuxWindowing = pkgs.lib.optionals pkgs.stdenv.isLinux [
             pkgs.libxkbcommon
             pkgs.fontconfig
             pkgs.freetype
-            pkgs.alsa-lib
-            pkgs.vulkan-loader
-            pkgs.vulkan-tools
-            pkgs.libGL
-            pkgs.mesa
             pkgs.wayland
             pkgs.wayland-protocols
             pkgs.xorg.libxshmfence
-            pkgs.dbus
-            pkgs.nss
-            pkgs.atk
-            pkgs.at-spi2-atk
-            pkgs.glib
-            pkgs.cairo
-            pkgs.pango
-            pkgs.gdk-pixbuf
-            pkgs.gtk3
             pkgs.xorg.libX11
             pkgs.xorg.libxcb
             pkgs.xorg.libXcursor
@@ -69,11 +55,12 @@
               curl
               perl
             ]
-            ++ linuxGraphics;
+            ++ linuxWindowing;
 
             shellHook = ''
               export VERILOG_IDE_NIX=1
               export RUST_BACKTRACE=1
+              export ICED_BACKEND=tiny-skia
               export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
             '';
           };
