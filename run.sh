@@ -51,6 +51,10 @@ READY_MARKER="${SCRIPT_DIR}/.verilog-ide-nix-ready"
 BOOTSTRAP_DIR="${SCRIPT_DIR}/.verilog-ide-bootstrap"
 BOOTSTRAP_BIN="${BOOTSTRAP_DIR}/bin"
 FLAKE_DIR="${SCRIPT_DIR}/devops"
+# Force a path flake — inside a git repo Nix otherwise uses git+file://…?dir=devops
+# and the lock file in devops/ no longer matches what nix develop expects.
+flake_ref() { echo "path:${FLAKE_DIR}"; }
+cache_lock_frozen() { [ -f "${SYSTEM_READY}" ] && [ "${FORCE_SETUP}" != true ]; }
 CURL_STATIC_VERSION="8.20.0"
 NIX_INSTALL_URL="https://releases.nixos.org/nix/nix-2.24.12/install"
 SYSTEM_CACHE_ROOT="${XDG_CACHE_HOME:-${HOME}/.cache}/verilog-ide"
@@ -501,7 +505,7 @@ ensure_flake_lock() {
     restore_cached_flake_lock
     if [ ! -f "${FLAKE_DIR}/flake.lock" ]; then
         step "Creating flake.lock (nixpkgs 25.05) — first time on this system ..."
-        nix flake lock "${FLAKE_DIR}"
+        nix flake lock "$(flake_ref)"
     fi
     mkdir -p "${SYSTEM_CACHE}"
     cp -f "${FLAKE_DIR}/flake.lock" "${SYSTEM_LOCK}"
@@ -520,11 +524,28 @@ check_host_os() {
 realize_nix_shell() {
     mkdir -p "${SYSTEM_CACHE}"
     step "Fetching Nix packages into the system cache (once per machine / flake) ..."
-    nix develop "${FLAKE_DIR}" \
-        --profile "${SYSTEM_PROFILE}" \
-        --no-update-lock-file \
-        --command true
-    if nix print-dev-env "${FLAKE_DIR}" --offline --no-update-lock-file \
+    if cache_lock_frozen; then
+        nix develop "$(flake_ref)" \
+            --profile "${SYSTEM_PROFILE}" \
+            --no-update-lock-file \
+            --command true
+    else
+        nix develop "$(flake_ref)" \
+            --profile "${SYSTEM_PROFILE}" \
+            --command true
+    fi
+    cp -f "${FLAKE_DIR}/flake.lock" "${SYSTEM_LOCK}"
+
+    if cache_lock_frozen; then
+        if nix print-dev-env "$(flake_ref)" --offline --no-update-lock-file \
+            | tr -d '\r' > "${SYSTEM_DEVENV}.tmp"; then
+            mv -f "${SYSTEM_DEVENV}.tmp" "${SYSTEM_DEVENV}"
+            sanitize_shell_file "${SYSTEM_DEVENV}"
+        else
+            rm -f "${SYSTEM_DEVENV}.tmp"
+            warn "nix print-dev-env failed — later runs will use nix develop --offline"
+        fi
+    elif nix print-dev-env "$(flake_ref)" \
         | tr -d '\r' > "${SYSTEM_DEVENV}.tmp"; then
         mv -f "${SYSTEM_DEVENV}.tmp" "${SYSTEM_DEVENV}"
         sanitize_shell_file "${SYSTEM_DEVENV}"
@@ -616,7 +637,7 @@ run_inside_nix() {
         ) &
         launch_pid=$!
     else
-        nix develop "${FLAKE_DIR}" \
+        nix develop "$(flake_ref)" \
             --profile "${SYSTEM_PROFILE}" \
             --offline \
             --no-update-lock-file \
