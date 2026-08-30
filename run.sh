@@ -54,7 +54,13 @@ FLAKE_DIR="${SCRIPT_DIR}/devops"
 # Force a path flake — inside a git repo Nix otherwise uses git+file://…?dir=devops
 # and the lock file in devops/ no longer matches what nix develop expects.
 flake_ref() { echo "path:${FLAKE_DIR}"; }
-cache_lock_frozen() { [ -f "${SYSTEM_READY}" ] && [ "${FORCE_SETUP}" != true ]; }
+cache_lock_frozen() {
+    [ "${FORCE_SETUP}" != true ] \
+        && [ -f "${SYSTEM_READY}" ] \
+        && [ -e "${SYSTEM_PROFILE}" ] \
+        && [ -f "${SYSTEM_DEVENV}" ] \
+        && [ -f "${FLAKE_DIR}/flake.lock" ]
+}
 CURL_STATIC_VERSION="8.20.0"
 NIX_INSTALL_URL="https://releases.nixos.org/nix/nix-2.24.12/install"
 SYSTEM_CACHE_ROOT="${XDG_CACHE_HOME:-${HOME}/.cache}/verilog-ide"
