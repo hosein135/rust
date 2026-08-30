@@ -51,9 +51,12 @@ READY_MARKER="${SCRIPT_DIR}/.verilog-ide-nix-ready"
 BOOTSTRAP_DIR="${SCRIPT_DIR}/.verilog-ide-bootstrap"
 BOOTSTRAP_BIN="${BOOTSTRAP_DIR}/bin"
 FLAKE_DIR="${SCRIPT_DIR}/devops"
-# Force a path flake — inside a git repo Nix otherwise uses git+file://…?dir=devops
-# and the lock file in devops/ no longer matches what nix develop expects.
-flake_ref() { echo "path:${FLAKE_DIR}"; }
+# Nix 2.25+ defaults to --no-update-lock-file. A flake under a git repo is
+# rewritten to git+file://…?dir=devops, which ignores untracked files and then
+# demands a lock update. Stage flake.nix + flake.lock outside the git tree
+# (~/.cache/verilog-ide/…/flake) and always use that path: URI.
+SYSTEM_FLAKE=""
+flake_ref() { echo "path:${SYSTEM_FLAKE}"; }
 cache_lock_frozen() {
     [ "${FORCE_SETUP}" != true ] \
         && [ -f "${SYSTEM_READY}" ] \
@@ -138,6 +141,17 @@ init_system_cache_paths() {
     SYSTEM_DEVENV="${SYSTEM_CACHE}/devenv.sh"
     SYSTEM_READY="${SYSTEM_CACHE}/ready"
     SYSTEM_LOCK="${SYSTEM_CACHE}/flake.lock"
+    SYSTEM_FLAKE="${SYSTEM_CACHE}/flake"
+}
+
+# Copy flake files out of the git worktree so Nix cannot rewrite the URI to
+# git+file://…?dir=devops.
+stage_flake() {
+    mkdir -p "${SYSTEM_FLAKE}"
+    cp -f "${FLAKE_DIR}/flake.nix" "${SYSTEM_FLAKE}/flake.nix"
+    if [ -f "${FLAKE_DIR}/flake.lock" ]; then
+        cp -f "${FLAKE_DIR}/flake.lock" "${SYSTEM_FLAKE}/flake.lock"
+    fi
 }
 
 restore_cached_flake_lock() {
@@ -509,12 +523,15 @@ ensure_flake_lock() {
         exit 1
     fi
     restore_cached_flake_lock
-    if [ ! -f "${FLAKE_DIR}/flake.lock" ]; then
-        step "Creating flake.lock (nixpkgs 25.05) — first time on this system ..."
-        nix flake lock "$(flake_ref)"
-    fi
     mkdir -p "${SYSTEM_CACHE}"
+    stage_flake
+    if [ ! -f "${SYSTEM_FLAKE}/flake.lock" ]; then
+        step "Creating flake.lock (nixpkgs 25.05) — first time on this system ..."
+        nix flake lock "$(flake_ref)" --update-lock-file
+        cp -f "${SYSTEM_FLAKE}/flake.lock" "${FLAKE_DIR}/flake.lock"
+    fi
     cp -f "${FLAKE_DIR}/flake.lock" "${SYSTEM_LOCK}"
+    cp -f "${FLAKE_DIR}/flake.lock" "${SYSTEM_FLAKE}/flake.lock"
 }
 
 check_host_os() {
@@ -529,29 +546,20 @@ check_host_os() {
 
 realize_nix_shell() {
     mkdir -p "${SYSTEM_CACHE}"
+    stage_flake
     step "Fetching Nix packages into the system cache (once per machine / flake) ..."
-    if cache_lock_frozen; then
-        nix develop "$(flake_ref)" \
-            --profile "${SYSTEM_PROFILE}" \
-            --no-update-lock-file \
-            --command true
-    else
-        nix develop "$(flake_ref)" \
-            --profile "${SYSTEM_PROFILE}" \
-            --command true
+    # --no-write-lock-file: Nix 2.25+ defaults to refusing lock edits; the staged
+    # path flake already has flake.lock, so never rewrite it from git+file.
+    nix develop "$(flake_ref)" \
+        --profile "${SYSTEM_PROFILE}" \
+        --no-write-lock-file \
+        --command true
+    if [ -f "${SYSTEM_FLAKE}/flake.lock" ]; then
+        cp -f "${SYSTEM_FLAKE}/flake.lock" "${SYSTEM_LOCK}"
+        cp -f "${SYSTEM_FLAKE}/flake.lock" "${FLAKE_DIR}/flake.lock"
     fi
-    cp -f "${FLAKE_DIR}/flake.lock" "${SYSTEM_LOCK}"
 
-    if cache_lock_frozen; then
-        if nix print-dev-env "$(flake_ref)" --offline --no-update-lock-file \
-            | tr -d '\r' > "${SYSTEM_DEVENV}.tmp"; then
-            mv -f "${SYSTEM_DEVENV}.tmp" "${SYSTEM_DEVENV}"
-            sanitize_shell_file "${SYSTEM_DEVENV}"
-        else
-            rm -f "${SYSTEM_DEVENV}.tmp"
-            warn "nix print-dev-env failed — later runs will use nix develop --offline"
-        fi
-    elif nix print-dev-env "$(flake_ref)" \
+    if nix print-dev-env "$(flake_ref)" --offline --no-write-lock-file \
         | tr -d '\r' > "${SYSTEM_DEVENV}.tmp"; then
         mv -f "${SYSTEM_DEVENV}.tmp" "${SYSTEM_DEVENV}"
         sanitize_shell_file "${SYSTEM_DEVENV}"
@@ -559,7 +567,6 @@ realize_nix_shell() {
         rm -f "${SYSTEM_DEVENV}.tmp"
         warn "nix print-dev-env failed — later runs will use nix develop --offline"
     fi
-    cp -f "${FLAKE_DIR}/flake.lock" "${SYSTEM_LOCK}"
     date -u +"%Y-%m-%dT%H:%M:%SZ" > "${SYSTEM_READY}"
     date -u +"%Y-%m-%dT%H:%M:%SZ" > "${READY_MARKER}"
     info "Nix packages cached on this system → ${SYSTEM_CACHE}"
@@ -643,10 +650,11 @@ run_inside_nix() {
         ) &
         launch_pid=$!
     else
+        stage_flake
         nix develop "$(flake_ref)" \
             --profile "${SYSTEM_PROFILE}" \
             --offline \
-            --no-update-lock-file \
+            --no-write-lock-file \
             --command bash "${SCRIPT_DIR}/run.sh" --__launch "$@" &
         launch_pid=$!
     fi
@@ -673,6 +681,7 @@ main() {
         source_nix_profile || true
         enable_flakes
         restore_cached_flake_lock
+        stage_flake
     else
         setup_first_time
     fi
