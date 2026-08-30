@@ -32,7 +32,7 @@
             pkgs.mesa
             pkgs.wayland
             pkgs.wayland-protocols
-            pkgs.libxshmfence
+            pkgs.xorg.libxshmfence
             pkgs.dbus
             pkgs.nss
             pkgs.atk
