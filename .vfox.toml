@@ -1,3 +1,0 @@
-[tools]
-# Single pinned stable (current Rust stable release).
-rust = "1.98.0"

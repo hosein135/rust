@@ -3,7 +3,10 @@
 **/*.rs.bk
 Cargo.lock
 
-# vfox local SDK links
+# Nix bootstrap + cache
+.verilog-ide-bootstrap/
+.verilog-ide-nix-ready
+devops/flake.lock
 .vfox/
 
 # IDE / OS
@@ -16,9 +19,6 @@ Thumbs.db
 
 # Build artifacts
 *.o
-*.exe
-!vfox-run.ps1
-!run.cmd
 
 # Local data
 .verilog-ide-data/

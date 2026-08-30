@@ -1,18 +1,14 @@
 # Auto-detect text files; normalize to LF in the repo
 * text=auto eol=lf
 
-# Windows scripts keep CRLF so notepad/cmd behave correctly
-*.cmd text eol=crlf
-*.bat text eol=crlf
-*.ps1 text eol=crlf
-
-# Rust / config / docs
+# Rust / config / docs / shell
 *.rs text eol=lf
 *.toml text eol=lf
 *.md text eol=lf
 *.json text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+*.sh text eol=lf
 .gitignore text eol=lf
 .gitattributes text eol=lf
 

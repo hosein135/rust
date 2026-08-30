@@ -80,7 +80,7 @@ pub fn is_testbench_path(path: &Path) -> bool {
 fn should_skip(name: &str) -> bool {
     matches!(
         name,
-        "target" | ".git" | ".vfox" | "node_modules" | ".verilog-ide-data" | ".idea" | ".vscode"
+        "target" | ".git" | "node_modules" | ".verilog-ide-data" | ".idea" | ".vscode"
     )
 }
 
@@ -137,6 +137,39 @@ pub fn load_file(path: &Path) -> Result<OpenFile, String> {
         dirty: false,
         cursor: 0,
     })
+}
+
+pub fn build_tree_items(root: &Path, dir: &Path) -> Vec<gpui_component::tree::TreeItem> {
+    use gpui_component::tree::TreeItem;
+
+    let mut items = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let mut entries: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+        entries.sort_by_key(|e| {
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            (!is_dir, e.file_name().to_string_lossy().to_lowercase())
+        });
+        for entry in entries {
+            let path = entry.path();
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if should_skip(&fname) || fname.starts_with('.') {
+                continue;
+            }
+            let id = path.to_string_lossy().to_string();
+            if path.is_dir() {
+                let children = build_tree_items(root, &path);
+                items.push(TreeItem::new(id, fname).children(children));
+            } else if is_verilog_path(&path)
+                || matches!(
+                    path.extension().and_then(|e| e.to_str()),
+                    Some("md" | "toml" | "txt" | "json" | "cfg" | "do" | "tcl")
+                )
+            {
+                items.push(TreeItem::new(id, fname));
+            }
+        }
+    }
+    items
 }
 
 pub fn save_file(file: &mut OpenFile) -> Result<(), String> {

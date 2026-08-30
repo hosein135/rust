@@ -1,70 +1,67 @@
 # Verilog IDE
 
-Desktop IDE for **Verilog** HDL and **testbenches**, written in Rust (`egui` / `eframe`).
+Desktop IDE for **Verilog** HDL and **testbenches**, written in Rust with [GPUI Component](https://github.com/longbridge/gpui-component).
 
 ## Features
 
 - Project explorer for `.v` / `.sv` / `.vh` files
-- Multi-tab editor with Verilog syntax highlighting
+- Multi-tab code editor with line numbers and syntax highlighting
 - New module / new testbench templates
 - Sample counter + testbench under `samples/`
-- Console + problems panel, find, save shortcuts (`Ctrl+S`, `Ctrl+O`, `Ctrl+F`)
+- Console + problems panel, find, save shortcuts
 
-## Toolchain (pinned)
+## Setup and run (Linux / macOS / WSL)
 
-See [`.vfox.toml`](.vfox.toml):
-
-```toml
-[tools]
-rust = "1.98.0"
+```bash
+chmod +x run.sh
+./run.sh
 ```
 
-`vfox-run.ps1` installs **only this single Rust stable** (current stable release). Downloads show a live progress bar (bytes, %, speed). Failed downloads retry the same version — there is no multi-version fallback.
-## Windows: setup and run
+What `run.sh` does (same pattern as [jadex_django/run.sh](../jadex_django/run.sh)):
 
-Double-click `run.cmd`, or from an **elevated** PowerShell:
-
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\vfox-run.ps1
-```
-
-What the script does (winget → vfox → rust stack):
-
-1. Install **winget** only if missing (AppX deps: VCLibs, UI.Xaml, DesktopAppInstaller)
-2. Install **vfox** via winget if missing
-3. `vfox add rust` + download/install Rust **1.98.0** from `.vfox.toml` (progress bar + retries)
-4. Install **VS 2022 Build Tools** (MSVC) if `link.exe` is missing
-5. `cargo run` the IDE
+1. Install **curl** (static binary) if missing
+2. Install **Nix** (official installer) if missing
+3. Enter a **nixpkgs 25.05** dev shell from `devops/flake.nix` (Rust, GPUI build deps)
+4. Cache the Nix environment under `~/.cache/verilog-ide/` for fast later runs
+5. `cargo run` the IDE inside that shell
 
 Useful flags:
 
 | Flag | Meaning |
 |------|---------|
-| `-PrepOnly` | Install toolchain only; do not launch |
-| `-Build` | `cargo build` then run |
-| `-Release` | Release build / run |
-| `-ForceSetup` | Reinstall / re-download even if present |
+| `--prep-only` | Install/cache Nix env only; do not launch |
+| `--build` | `cargo build` only (no run) |
+| `--release` | Release build / run |
+| `--force-setup` | Re-fetch Nix packages into the system cache |
 
-```powershell
-.\vfox-run.ps1 -PrepOnly
-.\vfox-run.ps1 -Release
+```bash
+./run.sh --prep-only
+./run.sh --release
+./run.sh --build --release
+./run.sh --force-setup
 ```
 
-## Manual run (after toolchain is ready)
+## Manual run (inside Nix shell)
 
-```powershell
-vfox activate pwsh
-vfox use -p rust@1.98.0
+```bash
+nix develop devops
 cargo run
+# or
+cargo run --release
 ```
 
 ## Layout
 
 ```
-src/           Rust IDE sources
-samples/       Example counter + testbench
-.vfox.toml     Pinned Rust version for vfox
-vfox-run.ps1   Windows bootstrap + run
-run.cmd        CMD launcher for vfox-run.ps1
+src/              Rust IDE sources (GPUI Component)
+samples/          Example counter + testbench
+devops/flake.nix  Nix dev shell (nixpkgs 25.05)
+run.sh            Bootstrap Nix + run inside flake env
 ```
+
+## GUI stack
+
+- [GPUI](https://gpui.rs) — GPU-accelerated UI framework
+- [gpui-component](https://github.com/longbridge/gpui-component) — styled components, editor, resizable panels
+
+On non-NixOS Linux, if the GUI fails to start, install a [nixGL](https://github.com/nix-community/nixGL) Vulkan wrapper (e.g. `nixVulkanIntel`) — `run.sh` will use it automatically when available.
