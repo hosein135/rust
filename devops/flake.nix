@@ -43,7 +43,7 @@
             pkgs.gdk-pixbuf
             pkgs.gtk3
             pkgs.xorg.libX11
-            pkgs.xorg.libXcb
+            pkgs.xorg.libxcb
             pkgs.xorg.libXcursor
             pkgs.xorg.libXi
             pkgs.xorg.libXrandr
