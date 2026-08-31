@@ -16,7 +16,7 @@ const SIDEBAR_WIDTH: f32 = 240.0;
 const BOTTOM_HEIGHT: f32 = 180.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum BottomTab {
+pub(crate) enum BottomTab {
     Console,
     Problems,
 }

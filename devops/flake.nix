@@ -26,20 +26,24 @@
             overlays = [ (import rust-overlay) ];
           };
           rustToolchain = pkgs.rust-bin.stable."1.88.0".default;
-          linuxWindowing = pkgs.lib.optionals pkgs.stdenv.isLinux [
+          linuxRuntimeLibs = pkgs.lib.optionals pkgs.stdenv.isLinux [
             pkgs.libxkbcommon
             pkgs.fontconfig
             pkgs.freetype
+            pkgs.dbus
+            pkgs.libdrm
+            pkgs.systemd
             pkgs.wayland
             pkgs.wayland-protocols
-            pkgs.xorg.libxshmfence
             pkgs.xorg.libX11
+            pkgs.xorg.libXext
             pkgs.xorg.libxcb
             pkgs.xorg.libXcursor
             pkgs.xorg.libXi
             pkgs.xorg.libXrandr
             pkgs.xorg.libXfixes
             pkgs.xorg.libXrender
+            pkgs.xorg.libxshmfence
           ];
         in
         {
@@ -56,14 +60,18 @@
               git
               curl
               perl
-            ]
-            ++ linuxWindowing;
+            ];
+
+            buildInputs = linuxRuntimeLibs;
 
             shellHook = ''
               export VERILOG_IDE_NIX=1
               export RUST_BACKTRACE=1
               export ICED_BACKEND=tiny-skia
               export LIBCLANG_PATH="${pkgs.llvmPackages.libclang.lib}/lib"
+              ${pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+                export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath linuxRuntimeLibs}:$LD_LIBRARY_PATH"
+              ''}
             '';
           };
         }
