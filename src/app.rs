@@ -716,11 +716,11 @@ impl VerilogIde {
         .into()
     }
 
-    fn render_tree_nodes<'a>(
-        &'a self,
-        node: &'a TreeNode,
+    fn render_tree_nodes(
+        &self,
+        node: &TreeNode,
         depth: usize,
-    ) -> Vec<Element<'a, Message>> {
+    ) -> Vec<Element<'static, Message>> {
         let mut items = Vec::new();
         let indent = depth as f32 * 16.0;
         let is_active = self.active_path().is_some_and(|p| p == &node.path);
@@ -731,7 +731,7 @@ impl VerilogIde {
                 let chevron = if expanded { "▾" } else { "▸" };
                 items.push(tree_row(
                     indent,
-                    &format!("{chevron} 📁 {}", node.name),
+                    format!("{chevron} 📁 {}", node.name),
                     is_active,
                     Message::ToggleDir(node.path.clone()),
                 ));
@@ -743,7 +743,7 @@ impl VerilogIde {
                 };
                 items.push(tree_row(
                     indent,
-                    &format!("  {icon} {}", node.name),
+                    format!("  {icon} {}", node.name),
                     is_active,
                     Message::OpenFile(node.path.clone()),
                 ));
@@ -868,14 +868,15 @@ impl VerilogIde {
     }
 
     fn view_bottom_panel(&self) -> Element<'_, Message> {
+        let problems_label = format!("PROBLEMS ({})", self.problems.len());
         let panel_tabs = row![
             panel_tab(
-                "OUTPUT",
+                "OUTPUT".into(),
                 self.bottom == BottomTab::Console,
                 Message::BottomTabSelected(BottomTab::Console),
             ),
             panel_tab(
-                &format!("PROBLEMS ({})", self.problems.len()),
+                problems_label,
                 self.bottom == BottomTab::Problems,
                 Message::BottomTabSelected(BottomTab::Problems),
             ),
@@ -1091,7 +1092,7 @@ fn menu_dropdown(items: Column<'_, Message>) -> Element<'_, Message> {
         .into()
 }
 
-fn sidebar_action(icon: &str, _tip: &str, msg: Message) -> Element<'_, Message> {
+fn sidebar_action(icon: &'static str, _tip: &str, msg: Message) -> Element<'static, Message> {
     button(text(icon).size(12))
         .on_press(msg)
         .padding([2, 4])
@@ -1122,7 +1123,7 @@ fn activity_icon(label: &str, _active: bool) -> Element<'_, Message> {
         .into()
 }
 
-fn tree_row(indent: f32, label: &str, active: bool, msg: Message) -> Element<'_, Message> {
+fn tree_row(indent: f32, label: String, active: bool, msg: Message) -> Element<'static, Message> {
     row![
         Space::new(Length::Fixed(indent), Length::Shrink),
         button(text(label).size(12).color(if active {
@@ -1147,7 +1148,7 @@ fn tree_row(indent: f32, label: &str, active: bool, msg: Message) -> Element<'_,
     .into()
 }
 
-fn tab_button(title: String, selected: bool, msg: Message) -> Element<'_, Message> {
+fn tab_button(title: String, selected: bool, msg: Message) -> Element<'static, Message> {
     button(text(title).size(12))
         .on_press(msg)
         .padding([8, 14])
@@ -1175,7 +1176,7 @@ fn welcome_button(label: &str, msg: Message) -> Element<'_, Message> {
         .into()
 }
 
-fn panel_tab(label: &str, selected: bool, msg: Message) -> Element<'_, Message> {
+fn panel_tab(label: String, selected: bool, msg: Message) -> Element<'static, Message> {
     button(text(label).size(11))
         .on_press(msg)
         .padding([4, 8])
