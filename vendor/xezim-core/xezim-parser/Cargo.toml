@@ -23,6 +23,10 @@ serde = ["dep:serde"]
 # Consumed by xevdb's Python wrapper (xevdb/src/xevdb/sv.py).
 json-cli = ["serde", "dep:serde_json"]
 
+# Vendored for the IDE. Upstream rustc warnings are not ours to fix.
+[lints.rust]
+warnings = "allow"
+
 [lib]
 name = "sv_parser"
 path = "src/lib.rs"

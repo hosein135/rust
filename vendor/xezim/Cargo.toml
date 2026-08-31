@@ -72,6 +72,10 @@ default = []
 opcode-census = []
 jit = ["dep:cranelift", "dep:cranelift-jit", "dep:cranelift-module", "dep:cranelift-native"]
 
+# Vendored for the IDE. Upstream rustc warnings are not ours to fix.
+[lints.rust]
+warnings = "allow"
+
 [[bin]]
 name = "xezim"
 path = "src/main.rs"

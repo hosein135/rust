@@ -28,6 +28,10 @@ zstd = "0.13"
 default = ["mimalloc-allocator"]
 mimalloc-allocator = ["dep:mimalloc"]
 
+# Vendored for the IDE. Upstream rustc warnings are not ours to fix.
+[lints.rust]
+warnings = "allow"
+
 [lib]
 name = "xezim_core"
 path = "src/lib.rs"
