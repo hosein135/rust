@@ -3,10 +3,11 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+    rust-overlay.url = "github:oxalica/rust-overlay";
   };
 
   outputs =
-    { self, nixpkgs }:
+    { self, nixpkgs, rust-overlay }:
     let
       systems = [
         "x86_64-linux"
@@ -20,7 +21,11 @@
       devShells = forAllSystems (
         system:
         let
-          pkgs = nixpkgs.legacyPackages.${system};
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ (import rust-overlay) ];
+          };
+          rustToolchain = pkgs.rust-bin.stable."1.88.0".default;
           linuxWindowing = pkgs.lib.optionals pkgs.stdenv.isLinux [
             pkgs.libxkbcommon
             pkgs.fontconfig
@@ -41,10 +46,7 @@
           default = pkgs.mkShell {
             name = "verilog-ide";
             packages = with pkgs; [
-              rustc
-              cargo
-              rustfmt
-              clippy
+              rustToolchain
               pkg-config
               openssl
               clang

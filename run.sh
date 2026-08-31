@@ -525,8 +525,15 @@ ensure_flake_lock() {
     restore_cached_flake_lock
     mkdir -p "${SYSTEM_CACHE}"
     stage_flake
+    local lock_needs_update=false
     if [ ! -f "${SYSTEM_FLAKE}/flake.lock" ]; then
-        step "Creating flake.lock (nixpkgs 25.05) — first time on this system ..."
+        lock_needs_update=true
+    elif grep -q 'rust-overlay.url' "${FLAKE_DIR}/flake.nix" \
+        && ! grep -q '"rust-overlay"' "${FLAKE_DIR}/flake.lock" 2>/dev/null; then
+        lock_needs_update=true
+    fi
+    if [ "${lock_needs_update}" = true ]; then
+        step "Updating flake.lock ..."
         nix flake lock "$(flake_ref)" --update-lock-file
         cp -f "${SYSTEM_FLAKE}/flake.lock" "${FLAKE_DIR}/flake.lock"
     fi

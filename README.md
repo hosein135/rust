@@ -21,7 +21,7 @@ What `run.sh` does (same pattern as [jadex_django/run.sh](../jadex_django/run.sh
 
 1. Install **curl** (static binary) if missing
 2. Install **Nix** (official installer) if missing
-3. Enter a **nixpkgs 25.05** dev shell from `devops/flake.nix` (Rust, iced build deps)
+3. Enter a **nixpkgs 25.05** dev shell from `devops/flake.nix` (Rust **1.88**, iced build deps)
 4. Cache the Nix environment under `~/.cache/verilog-ide/` for fast later runs
 5. `cargo run` the IDE inside that shell
 
