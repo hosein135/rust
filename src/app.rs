@@ -1133,11 +1133,11 @@ fn menu_item(label: &'static str, msg: Message) -> Element<'static, Message> {
         .into()
 }
 
-fn menu_dropdown_left(menu: TopMenu) -> f32 {
+fn menu_dropdown_left(menu: TopMenu) -> u16 {
     match menu {
-        TopMenu::File => 8.0,
-        TopMenu::Edit => 52.0,
-        TopMenu::Help => 96.0,
+        TopMenu::File => 8,
+        TopMenu::Edit => 52,
+        TopMenu::Help => 96,
     }
 }
 
