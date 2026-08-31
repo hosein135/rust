@@ -1,4 +1,4 @@
-//! Scaffold templates for modules and testbenches.
+//! Scaffold templates for new files and samples.
 
 pub fn module_template(name: &str) -> String {
     let safe = sanitize_ident(name);
@@ -17,55 +17,6 @@ module {safe} (
             data_out <= 8'h00;
         else
             data_out <= data_in;
-    end
-
-endmodule
-"#
-    )
-}
-
-pub fn testbench_template(dut: &str) -> String {
-    let safe = sanitize_ident(dut);
-    let tb = format!("{safe}_tb");
-    format!(
-        r#"`timescale 1ns / 1ps
-// {tb}.v — testbench for {safe}
-module {tb};
-
-    reg        clk;
-    reg        rst_n;
-    reg  [7:0] data_in;
-    wire [7:0] data_out;
-
-    {safe} uut (
-        .clk     (clk),
-        .rst_n   (rst_n),
-        .data_in (data_in),
-        .data_out(data_out)
-    );
-
-    // 100 MHz clock
-    initial clk = 1'b0;
-    always #5 clk = ~clk;
-
-    initial begin
-        $dumpfile("{safe}.vcd");
-        $dumpvars(0, {tb});
-
-        rst_n   = 1'b0;
-        data_in = 8'h00;
-        #20;
-        rst_n = 1'b1;
-
-        data_in = 8'hA5;
-        #20;
-        data_in = 8'h3C;
-        #20;
-        data_in = 8'hFF;
-        #40;
-
-        $display("TB done. data_out = %02h", data_out);
-        $finish;
     end
 
 endmodule

@@ -49,8 +49,6 @@ pub(crate) enum TopMenu {
 
 #[derive(Clone)]
 enum Dialog {
-    NewModule { name: String },
-    NewTestbench { name: String },
     NewFile { name: String },
     NewFolder { name: String },
     Find { query: String },
@@ -94,8 +92,6 @@ pub enum Message {
     RefreshExplorer,
     ShowNewFile,
     ShowNewFolder,
-    ShowNewModule,
-    ShowNewTestbench,
     ShowFind,
     ShowAbout,
     DialogInput(String),
@@ -325,20 +321,6 @@ impl VerilogIde {
                 });
                 Task::none()
             }
-            Message::ShowNewModule => {
-                self.menu_open = None;
-                self.dialog = Some(Dialog::NewModule {
-                    name: String::new(),
-                });
-                Task::none()
-            }
-            Message::ShowNewTestbench => {
-                self.menu_open = None;
-                self.dialog = Some(Dialog::NewTestbench {
-                    name: String::new(),
-                });
-                Task::none()
-            }
             Message::ShowFind => {
                 self.menu_open = None;
                 self.dialog = Some(Dialog::Find {
@@ -353,8 +335,6 @@ impl VerilogIde {
             }
             Message::DialogInput(value) => {
                 match &mut self.dialog {
-                    Some(Dialog::NewModule { name }) => *name = value,
-                    Some(Dialog::NewTestbench { name }) => *name = value,
                     Some(Dialog::NewFile { name }) => *name = value,
                     Some(Dialog::NewFolder { name }) => *name = value,
                     Some(Dialog::Find { query }) => *query = value,
@@ -366,8 +346,6 @@ impl VerilogIde {
                 let dialog = self.dialog.take();
                 if let Some(dialog) = dialog {
                     match dialog {
-                        Dialog::NewModule { name } => self.create_module(&name),
-                        Dialog::NewTestbench { name } => self.create_testbench(&name),
                         Dialog::NewFile { name } => self.create_file(&name),
                         Dialog::NewFolder { name } => self.create_folder(&name),
                         Dialog::Find { query } => {
@@ -560,32 +538,6 @@ impl VerilogIde {
         self.log(&format!("Created folder {}\n", path.display()));
     }
 
-    fn create_module(&mut self, name: &str) {
-        if name.trim().is_empty() {
-            return;
-        }
-        self.create_file(&format!("{}.v", name.trim()));
-    }
-
-    fn create_testbench(&mut self, dut: &str) {
-        if dut.trim().is_empty() {
-            return;
-        }
-        let Some(root) = self.project_root() else {
-            self.log_err("Open a folder first.");
-            return;
-        };
-        let path = root.join(format!("{}_tb.v", dut.trim()));
-        let body = templates::testbench_template(dut.trim());
-        if let Err(e) = std::fs::write(&path, body) {
-            self.log_err(&e.to_string());
-            return;
-        }
-        self.refresh_tree();
-        self.open_path(&path);
-        self.log(&format!("Created testbench {}\n", path.display()));
-    }
-
     fn find_next(&mut self) {
         if self.search_query.is_empty() {
             return;
@@ -685,8 +637,6 @@ impl VerilogIde {
                 menu_item("Open File…", Message::OpenFilePicker),
                 menu_item("New File…", Message::ShowNewFile),
                 menu_item("New Folder…", Message::ShowNewFolder),
-                menu_item("New Verilog Module…", Message::ShowNewModule),
-                menu_item("New Testbench…", Message::ShowNewTestbench),
                 menu_item("Save", Message::Save),
                 menu_item("Save All", Message::SaveAll),
                 menu_item("Close Folder", Message::CloseProject),
@@ -1051,8 +1001,6 @@ impl VerilogIde {
         };
 
         let (title, input, show_input) = match dialog {
-            Dialog::NewModule { name } => ("New Verilog Module", name.clone(), true),
-            Dialog::NewTestbench { name } => ("New Testbench", name.clone(), true),
             Dialog::NewFile { name } => ("New File", name.clone(), true),
             Dialog::NewFolder { name } => ("New Folder", name.clone(), true),
             Dialog::Find { query } => ("Find", query.clone(), true),
