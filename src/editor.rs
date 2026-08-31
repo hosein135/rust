@@ -2,7 +2,7 @@
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer::{self, Quad};
-use iced::advanced::text::{self, Renderer as _};
+use iced::advanced::text;
 use iced::advanced::widget::Tree;
 use iced::advanced::Widget;
 use iced::alignment;

@@ -977,7 +977,7 @@ impl VerilogIde {
             .wrapping(Wrapping::None)
             .height(Length::Fixed(content_h))
             .on_action(Message::EditorAction)
-            .key_binding(|press| match &press.modified_key {
+            .key_binding(|press| match &press.key {
                 Key::Named(keyboard::key::Named::PageDown) => {
                     Some(text_editor::Binding::Custom(Message::EditorPage(1)))
                 }
