@@ -24,11 +24,45 @@ endmodule
     )
 }
 
+/// Testbench scaffold with `$dumpfile` / `$dumpvars` so xezim `--wave` writes a VCD.
+pub fn testbench_template(name: &str) -> String {
+    let safe = sanitize_ident(name);
+    let vcd = format!("{safe}.vcd");
+    format!(
+        r#"`timescale 1ns / 1ps
+// {safe}.v — testbench (xezim writes {vcd} when you click Run)
+module {safe};
+
+    // Instantiate the DUT here, then drive clocks / stimulus below.
+
+    initial begin
+        $dumpfile("{vcd}");
+        $dumpvars(0, {safe});
+        #100;
+        $dumpflush;
+        $finish;
+    end
+
+endmodule
+"#
+    )
+}
+
+pub fn is_testbench_filename(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    let stem = n.rsplit_once('.').map(|(s, _)| s).unwrap_or(&n);
+    stem.ends_with("_tb")
+        || stem.starts_with("tb_")
+        || stem.ends_with("_testbench")
+        || stem.ends_with("_test")
+        || stem.contains("testbench")
+}
+
 pub fn counter_example() -> (&'static str, &'static str, &'static str, &'static str) {
     (
         "counter.v",
         r#"`timescale 1ns / 1ps
-// 4-bit up counter
+// 4-bit up counter (DUT). Run counter_tb.v with xezim to write counter.vcd.
 module counter (
     input  wire       clk,
     input  wire       rst_n,
@@ -46,8 +80,12 @@ module counter (
 endmodule
 "#,
         "counter_tb.v",
-        r#"`timescale 1ns / 1ps
-// Testbench for counter
+        COUNTER_TB,
+    )
+}
+
+const COUNTER_TB: &str = r#"`timescale 1ns / 1ps
+// Testbench for counter — xezim --wave writes counter.vcd
 module counter_tb;
 
     reg        clk;
@@ -78,13 +116,12 @@ module counter_tb;
         repeat (20) @(posedge clk);
 
         $display("Final count = %0d", q);
+        $dumpflush;
         $finish;
     end
 
 endmodule
-"#,
-    )
-}
+"#;
 
 fn sanitize_ident(name: &str) -> String {
     let mut out = String::new();

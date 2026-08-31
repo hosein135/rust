@@ -18,6 +18,8 @@ Thumbs.db
 
 # Build artifacts
 *.o
+*.vcd
+*.fst
 
 # Local data
 .verilog-ide-data/

@@ -3,6 +3,7 @@
 mod app;
 mod editor;
 mod project;
+mod sim;
 mod templates;
 mod verilog_highlighter;
 

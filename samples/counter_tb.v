@@ -1,5 +1,5 @@
 `timescale 1ns / 1ps
-// Testbench for counter
+// Testbench for counter — xezim --wave writes counter.vcd
 module counter_tb;
 
     reg        clk;
@@ -30,6 +30,7 @@ module counter_tb;
         repeat (20) @(posedge clk);
 
         $display("Final count = %0d", q);
+        $dumpflush;
         $finish;
     end
 

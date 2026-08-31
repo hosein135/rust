@@ -11,6 +11,7 @@ use crate::project::{
     collect_dir_paths, find_first_verilog, load_file, locate_samples_dir, save_file, IdeProject,
     OpenFile, TreeNode,
 };
+use crate::sim::{self, SimResult};
 use crate::templates::{self, counter_example};
 use iced::keyboard::{self, Key};
 use iced::widget::text::Wrapping;
@@ -19,7 +20,8 @@ use iced::widget::{
     stack, text, text_editor, text_input, Column, Space,
 };
 use iced::{
-    Alignment, Border, Color, Element, Fill, Font, Length, Padding, Point, Shadow, Task, Theme,
+    Alignment, Border, Color, Element, Fill, Font, Length, Padding, Point, Shadow, Subscription,
+    Task, Theme,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -53,6 +55,7 @@ pub(crate) enum BottomTab {
 pub(crate) enum TopMenu {
     File,
     Edit,
+    Run,
     Help,
 }
 
@@ -81,6 +84,7 @@ pub struct VerilogIde {
     dialog: Option<Dialog>,
     menu_open: Option<TopMenu>,
     search_query: String,
+    sim_running: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +118,8 @@ pub enum Message {
     ClearBottom,
     MenuToggle(TopMenu),
     MenuClose,
+    RunSim,
+    SimFinished(SimResult),
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +130,7 @@ pub enum DialogError {
 pub fn run() -> iced::Result {
     iced::application("Verilog IDE", VerilogIde::update, VerilogIde::view)
         .theme(|_| Theme::Dark)
+        .subscription(VerilogIde::subscription)
         .window(iced::window::Settings {
             size: iced::Size::new(1280.0, 800.0),
             min_size: Some(iced::Size::new(900.0, 560.0)),
@@ -152,9 +159,20 @@ impl VerilogIde {
                 dialog: None,
                 menu_open: None,
                 search_query: String::new(),
+                sim_running: false,
             },
             Task::none(),
         )
+    }
+
+    fn subscription(&self) -> Subscription<Message> {
+        keyboard::on_key_press(|key, _modifiers| {
+            if matches!(key, Key::Named(keyboard::key::Named::F5)) {
+                Some(Message::RunSim)
+            } else {
+                None
+            }
+        })
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -412,6 +430,84 @@ impl VerilogIde {
                 }
                 Task::none()
             }
+            Message::RunSim => self.start_simulation(),
+            Message::SimFinished(result) => {
+                self.sim_running = false;
+                self.bottom = BottomTab::Console;
+                self.bottom_visible = true;
+                if !result.log.is_empty() {
+                    if !self.console.ends_with('\n') && !self.console.is_empty() {
+                        self.console.push('\n');
+                    }
+                    self.console.push_str(&result.log);
+                    if !result.log.ends_with('\n') {
+                        self.console.push('\n');
+                    }
+                }
+                if !result.ok {
+                    self.problems
+                        .push("xezim simulation failed. See OUTPUT.".into());
+                    self.status = "Simulation failed".into();
+                } else if let Some(vcd) = result.vcd {
+                    self.status = format!("Wrote {}", vcd.display());
+                    self.refresh_tree();
+                } else {
+                    self.status = "Simulation finished (no VCD)".into();
+                    self.problems.push(
+                        "Simulation finished but no .vcd was produced. Add $dumpfile / $dumpvars to the testbench."
+                            .into(),
+                    );
+                }
+                Task::none()
+            }
+        }
+    }
+
+    fn start_simulation(&mut self) -> Task<Message> {
+        self.menu_open = None;
+        if self.sim_running {
+            return Task::none();
+        }
+        if self.dialog.is_some() {
+            return Task::none();
+        }
+        self.sync_editor_to_active();
+        let mut errors = Vec::new();
+        for f in &mut self.open {
+            if f.dirty {
+                if let Err(e) = save_file(f) {
+                    errors.push(e);
+                }
+            }
+        }
+        if !errors.is_empty() {
+            for e in errors {
+                self.problems.push(e.clone());
+                self.log(&format!("ERROR: {e}\n"));
+            }
+            self.log_err("Save failed; simulation not started.");
+            return Task::none();
+        }
+
+        let Some(root) = self.project_root() else {
+            self.log_err("Open a folder first (File → Open Folder), then click Run.");
+            return Task::none();
+        };
+        let active = self.active_path().cloned();
+        match sim::prepare_job(&root, active.as_deref(), &self.open) {
+            Ok(job) => {
+                self.sim_running = true;
+                self.bottom = BottomTab::Console;
+                self.bottom_visible = true;
+                self.status = "Running xezim…".into();
+                self.log("Simulating with xezim (--wave) to generate a VCD…\n");
+                self.log(&format!("{}\n", job.command_preview()));
+                Task::perform(sim::run_job_async(job), Message::SimFinished)
+            }
+            Err(e) => {
+                self.log_err(&e);
+                Task::none()
+            }
         }
     }
 
@@ -589,8 +685,15 @@ impl VerilogIde {
             self.log_err(&format!("Already exists: {}", path.display()));
             return;
         }
-        let body = if is_verilog_name(name) {
-            templates::module_template(name.trim_end_matches(".v").trim_end_matches(".sv"))
+        let stem = name
+            .trim_end_matches(".sv")
+            .trim_end_matches(".v")
+            .trim_end_matches(".SV")
+            .trim_end_matches(".V");
+        let body = if templates::is_testbench_filename(name) {
+            templates::testbench_template(stem)
+        } else if is_verilog_name(name) {
+            templates::module_template(stem)
         } else {
             String::new()
         };
@@ -730,6 +833,9 @@ impl VerilogIde {
                 menu_item("Find…", Message::ShowFind),
                 menu_item("Refresh Explorer", Message::RefreshExplorer),
             ]),
+            TopMenu::Run => menu_dropdown(column![
+                menu_item("Run Simulation (F5)", Message::RunSim),
+            ]),
             TopMenu::Help => {
                 menu_dropdown(column![menu_item("About Verilog IDE", Message::ShowAbout)])
             }
@@ -739,14 +845,17 @@ impl VerilogIde {
     fn view_menu_bar(&self) -> Element<'_, Message> {
         let file_active = self.menu_open == Some(TopMenu::File);
         let edit_active = self.menu_open == Some(TopMenu::Edit);
+        let run_active = self.menu_open == Some(TopMenu::Run);
         let help_active = self.menu_open == Some(TopMenu::Help);
 
         container(
             row![
                 menu_label("File", file_active, Message::MenuToggle(TopMenu::File)),
                 menu_label("Edit", edit_active, Message::MenuToggle(TopMenu::Edit)),
+                menu_label("Run", run_active, Message::MenuToggle(TopMenu::Run)),
                 menu_label("Help", help_active, Message::MenuToggle(TopMenu::Help)),
                 horizontal_space(),
+                run_toolbar_button(self.sim_running),
                 text("Verilog IDE").size(12).color(FG_MUTED),
             ]
             .height(Fill)
@@ -941,7 +1050,9 @@ impl VerilogIde {
             return container(
                 column![
                     text("Verilog IDE").size(32).color(FG_TEXT),
-                    text("Open a folder to start editing.").size(14).color(FG_MUTED),
+                    text("Open a folder, then ▶ Run (F5) to simulate with xezim and write a .vcd.")
+                        .size(14)
+                        .color(FG_MUTED),
                     Space::new(Length::Shrink, Length::Fixed(16.0)),
                     row![
                         welcome_button("Open Folder", Message::OpenProject),
@@ -951,7 +1062,7 @@ impl VerilogIde {
                     .spacing(12)
                     .align_y(Alignment::Center),
                     Space::new(Length::Shrink, Length::Fixed(24.0)),
-                    text("File → Open Folder    Ctrl-less for now")
+                    text("File → Open Folder    Run → Run Simulation (F5)")
                         .size(12)
                         .color(FG_MUTED),
                 ]
@@ -983,6 +1094,9 @@ impl VerilogIde {
                 }
                 Key::Named(keyboard::key::Named::PageUp) => {
                     Some(text_editor::Binding::Custom(Message::EditorPage(-1)))
+                }
+                Key::Named(keyboard::key::Named::F5) => {
+                    Some(text_editor::Binding::Custom(Message::RunSim))
                 }
                 _ => text_editor::Binding::from_key_press(press),
             })
@@ -1153,6 +1267,7 @@ impl VerilogIde {
             column![
                 text("About Verilog IDE").size(14),
                 text("Desktop IDE for Verilog HDL and testbenches."),
+                text("Run ▶ uses xezim (https://github.com/aionhw/xezim) to write a .vcd waveform."),
                 button("Close").on_press(Message::DialogCancel),
             ]
             .spacing(6)
@@ -1250,8 +1365,38 @@ fn menu_dropdown_left(menu: TopMenu) -> f32 {
     match menu {
         TopMenu::File => 8.0,
         TopMenu::Edit => 52.0,
-        TopMenu::Help => 96.0,
+        TopMenu::Run => 96.0,
+        TopMenu::Help => 140.0,
     }
+}
+
+fn run_toolbar_button(running: bool) -> Element<'static, Message> {
+    let label = if running { "Running…" } else { "▶ Run" };
+    let mut btn = button(text(label).size(13)).padding([4, 14]).style(move |_, status| {
+        let hovered = matches!(
+            status,
+            iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
+        );
+        iced::widget::button::Style {
+            background: Some(iced::Background::Color(if running {
+                Color::from_rgb(0.18, 0.42, 0.22)
+            } else if hovered {
+                Color::from_rgb(0.16, 0.58, 0.28)
+            } else {
+                Color::from_rgb(0.12, 0.52, 0.24)
+            })),
+            text_color: Color::WHITE,
+            border: Border {
+                radius: 3.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    });
+    if !running {
+        btn = btn.on_press(Message::RunSim);
+    }
+    btn.into()
 }
 
 fn menu_dropdown(items: Column<'_, Message>) -> Element<'_, Message> {

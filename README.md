@@ -8,6 +8,7 @@ Desktop IDE for **Verilog** HDL and **testbenches**, written in Rust with [iced]
 - Multi-tab code editor with line numbers and syntax highlighting
 - New module / new testbench templates
 - Sample counter + testbench under `samples/`
+- **Run** button (F5): simulate Verilog + testbench with [xezim](https://github.com/aionhw/xezim) and write a `.vcd` waveform
 - Console + problems panel, find, save shortcuts
 
 ## Setup and run (Linux / macOS / WSL)
@@ -21,7 +22,7 @@ What `run.sh` does (same pattern as [jadex_django/run.sh](../jadex_django/run.sh
 
 1. Install **curl** (static binary) if missing
 2. Install **Nix** (official installer) if missing
-3. Enter a **nixpkgs 25.05** dev shell from `devops/flake.nix` (Rust **1.88**, iced build deps)
+3. Enter a **nixpkgs 25.05** dev shell from `devops/flake.nix` (Rust **1.88**, iced build deps, xezim wrapper)
 4. Cache the Nix environment under `~/.cache/verilog-ide/` for fast later runs
 5. `cargo run` the IDE inside that shell
 
@@ -41,6 +42,20 @@ Useful flags:
 ./run.sh --force-setup
 ```
 
+## Simulate (VCD)
+
+Open a folder that contains RTL plus a testbench (`*_tb.v`), then click **▶ Run** (or press **F5**).
+
+The IDE saves dirty files and runs:
+
+```text
+xezim --wave --simulate --max-time 1ms -s <testbench_module> <sources…>
+```
+
+xezim only writes a VCD when the testbench calls `$dumpfile` / `$dumpvars` **and** the run passes `--wave` (the IDE always passes it). The sample `samples/counter_tb.v` already does this; the waveform lands at `counter.vcd` in the project folder.
+
+xezim comes from the Nix dev shell (`./run.sh`). The first Run compiles it into `~/.cache/verilog-ide/xezim-build/` (several minutes). Later runs reuse that binary. You can also put a prebuilt `xezim` on `PATH` or set `XEZIM`.
+
 ## Manual run (inside Nix shell)
 
 ```bash
@@ -54,8 +69,9 @@ cargo run --release
 
 ```
 src/              Rust IDE sources (iced)
+src/sim.rs        xezim runner (VCD)
 samples/          Example counter + testbench
-devops/flake.nix  Nix dev shell (nixpkgs 25.05)
+devops/flake.nix  Nix dev shell (nixpkgs 25.05, xezim wrapper)
 run.sh            Bootstrap Nix + run inside flake env
 ```
 

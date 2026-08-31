@@ -1,5 +1,5 @@
 `timescale 1ns / 1ps
-// 4-bit up counter
+// 4-bit up counter (DUT). Run counter_tb.v with xezim to write counter.vcd.
 module counter (
     input  wire       clk,
     input  wire       rst_n,

@@ -95,6 +95,25 @@ pub fn find_first_verilog(root: &Path) -> Option<PathBuf> {
     files.into_iter().next()
 }
 
+/// Compile units for simulation: `.v` / `.sv` only (headers are included).
+pub fn collect_hdl_sources(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_verilog_files(root, &mut files);
+    files.retain(|p| is_hdl_source(p));
+    files.sort();
+    files
+}
+
+pub fn is_hdl_source(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref(),
+        Some("v" | "sv")
+    )
+}
+
 fn collect_verilog_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
