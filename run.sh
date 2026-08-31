@@ -595,6 +595,7 @@ run_gui() {
 launch_app() {
     prefer_unix_path
     cd "${SCRIPT_DIR}"
+    export VERILOG_IDE_SAMPLES_DIR="${SCRIPT_DIR}/samples"
 
     if [ "${PREP_ONLY}" = true ]; then
         info "Prep-only — Nix env ready (rustc: $(rustc --version 2>/dev/null || echo missing))."

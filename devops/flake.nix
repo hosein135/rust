@@ -27,6 +27,11 @@
           };
           rustToolchain = pkgs.rust-bin.stable."1.88.0".default;
           linuxRuntimeLibs = pkgs.lib.optionals pkgs.stdenv.isLinux [
+            pkgs.gtk3
+            pkgs.glib
+            pkgs.cairo
+            pkgs.pango
+            pkgs.gdk-pixbuf
             pkgs.libxkbcommon
             pkgs.fontconfig
             pkgs.freetype

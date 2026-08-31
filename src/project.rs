@@ -2,7 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IdeProject {
@@ -39,26 +38,96 @@ impl IdeProject {
         build_dir_tree(&self.root)
     }
 
-    pub fn list_verilog_files(&self) -> Vec<PathBuf> {
-        WalkDir::new(&self.root)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-            .map(|e| e.into_path())
-            .filter(|p| is_verilog_path(p))
-            .collect()
-    }
-
     pub fn refresh_tree(&self) -> TreeNode {
         self.build_tree()
     }
 }
 
-pub fn is_verilog_path(path: &Path) -> bool {
+/// Locate the bundled `samples/` directory (repo or cwd).
+pub fn locate_samples_dir() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(env) = std::env::var("VERILOG_IDE_SAMPLES_DIR") {
+        if !env.is_empty() {
+            candidates.push(PathBuf::from(env));
+        }
+    }
+
+    candidates.push(PathBuf::from("samples"));
+
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("samples"));
+        candidates.extend(walk_up(cwd).into_iter().map(|p| p.join("samples")));
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("samples"));
+            candidates.extend(walk_up(dir.to_path_buf()).into_iter().map(|p| p.join("samples")));
+        }
+    }
+
+    candidates.into_iter().find(|p| {
+        p.is_dir()
+            && (p.join("counter.v").is_file()
+                || p.read_dir()
+                    .map(|mut d| d.next().is_some())
+                    .unwrap_or(false))
+    })
+}
+
+fn walk_up(mut start: PathBuf) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    loop {
+        if !start.pop() {
+            break;
+        }
+        out.push(start.clone());
+    }
+    out
+}
+
+/// First Verilog source file under `root` (sorted by path).
+pub fn find_first_verilog(root: &Path) -> Option<PathBuf> {
+    let mut files = Vec::new();
+    collect_verilog_files(root, &mut files);
+    files.sort();
+    files.into_iter().next()
+}
+
+fn collect_verilog_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if should_skip(&name) || name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            collect_verilog_files(&path, out);
+        } else if is_verilog_file(&path) {
+            out.push(path);
+        }
+    }
+}
+
+fn is_verilog_file(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()).as_deref(),
         Some("v" | "vh" | "sv" | "svh" | "vl")
     )
+}
+
+/// Collect all directory paths in a tree (for expand-all in explorer).
+pub fn collect_dir_paths(node: &TreeNode, out: &mut Vec<PathBuf>) {
+    if node.is_dir {
+        out.push(node.path.clone());
+        for child in &node.children {
+            collect_dir_paths(child, out);
+        }
+    }
 }
 
 fn should_skip(name: &str) -> bool {
