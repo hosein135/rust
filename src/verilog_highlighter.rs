@@ -1,6 +1,6 @@
 //! Verilog / SystemVerilog syntax highlighter for the iced text editor.
 
-use iced::advanced::text::highlighter::{self, Format, Highlighter};
+use iced::advanced::text::highlighter::{self, Format};
 use iced::{Color, Font};
 use std::ops::Range;
 use std::path::Path;
@@ -59,6 +59,10 @@ impl Highlight {
             TokenKind::Operator => Color::from_rgb(0.65, 0.75, 0.90),
         }
     }
+}
+
+pub fn format_highlight(highlight: &Highlight, _theme: &iced::Theme) -> Format<Font> {
+    highlight.to_format()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

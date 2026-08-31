@@ -4,7 +4,9 @@ use crate::editor::{
     self, cursor_from_line_col, cursor_line_col, EDITOR_FONT_SIZE, EDITOR_LINE_HEIGHT,
     EDITOR_PADDING,
 };
-use crate::verilog_highlighter::{self, Highlight, Settings as VerilogHighlightSettings};
+use crate::verilog_highlighter::{
+    self, Settings as VerilogHighlightSettings, VerilogHighlighter,
+};
 use crate::project::{
     collect_dir_paths, find_first_verilog, load_file, locate_samples_dir, save_file, IdeProject,
     OpenFile, TreeNode,
@@ -925,14 +927,14 @@ impl VerilogIde {
             .padding(EDITOR_PADDING)
             .height(Fill)
             .on_action(Message::EditorAction)
-            .highlight_with(
+            .highlight_with::<VerilogHighlighter>(
                 VerilogHighlightSettings {
                     enabled: self
                         .active_path()
                         .map(|path| verilog_highlighter::syntax_enabled_for_path(path.as_path()))
                         .unwrap_or(true),
                 },
-                |highlight: &Highlight, _theme| highlight.to_format(),
+                verilog_highlighter::format_highlight,
             );
 
         row![
