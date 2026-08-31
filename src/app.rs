@@ -1275,7 +1275,7 @@ async fn pick_folder(title: &str) -> Result<Option<PathBuf>, DialogError> {
     if zenity_available() {
         return tokio::task::spawn_blocking(move || pick_folder_zenity(&title))
             .await
-            .map_err(|_| DialogError::Cancelled);
+            .map_err(|_| DialogError::Cancelled)?;
     }
 
     let picked = rfd::AsyncFileDialog::new()
@@ -1293,7 +1293,7 @@ async fn pick_file(title: &str) -> Result<Option<PathBuf>, DialogError> {
     if zenity_available() {
         return tokio::task::spawn_blocking(move || pick_file_zenity(&title))
             .await
-            .map_err(|_| DialogError::Cancelled);
+            .map_err(|_| DialogError::Cancelled)?;
     }
 
     let picked = rfd::AsyncFileDialog::new()
