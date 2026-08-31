@@ -12,11 +12,15 @@ use crate::project::{
     OpenFile, TreeNode,
 };
 use crate::templates::{self, counter_example};
+use iced::keyboard::{self, Key};
+use iced::widget::text::Wrapping;
 use iced::widget::{
     button, column, container, horizontal_rule, horizontal_space, mouse_area, row, scrollable,
     stack, text, text_editor, text_input, Column, Space,
 };
-use iced::{Alignment, Border, Color, Element, Fill, Font, Length, Padding, Shadow, Task, Theme};
+use iced::{
+    Alignment, Border, Color, Element, Fill, Font, Length, Padding, Point, Shadow, Task, Theme,
+};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -67,7 +71,8 @@ pub struct VerilogIde {
     open: Vec<OpenFile>,
     active: Option<usize>,
     editor_content: text_editor::Content,
-    editor_scroll_top: f32,
+    editor_scroll_y: f32,
+    editor_view_h: f32,
     console: String,
     problems: Vec<String>,
     bottom: BottomTab,
@@ -91,6 +96,8 @@ pub enum Message {
     SelectTab(usize),
     CloseTab(usize),
     EditorAction(text_editor::Action),
+    EditorScrolled { offset_y: f32, view_h: f32 },
+    EditorPage(i32),
     Save,
     SaveAll,
     CloseProject,
@@ -135,7 +142,8 @@ impl VerilogIde {
                 open: Vec::new(),
                 active: None,
                 editor_content: text_editor::Content::new(),
-                editor_scroll_top: 0.0,
+                editor_scroll_y: 0.0,
+                editor_view_h: 480.0,
                 console: "Verilog IDE ready.\n".into(),
                 problems: Vec::new(),
                 bottom: BottomTab::Console,
@@ -169,7 +177,7 @@ impl VerilogIde {
             }
             Message::ProjectPicked(Ok(Some(path))) => {
                 self.open_folder_path(path);
-                Task::none()
+                editor::scroll_to_y(0.0)
             }
             Message::ProjectPicked(_) => Task::none(),
             Message::OpenFilePicker => {
@@ -187,7 +195,7 @@ impl VerilogIde {
                     }
                     self.open_path(&path);
                 }
-                Task::none()
+                editor::scroll_to_y(0.0)
             }
             Message::FilePicked(_) => Task::none(),
             Message::CreateSample => {
@@ -195,7 +203,7 @@ impl VerilogIde {
                 if let Some(samples) = locate_samples_dir() {
                     self.open_project(samples);
                     self.log("Opened bundled sample project (samples/).\n");
-                    Task::none()
+                    editor::scroll_to_y(0.0)
                 } else {
                     Task::perform(
                         pick_folder("Choose parent folder for sample project"),
@@ -214,7 +222,7 @@ impl VerilogIde {
                     self.open_project(root);
                     self.log("Created sample counter + testbench project.\n");
                 }
-                Task::none()
+                editor::scroll_to_y(0.0)
             }
             Message::SampleFolderPicked(_) => Task::none(),
             Message::CloseProject => {
@@ -225,9 +233,8 @@ impl VerilogIde {
                 self.expanded.clear();
                 self.open.clear();
                 self.active = None;
-                self.load_active_into_editor();
                 self.status = "Closed folder".into();
-                Task::none()
+                self.reload_editor()
             }
             Message::RefreshExplorer => {
                 if let Some(project) = self.project.as_ref() {
@@ -237,7 +244,7 @@ impl VerilogIde {
             }
             Message::OpenFile(path) => {
                 self.open_path(&path);
-                Task::none()
+                editor::scroll_to_y(0.0)
             }
             Message::ToggleDir(path) => {
                 if self.expanded.contains(&path) {
@@ -250,8 +257,7 @@ impl VerilogIde {
             Message::SelectTab(idx) => {
                 self.sync_editor_to_active();
                 self.active = Some(idx);
-                self.load_active_into_editor();
-                Task::none()
+                self.reload_editor()
             }
             Message::CloseTab(idx) => {
                 self.sync_editor_to_active();
@@ -264,20 +270,19 @@ impl VerilogIde {
                 } else {
                     Some(idx.min(self.open.len() - 1))
                 };
-                self.load_active_into_editor();
+                self.reload_editor()
+            }
+            Message::EditorScrolled { offset_y, view_h } => {
+                self.editor_scroll_y = offset_y.max(0.0);
+                if view_h > 1.0 {
+                    self.editor_view_h = view_h;
+                }
                 Task::none()
             }
+            Message::EditorPage(direction) => self.page_cursor(direction),
             Message::EditorAction(action) => {
-                if let text_editor::Action::Scroll { lines } = &action {
-                    self.editor_scroll_top =
-                        (self.editor_scroll_top - *lines as f32).max(0.0);
-                    let max_scroll = self
-                        .editor_content
-                        .line_count()
-                        .saturating_sub(1) as f32;
-                    if self.editor_scroll_top > max_scroll {
-                        self.editor_scroll_top = max_scroll;
-                    }
+                if let text_editor::Action::Scroll { lines } = action {
+                    return editor::scroll_by_lines(lines);
                 }
                 if action.is_edit() {
                     if let Some(i) = self.active {
@@ -286,9 +291,20 @@ impl VerilogIde {
                         }
                     }
                 }
+                let follow = matches!(
+                    action,
+                    text_editor::Action::Move(_)
+                        | text_editor::Action::Select(_)
+                        | text_editor::Action::Click(_)
+                        | text_editor::Action::Edit(_)
+                );
                 self.editor_content.perform(action);
                 self.sync_editor_to_active();
-                Task::none()
+                if follow {
+                    self.ensure_cursor_visible()
+                } else {
+                    Task::none()
+                }
             }
             Message::Save => {
                 self.menu_open = None;
@@ -362,11 +378,15 @@ impl VerilogIde {
                 let dialog = self.dialog.take();
                 if let Some(dialog) = dialog {
                     match dialog {
-                        Dialog::NewFile { name } => self.create_file(&name),
+                        Dialog::NewFile { name } => {
+                            self.create_file(&name);
+                            return editor::scroll_to_y(0.0);
+                        }
                         Dialog::NewFolder { name } => self.create_folder(&name),
                         Dialog::Find { query } => {
                             self.search_query = query;
                             self.find_next();
+                            return self.ensure_cursor_visible();
                         }
                         Dialog::About => {}
                     }
@@ -484,14 +504,61 @@ impl VerilogIde {
     }
 
     fn load_active_into_editor(&mut self) {
-        self.editor_scroll_top = 0.0;
+        self.editor_scroll_y = 0.0;
         if let Some(i) = self.active {
             if let Some(file) = self.open.get(i) {
-                self.editor_content = text_editor::Content::with_text(&file.content);
+                let cursor = file.cursor;
+                let content = file.content.clone();
+                self.editor_content = text_editor::Content::with_text(&content);
+                let (line, _) = cursor_line_col(&content, cursor);
+                let y = (line.saturating_sub(1)) as f32 * EDITOR_LINE_HEIGHT
+                    + EDITOR_LINE_HEIGHT * 0.4;
+                self.editor_content
+                    .perform(text_editor::Action::Click(Point::new(2.0, y)));
             }
         } else {
             self.editor_content = text_editor::Content::new();
         }
+    }
+
+    fn reload_editor(&mut self) -> Task<Message> {
+        self.load_active_into_editor();
+        let (line, _) = self.editor_content.cursor_position();
+        let y = (editor::line_top(line) - self.editor_view_h * 0.25).max(0.0);
+        editor::scroll_to_y(y)
+    }
+
+    fn ensure_cursor_visible(&self) -> Task<Message> {
+        let view_h = self.editor_view_h;
+        if view_h <= EDITOR_LINE_HEIGHT {
+            return Task::none();
+        }
+        let (line, _) = self.editor_content.cursor_position();
+        let line_top = editor::line_top(line);
+        let line_bot = line_top + EDITOR_LINE_HEIGHT;
+        let view_top = self.editor_scroll_y;
+        let view_bot = view_top + view_h;
+        let margin = EDITOR_LINE_HEIGHT;
+        let y = if line_top < view_top + margin {
+            (line_top - margin).max(0.0)
+        } else if line_bot + margin > view_bot {
+            (line_bot + margin - view_h).max(0.0)
+        } else {
+            return Task::none();
+        };
+        editor::scroll_to_y(y)
+    }
+
+    fn page_cursor(&mut self, direction: i32) -> Task<Message> {
+        let (line, _) = self.editor_content.cursor_position();
+        let last = self.editor_content.line_count().saturating_sub(1);
+        let page = ((self.editor_view_h / EDITOR_LINE_HEIGHT).floor() as i32 - 2).max(1);
+        let target = (line as i32 + direction * page).clamp(0, last as i32) as usize;
+        let y = target as f32 * EDITOR_LINE_HEIGHT + EDITOR_LINE_HEIGHT * 0.4;
+        self.editor_content
+            .perform(text_editor::Action::Click(Point::new(2.0, y)));
+        self.sync_editor_to_active();
+        self.ensure_cursor_visible()
     }
 
     fn log(&mut self, msg: &str) {
@@ -898,35 +965,27 @@ impl VerilogIde {
             .into();
         }
 
-        let line_count = self.editor_content.line_count();
-        let gutter_w = editor::gutter_width(line_count);
-        let scroll_px = self.editor_scroll_top * EDITOR_LINE_HEIGHT;
-
-        let gutter = container(
-            editor::line_number_text(line_count)
-                .font(Font::MONOSPACE)
-                .color(FG_MUTED),
-        )
-        .width(Fill)
-        .height(Fill)
-        .align_x(Alignment::End)
-        .padding(Padding {
-            top: EDITOR_PADDING - scroll_px,
-            right: 8.0,
-            bottom: EDITOR_PADDING,
-            left: 4.0,
-        })
-        .clip(true);
-
-        let gutter_bg = Color::from_rgb(0.10, 0.10, 0.10);
+        let line_count = self.editor_content.line_count().max(1);
+        let current_line = self.editor_content.cursor_position().0 + 1;
+        let content_h = editor::content_height(line_count, self.editor_view_h);
 
         let editor = text_editor(&self.editor_content)
             .font(Font::MONOSPACE)
             .size(EDITOR_FONT_SIZE)
-            .line_height(EDITOR_LINE_HEIGHT)
+            .line_height(editor::line_height())
             .padding(EDITOR_PADDING)
-            .height(Fill)
+            .wrapping(Wrapping::None)
+            .height(Length::Fixed(content_h))
             .on_action(Message::EditorAction)
+            .key_binding(|press| match &press.modified_key {
+                Key::Named(keyboard::key::Named::PageDown) => {
+                    Some(text_editor::Binding::Custom(Message::EditorPage(1)))
+                }
+                Key::Named(keyboard::key::Named::PageUp) => {
+                    Some(text_editor::Binding::Custom(Message::EditorPage(-1)))
+                }
+                _ => text_editor::Binding::from_key_press(press),
+            })
             .highlight_with::<VerilogHighlighter>(
                 VerilogHighlightSettings {
                     enabled: self
@@ -937,17 +996,32 @@ impl VerilogIde {
                 verilog_highlighter::format_highlight,
             );
 
-        row![
-            container(gutter)
-                .width(Length::Fixed(gutter_w))
-                .height(Fill)
-                .style(move |_| panel_style(gutter_bg)),
+        let body = row![
+            editor::line_gutter(line_count, current_line, self.editor_view_h),
             container(editor)
                 .width(Fill)
-                .height(Fill)
-                .style(|_| panel_style(BG_EDITOR)),
+                .height(Length::Fixed(content_h)),
         ]
+        .spacing(0)
+        .width(Fill)
+        .height(Length::Fixed(content_h));
+
+        container(
+            scrollable(body)
+                .id(editor::scroll_id())
+                .width(Fill)
+                .height(Fill)
+                .direction(iced::widget::scrollable::Direction::Vertical(
+                    iced::widget::scrollable::Scrollbar::new(),
+                ))
+                .on_scroll(|viewport| Message::EditorScrolled {
+                    offset_y: viewport.absolute_offset().y,
+                    view_h: viewport.bounds().height,
+                }),
+        )
+        .width(Fill)
         .height(Fill)
+        .style(|_| panel_style(BG_EDITOR))
         .into()
     }
 
