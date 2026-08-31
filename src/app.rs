@@ -67,7 +67,6 @@ pub enum Message {
     DialogCancel,
     BottomTabSelected(BottomTab),
     ClearBottom,
-    FindNext,
 }
 
 #[derive(Debug, Clone)]
@@ -286,10 +285,6 @@ impl VerilogIde {
                 }
                 Task::none()
             }
-            Message::FindNext => {
-                self.find_next();
-                Task::none()
-            }
         }
     }
 
@@ -465,6 +460,7 @@ impl VerilogIde {
             button("+ Testbench").on_press(Message::ShowNewTestbench),
             button("Sample").on_press(Message::CreateSample),
             button("Find").on_press(Message::ShowFind),
+            button("About").on_press(Message::ShowAbout),
             horizontal_space(),
             text(
                 self.project
