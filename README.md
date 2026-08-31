@@ -22,9 +22,15 @@ What `run.sh` does (same pattern as [jadex_django/run.sh](../jadex_django/run.sh
 
 1. Install **curl** (static binary) if missing
 2. Install **Nix** (official installer) if missing
-3. Enter a **nixpkgs 25.05** dev shell from `devops/flake.nix` (Rust **1.92**, iced + xezim build deps)
+3. Enter a **nixpkgs 25.05** dev shell from `devops/flake.nix` (Rust **1.92.0**, iced + xezim build deps)
 4. Cache the Nix environment under `~/.cache/verilog-ide/` for fast later runs
 5. `cargo run` the IDE inside that shell
+
+## Reproducibility
+
+- **Nix**: `devops/flake.lock` pins nixpkgs and rust-overlay; the shell uses Rust **1.92.0** exactly
+- **Cargo**: committed `Cargo.lock` pins crates.io and git deps (including xezim at a fixed rev)
+- **Toolchain file**: `rust-toolchain.toml` selects 1.92.0 for rustup-based builds outside Nix
 
 Useful flags:
 
@@ -63,7 +69,10 @@ cargo run --release
 src/              Rust IDE sources (iced)
 src/sim.rs        in-process xezim runner (VCD)
 samples/          Example counter + testbench
+Cargo.lock        Pinned Rust crate graph
+rust-toolchain.toml  Rust 1.92.0 (rustup)
 devops/flake.nix  Nix dev shell (nixpkgs 25.05)
+devops/flake.lock Pinned Nix inputs
 run.sh            Bootstrap Nix + run inside flake env
 ```
 

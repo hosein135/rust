@@ -29,7 +29,7 @@
             overlays = [ (import rust-overlay) ];
           };
           # xezim (bundled as a Cargo git dep) requires rustc 1.92+.
-          rustToolchain = (pkgs.rust-bin.stable."1.92.0" or pkgs.rust-bin.stable.latest).default;
+          rustToolchain = pkgs.rust-bin.stable."1.92.0".default;
           linuxRuntimeLibs = pkgs.lib.optionals pkgs.stdenv.isLinux [
             pkgs.libxkbcommon
             pkgs.fontconfig
