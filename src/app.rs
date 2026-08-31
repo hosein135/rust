@@ -1,16 +1,21 @@
 //! Main IDE application (iced, VS Code–inspired layout).
 
-use crate::editor::{cursor_from_line_col, cursor_line_col};
+use crate::editor::{
+    self, cursor_from_line_col, cursor_line_col, EDITOR_FONT_SIZE, EDITOR_LINE_HEIGHT,
+    EDITOR_PADDING,
+};
+use crate::verilog_highlighter::{self, Settings as VerilogHighlightSettings};
 use crate::project::{
     collect_dir_paths, find_first_verilog, load_file, locate_samples_dir, save_file, IdeProject,
     OpenFile, TreeNode,
 };
 use crate::templates::{self, counter_example};
-use iced::highlighter;
 use iced::widget::{
     button, column, container, horizontal_rule, horizontal_space, mouse_area, row, scrollable,
     stack, text, text_editor, text_input, Column, Space,
 };
+use iced::widget::operation::{self, AbsoluteOffset};
+use iced::widget::scrollable::Id as ScrollableId;
 use iced::{Alignment, Border, Color, Element, Fill, Font, Length, Padding, Shadow, Task, Theme};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -21,6 +26,10 @@ const BOTTOM_HEIGHT: f32 = 160.0;
 const MENU_HEIGHT: f32 = 36.0;
 const TAB_HEIGHT: f32 = 36.0;
 const STATUS_HEIGHT: f32 = 24.0;
+
+fn gutter_scroll_id() -> ScrollableId {
+    ScrollableId::new("editor-line-gutter")
+}
 
 // VS Code dark palette (approximate)
 const BG_EDITOR: Color = Color::from_rgb(0.12, 0.12, 0.12);
@@ -62,7 +71,8 @@ pub struct VerilogIde {
     open: Vec<OpenFile>,
     active: Option<usize>,
     editor_content: text_editor::Content,
-    editor_theme: highlighter::Theme,
+    editor_scroll_top: f32,
+    pending_gutter_reset: bool,
     console: String,
     problems: Vec<String>,
     bottom: BottomTab,
@@ -130,7 +140,8 @@ impl VerilogIde {
                 open: Vec::new(),
                 active: None,
                 editor_content: text_editor::Content::new(),
-                editor_theme: highlighter::Theme::Base16Ocean,
+                editor_scroll_top: 0.0,
+                pending_gutter_reset: false,
                 console: "Verilog IDE ready.\n".into(),
                 problems: Vec::new(),
                 bottom: BottomTab::Console,
@@ -145,7 +156,7 @@ impl VerilogIde {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
-        match message {
+        let task = match message {
             Message::MenuToggle(menu) => {
                 self.menu_open = if self.menu_open == Some(menu) {
                     None
@@ -263,6 +274,26 @@ impl VerilogIde {
                 Task::none()
             }
             Message::EditorAction(action) => {
+                let mut scroll_task = Task::none();
+                if let text_editor::Action::Scroll { lines } = &action {
+                    self.editor_scroll_top =
+                        (self.editor_scroll_top - *lines as f32).max(0.0);
+                    let max_scroll = self
+                        .editor_content
+                        .line_count()
+                        .saturating_sub(1) as f32;
+                    if self.editor_scroll_top > max_scroll {
+                        self.editor_scroll_top = max_scroll;
+                    }
+                    let y = self.editor_scroll_top * EDITOR_LINE_HEIGHT;
+                    scroll_task = operation::scroll_to(
+                        gutter_scroll_id(),
+                        AbsoluteOffset {
+                            x: None,
+                            y: Some(y),
+                        },
+                    );
+                }
                 if action.is_edit() {
                     if let Some(i) = self.active {
                         if let Some(file) = self.open.get_mut(i) {
@@ -272,7 +303,7 @@ impl VerilogIde {
                 }
                 self.editor_content.perform(action);
                 self.sync_editor_to_active();
-                Task::none()
+                scroll_task
             }
             Message::Save => {
                 self.menu_open = None;
@@ -376,6 +407,22 @@ impl VerilogIde {
                 }
                 Task::none()
             }
+        };
+
+        if self.pending_gutter_reset {
+            self.pending_gutter_reset = false;
+            Task::batch([
+                task,
+                operation::scroll_to(
+                    gutter_scroll_id(),
+                    AbsoluteOffset {
+                        x: None,
+                        y: Some(0.0),
+                    },
+                ),
+            ])
+        } else {
+            task
         }
     }
 
@@ -468,6 +515,8 @@ impl VerilogIde {
     }
 
     fn load_active_into_editor(&mut self) {
+        self.editor_scroll_top = 0.0;
+        self.pending_gutter_reset = true;
         if let Some(i) = self.active {
             if let Some(file) = self.open.get(i) {
                 self.editor_content = text_editor::Content::with_text(&file.content);
@@ -881,18 +930,58 @@ impl VerilogIde {
             .into();
         }
 
-        text_editor(&self.editor_content)
+        let line_count = self.editor_content.line_count();
+        let gutter_w = editor::gutter_width(line_count);
+
+        let gutter = scrollable(
+            container(
+                editor::line_number_text(line_count)
+                    .font(Font::MONOSPACE)
+                    .color(FG_MUTED),
+            )
+            .width(Fill)
+            .padding(Padding {
+                top: EDITOR_PADDING,
+                right: 8.0,
+                bottom: EDITOR_PADDING,
+                left: 4.0,
+            }),
+        )
+        .id(gutter_scroll_id())
+        .width(Length::Fixed(gutter_w))
+        .height(Fill);
+
+        let gutter_bg = Color::from_rgb(0.10, 0.10, 0.10);
+
+        let editor = text_editor(&self.editor_content)
+            .font(Font::MONOSPACE)
+            .size(EDITOR_FONT_SIZE)
+            .line_height(EDITOR_LINE_HEIGHT)
+            .padding(EDITOR_PADDING)
             .height(Fill)
             .on_action(Message::EditorAction)
-            .highlight(
-                self.active
-                    .and_then(|i| self.open.get(i))
-                    .and_then(|f| f.path.extension())
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("v"),
-                self.editor_theme,
-            )
-            .into()
+            .highlight_with(
+                VerilogHighlightSettings {
+                    enabled: self
+                        .active_path()
+                        .map(verilog_highlighter::syntax_enabled_for_path)
+                        .unwrap_or(true),
+                },
+                |highlight, _theme| highlight.to_format(),
+            );
+
+        row![
+            container(gutter)
+                .width(Length::Fixed(gutter_w))
+                .height(Fill)
+                .style(move |_| panel_style(gutter_bg)),
+            container(editor)
+                .width(Fill)
+                .height(Fill)
+                .style(|_| panel_style(BG_EDITOR)),
+        ]
+        .height(Fill)
+        .into()
     }
 
     fn view_bottom_panel(&self) -> Element<'_, Message> {

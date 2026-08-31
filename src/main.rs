@@ -4,6 +4,7 @@ mod app;
 mod editor;
 mod project;
 mod templates;
+mod verilog_highlighter;
 
 fn main() -> iced::Result {
     app::run()
