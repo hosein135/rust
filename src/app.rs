@@ -11,7 +11,7 @@ use iced::widget::{
     button, column, container, horizontal_rule, horizontal_space, row, scrollable, stack, text,
     text_editor, text_input, Column, Space,
 };
-use iced::{Alignment, Border, Color, Element, Fill, Font, Length, Shadow, Task, Theme};
+use iced::{Alignment, Border, Color, Element, Fill, Font, Length, Padding, Shadow, Task, Theme};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -636,7 +636,12 @@ impl VerilogIde {
                     .width(Fill)
                     .height(Fill)
                     .align_y(Alignment::Start)
-                    .padding([2, 0, 0, menu_dropdown_left(menu)]),
+                    .padding(Padding {
+                        top: 2.0,
+                        right: 0.0,
+                        bottom: 0.0,
+                        left: menu_dropdown_left(menu),
+                    }),
             ]
             .height(Fill)
             .into()
@@ -1133,11 +1138,11 @@ fn menu_item(label: &'static str, msg: Message) -> Element<'static, Message> {
         .into()
 }
 
-fn menu_dropdown_left(menu: TopMenu) -> u16 {
+fn menu_dropdown_left(menu: TopMenu) -> f32 {
     match menu {
-        TopMenu::File => 8,
-        TopMenu::Edit => 52,
-        TopMenu::Help => 96,
+        TopMenu::File => 8.0,
+        TopMenu::Edit => 52.0,
+        TopMenu::Help => 96.0,
     }
 }
 
