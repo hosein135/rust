@@ -49,7 +49,7 @@ module {tb};
     always #5 clk = ~clk;
 
     initial begin
-        $dumpfile(\"{safe}.vcd\");
+        $dumpfile("{safe}.vcd");
         $dumpvars(0, {tb});
 
         rst_n   = 1'b0;
@@ -64,7 +64,7 @@ module {tb};
         data_in = 8'hFF;
         #40;
 
-        $display(\"TB done. data_out = %02h\", data_out);
+        $display("TB done. data_out = %02h", data_out);
         $finish;
     end
 
@@ -115,7 +115,7 @@ module counter_tb;
     always #5 clk = ~clk;
 
     initial begin
-        $dumpfile(\"counter.vcd\");
+        $dumpfile("counter.vcd");
         $dumpvars(0, counter_tb);
 
         rst_n = 1'b0;
@@ -126,7 +126,7 @@ module counter_tb;
 
         repeat (20) @(posedge clk);
 
-        $display(\"Final count = %0d\", q);
+        $display("Final count = %0d", q);
         $finish;
     end
 

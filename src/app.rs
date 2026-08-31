@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 const SIDEBAR_WIDTH: f32 = 240.0;
 const BOTTOM_HEIGHT: f32 = 180.0;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum BottomTab {
     Console,
     Problems,
@@ -212,13 +212,17 @@ impl VerilogIde {
             }
             Message::SaveAll => {
                 self.sync_editor_to_active();
+                let mut errors = Vec::new();
                 for f in &mut self.open {
                     if f.dirty {
                         if let Err(e) = save_file(f) {
-                            self.problems.push(e.clone());
-                            self.log(&format!("ERROR: {e}\n"));
+                            errors.push(e);
                         }
                     }
+                }
+                for e in errors {
+                    self.problems.push(e.clone());
+                    self.log(&format!("ERROR: {e}\n"));
                 }
                 self.status = "Saved all".into();
                 Task::none()
@@ -513,8 +517,8 @@ impl VerilogIde {
                 let label = if expanded { "▾" } else { "▸" };
                 items.push(
                     row![
-                        Space::new().width(Length::Fixed(indent)),
-                        button(format!("{label} {}", node.name))
+                        Space::new(Length::Fixed(indent), Length::Shrink),
+                        button(text(format!("{label} {}", node.name)))
                             .on_press(Message::ToggleDir(node.path.clone()))
                             .padding([2, 4]),
                     ]
@@ -523,8 +527,8 @@ impl VerilogIde {
             } else {
                 items.push(
                     row![
-                        Space::new().width(Length::Fixed(indent)),
-                        button(format!("  {}", node.name))
+                        Space::new(Length::Fixed(indent), Length::Shrink),
+                        button(text(format!("  {}", node.name)))
                             .on_press(Message::OpenFile(node.path.clone()))
                             .padding([2, 4]),
                     ]
@@ -544,41 +548,45 @@ impl VerilogIde {
 
     fn view_editor_area(&self) -> Element<'_, Message> {
         if self.open.is_empty() {
-            return column![
-                text("Verilog IDE").size(28),
-                text("Edit Verilog modules and testbenches.").size(14),
-                button("Open Project Folder").on_press(Message::OpenProject),
-                button("Create Sample Counter Project").on_press(Message::CreateSample),
-            ]
-            .spacing(12)
-            .padding(24)
+            return container(
+                column![
+                    text("Verilog IDE").size(28),
+                    text("Edit Verilog modules and testbenches.").size(14),
+                    button("Open Project Folder").on_press(Message::OpenProject),
+                    button("Create Sample Counter Project").on_press(Message::CreateSample),
+                ]
+                .spacing(12)
+                .align_x(iced::Alignment::Center),
+            )
             .width(Fill)
             .height(Fill)
-            .align_x(iced::Alignment::Center)
-            .align_y(iced::Alignment::Center)
+            .center_x(Fill)
+            .center_y(Fill)
             .into();
         }
 
-        let tabs = row(self.open.iter().enumerate().map(|(i, f)| {
-            let name = f
-                .path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("untitled");
-            let title = if f.dirty {
-                format!("* {name}")
-            } else {
-                name.to_string()
-            };
-            let _selected = self.active == Some(i);
-            row![
-                button(title).on_press(Message::SelectTab(i)),
-                button("×")
-                    .on_press(Message::CloseTab(i))
-                    .padding([2, 6]),
-            ]
-            .spacing(2)
-        }))
+        let tabs = row(
+            self.open.iter().enumerate().map(|(i, f)| {
+                let name = f
+                    .path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("untitled");
+                let title = if f.dirty {
+                    format!("* {name}")
+                } else {
+                    name.to_string()
+                };
+                row![
+                    button(text(title)).on_press(Message::SelectTab(i)),
+                    button("×")
+                        .on_press(Message::CloseTab(i))
+                        .padding([2, 6]),
+                ]
+                .spacing(2)
+                .into()
+            }),
+        )
         .spacing(4)
         .padding([4, 8]);
 
@@ -598,7 +606,7 @@ impl VerilogIde {
     fn view_bottom(&self) -> Element<'_, Message> {
         let tabs = row![
             button("Console").on_press(Message::BottomTabSelected(BottomTab::Console)),
-            button(format!("Problems ({})", self.problems.len()))
+            button(text(format!("Problems ({})", self.problems.len())))
                 .on_press(Message::BottomTabSelected(BottomTab::Problems)),
             horizontal_space(),
             button("Clear").on_press(Message::ClearBottom),
@@ -621,7 +629,9 @@ impl VerilogIde {
                             self.problems
                                 .iter()
                                 .enumerate()
-                                .map(|(i, p)| text(format!("{}. {p}", i + 1)).size(13))
+                                .map(|(i, p)| {
+                                    text(format!("{}. {p}", i + 1)).size(13).into()
+                                })
                                 .collect::<Vec<_>>(),
                         )
                         .spacing(4)
@@ -666,7 +676,7 @@ impl VerilogIde {
 
     fn view_dialog(&self) -> Element<'_, Message> {
         let Some(dialog) = &self.dialog else {
-            return Space::new().height(Length::Fixed(0.0)).into();
+            return Space::new(Length::Shrink, Length::Fixed(0.0)).into();
         };
 
         let (title, input, show_input): (String, String, bool) = match dialog {
