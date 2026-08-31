@@ -48,6 +48,10 @@ impl IdeProject {
             .filter(|p| is_verilog_path(p))
             .collect()
     }
+
+    pub fn refresh_tree(&self) -> TreeNode {
+        self.build_tree()
+    }
 }
 
 pub fn is_verilog_path(path: &Path) -> bool {
@@ -85,12 +89,7 @@ fn build_dir_tree(dir: &Path) -> TreeNode {
             }
             if path.is_dir() {
                 children.push(build_dir_tree(&path));
-            } else if is_verilog_path(&path)
-                || matches!(
-                    path.extension().and_then(|e| e.to_str()),
-                    Some("md" | "toml" | "txt" | "json" | "cfg" | "do" | "tcl")
-                )
-            {
+            } else {
                 children.push(TreeNode {
                     path,
                     name: fname,

@@ -1,19 +1,35 @@
-//! Main IDE application (iced, CPU software renderer).
+//! Main IDE application (iced, VS Code–inspired layout).
 
 use crate::editor::{cursor_from_line_col, cursor_line_col};
 use crate::project::{load_file, save_file, IdeProject, OpenFile, TreeNode};
 use crate::templates::{self, counter_example};
 use iced::highlighter;
 use iced::widget::{
-    button, column, container, horizontal_space, row, scrollable, text, text_editor,
-    text_input, Space,
+    button, column, container, horizontal_rule, horizontal_space, row, scrollable, text,
+    text_editor, text_input, Column, Space,
 };
-use iced::{Element, Fill, Font, Length, Task, Theme};
+use iced::{Alignment, Border, Color, Element, Fill, Font, Length, Shadow, Task, Theme};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-const SIDEBAR_WIDTH: f32 = 240.0;
-const BOTTOM_HEIGHT: f32 = 180.0;
+const ACTIVITY_WIDTH: f32 = 48.0;
+const SIDEBAR_WIDTH: f32 = 260.0;
+const BOTTOM_HEIGHT: f32 = 160.0;
+const MENU_HEIGHT: f32 = 28.0;
+const TAB_HEIGHT: f32 = 36.0;
+const STATUS_HEIGHT: f32 = 24.0;
+
+// VS Code dark palette (approximate)
+const BG_EDITOR: Color = Color::from_rgb(0.12, 0.12, 0.12);
+const BG_SIDEBAR: Color = Color::from_rgb(0.15, 0.15, 0.16);
+const BG_ACTIVITY: Color = Color::from_rgb(0.20, 0.20, 0.20);
+const BG_TABS: Color = Color::from_rgb(0.18, 0.18, 0.18);
+const BG_TAB_ACTIVE: Color = Color::from_rgb(0.12, 0.12, 0.12);
+const BG_STATUS: Color = Color::from_rgb(0.0, 0.47, 0.80);
+const BG_MENU: Color = Color::from_rgb(0.22, 0.22, 0.22);
+const FG_MUTED: Color = Color::from_rgb(0.55, 0.55, 0.55);
+const FG_TEXT: Color = Color::from_rgb(0.85, 0.85, 0.85);
+const BORDER: Color = Color::from_rgb(0.28, 0.28, 0.28);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum BottomTab {
@@ -21,10 +37,19 @@ pub(crate) enum BottomTab {
     Problems,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TopMenu {
+    File,
+    Edit,
+    Help,
+}
+
 #[derive(Clone)]
 enum Dialog {
     NewModule { name: String },
-    NewTestbench { dut: String },
+    NewTestbench { name: String },
+    NewFile { name: String },
+    NewFolder { name: String },
     Find { query: String },
     About,
 }
@@ -40,8 +65,10 @@ pub struct VerilogIde {
     console: String,
     problems: Vec<String>,
     bottom: BottomTab,
+    bottom_visible: bool,
     status: String,
     dialog: Option<Dialog>,
+    menu_open: Option<TopMenu>,
     search_query: String,
 }
 
@@ -49,6 +76,8 @@ pub struct VerilogIde {
 pub enum Message {
     OpenProject,
     ProjectPicked(Result<Option<PathBuf>, DialogError>),
+    OpenFilePicker,
+    FilePicked(Result<Option<PathBuf>, DialogError>),
     CreateSample,
     SampleFolderPicked(Result<Option<PathBuf>, DialogError>),
     OpenFile(PathBuf),
@@ -58,6 +87,10 @@ pub enum Message {
     EditorAction(text_editor::Action),
     Save,
     SaveAll,
+    CloseProject,
+    RefreshExplorer,
+    ShowNewFile,
+    ShowNewFolder,
     ShowNewModule,
     ShowNewTestbench,
     ShowFind,
@@ -66,7 +99,10 @@ pub enum Message {
     DialogConfirm,
     DialogCancel,
     BottomTabSelected(BottomTab),
+    ToggleBottomPanel,
     ClearBottom,
+    MenuToggle(TopMenu),
+    MenuClose,
 }
 
 #[derive(Debug, Clone)]
@@ -88,55 +124,76 @@ pub fn run() -> iced::Result {
 
 impl VerilogIde {
     fn new() -> (Self, Task<Message>) {
-        let mut ide = Self {
-            project: None,
-            tree: None,
-            expanded: HashSet::new(),
-            open: Vec::new(),
-            active: None,
-            editor_content: text_editor::Content::with_text(
-                "Open a Verilog file to start editing...\n",
-            ),
-            editor_theme: highlighter::Theme::Base16Ocean,
-            console: "Verilog IDE ready.\nOpen a folder or create a sample project.\n".into(),
-            problems: Vec::new(),
-            bottom: BottomTab::Console,
-            status: "Ready".into(),
-            dialog: None,
-            search_query: String::new(),
-        };
-
-        for candidate in [
-            PathBuf::from("samples"),
-            PathBuf::from("examples"),
-            std::env::current_dir()
-                .ok()
-                .map(|p| p.join("samples"))
-                .unwrap_or_default(),
-        ] {
-            if candidate.is_dir() {
-                ide.open_project(candidate);
-                break;
-            }
-        }
-
-        (ide, Task::none())
+        (
+            Self {
+                project: None,
+                tree: None,
+                expanded: HashSet::new(),
+                open: Vec::new(),
+                active: None,
+                editor_content: text_editor::Content::new(),
+                editor_theme: highlighter::Theme::Base16Ocean,
+                console: "Verilog IDE ready.\n".into(),
+                problems: Vec::new(),
+                bottom: BottomTab::Console,
+                bottom_visible: true,
+                status: "Ready".into(),
+                dialog: None,
+                menu_open: None,
+                search_query: String::new(),
+            },
+            Task::none(),
+        )
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::MenuToggle(menu) => {
+                self.menu_open = if self.menu_open == Some(menu) {
+                    None
+                } else {
+                    Some(menu)
+                };
+                Task::none()
+            }
+            Message::MenuClose => {
+                self.menu_open = None;
+                Task::none()
+            }
             Message::OpenProject => {
-                Task::perform(pick_folder("Open project folder"), Message::ProjectPicked)
+                self.menu_open = None;
+                Task::perform(pick_folder("Open Folder"), Message::ProjectPicked)
             }
             Message::ProjectPicked(Ok(Some(path))) => {
                 self.open_project(path);
                 Task::none()
             }
             Message::ProjectPicked(_) => Task::none(),
-            Message::CreateSample => Task::perform(
-                pick_folder("Choose parent folder for sample project"),
-                Message::SampleFolderPicked,
-            ),
+            Message::OpenFilePicker => {
+                self.menu_open = None;
+                Task::perform(pick_file("Open File"), Message::FilePicked)
+            }
+            Message::FilePicked(Ok(Some(path))) => {
+                if path.is_dir() {
+                    self.open_project(path);
+                } else {
+                    if self.project.is_none() {
+                        if let Some(parent) = path.parent() {
+                            self.open_project(parent.to_path_buf());
+                        }
+                    }
+                    self.open_path(&path);
+                }
+                Task::none()
+            }
+            Message::FilePicked(_) => Task::none(),
+            Message::CreateSample => {
+                self.menu_open = None;
+                Task::perform(
+                    pick_folder("Choose parent folder for sample project"),
+                    Message::SampleFolderPicked,
+                )
+            }
             Message::SampleFolderPicked(Ok(Some(parent))) => {
                 let root = parent.join("verilog-sample");
                 if let Err(e) = std::fs::create_dir_all(&root) {
@@ -151,6 +208,24 @@ impl VerilogIde {
                 Task::none()
             }
             Message::SampleFolderPicked(_) => Task::none(),
+            Message::CloseProject => {
+                self.menu_open = None;
+                self.sync_editor_to_active();
+                self.project = None;
+                self.tree = None;
+                self.expanded.clear();
+                self.open.clear();
+                self.active = None;
+                self.load_active_into_editor();
+                self.status = "Closed folder".into();
+                Task::none()
+            }
+            Message::RefreshExplorer => {
+                if let Some(project) = self.project.as_ref() {
+                    self.tree = Some(project.refresh_tree());
+                }
+                Task::none()
+            }
             Message::OpenFile(path) => {
                 self.open_path(&path);
                 Task::none()
@@ -196,6 +271,7 @@ impl VerilogIde {
                 Task::none()
             }
             Message::Save => {
+                self.menu_open = None;
                 self.sync_editor_to_active();
                 if let Some(i) = self.active {
                     match save_file(&mut self.open[i]) {
@@ -210,6 +286,7 @@ impl VerilogIde {
                 Task::none()
             }
             Message::SaveAll => {
+                self.menu_open = None;
                 self.sync_editor_to_active();
                 let mut errors = Vec::new();
                 for f in &mut self.open {
@@ -226,30 +303,52 @@ impl VerilogIde {
                 self.status = "Saved all".into();
                 Task::none()
             }
+            Message::ShowNewFile => {
+                self.menu_open = None;
+                self.dialog = Some(Dialog::NewFile {
+                    name: "untitled.v".into(),
+                });
+                Task::none()
+            }
+            Message::ShowNewFolder => {
+                self.menu_open = None;
+                self.dialog = Some(Dialog::NewFolder {
+                    name: "new_folder".into(),
+                });
+                Task::none()
+            }
             Message::ShowNewModule => {
+                self.menu_open = None;
                 self.dialog = Some(Dialog::NewModule {
                     name: String::new(),
                 });
                 Task::none()
             }
             Message::ShowNewTestbench => {
-                self.dialog = Some(Dialog::NewTestbench { dut: String::new() });
+                self.menu_open = None;
+                self.dialog = Some(Dialog::NewTestbench {
+                    name: String::new(),
+                });
                 Task::none()
             }
             Message::ShowFind => {
+                self.menu_open = None;
                 self.dialog = Some(Dialog::Find {
                     query: self.search_query.clone(),
                 });
                 Task::none()
             }
             Message::ShowAbout => {
+                self.menu_open = None;
                 self.dialog = Some(Dialog::About);
                 Task::none()
             }
             Message::DialogInput(value) => {
                 match &mut self.dialog {
                     Some(Dialog::NewModule { name }) => *name = value,
-                    Some(Dialog::NewTestbench { dut }) => *dut = value,
+                    Some(Dialog::NewTestbench { name }) => *name = value,
+                    Some(Dialog::NewFile { name }) => *name = value,
+                    Some(Dialog::NewFolder { name }) => *name = value,
                     Some(Dialog::Find { query }) => *query = value,
                     _ => {}
                 }
@@ -260,7 +359,9 @@ impl VerilogIde {
                 if let Some(dialog) = dialog {
                     match dialog {
                         Dialog::NewModule { name } => self.create_module(&name),
-                        Dialog::NewTestbench { dut } => self.create_testbench(&dut),
+                        Dialog::NewTestbench { name } => self.create_testbench(&name),
+                        Dialog::NewFile { name } => self.create_file(&name),
+                        Dialog::NewFolder { name } => self.create_folder(&name),
                         Dialog::Find { query } => {
                             self.search_query = query;
                             self.find_next();
@@ -278,6 +379,10 @@ impl VerilogIde {
                 self.bottom = tab;
                 Task::none()
             }
+            Message::ToggleBottomPanel => {
+                self.bottom_visible = !self.bottom_visible;
+                Task::none()
+            }
             Message::ClearBottom => {
                 match self.bottom {
                     BottomTab::Console => self.console.clear(),
@@ -288,21 +393,25 @@ impl VerilogIde {
         }
     }
 
+    fn refresh_tree(&mut self) {
+        if let Some(project) = self.project.as_ref() {
+            self.tree = Some(project.refresh_tree());
+        }
+    }
+
     fn open_project(&mut self, root: PathBuf) {
         let project = IdeProject::new(root);
-        self.log(&format!("Opened project: {}\n", project.root.display()));
+        self.log(&format!("Opened folder: {}\n", project.root.display()));
         self.tree = Some(project.build_tree());
         self.expanded.insert(project.root.clone());
         self.project = Some(project);
         self.open.clear();
         self.active = None;
-        self.status = "Project opened".into();
-
-        if let Some(p) = self.project.as_ref() {
-            if let Some(first) = p.list_verilog_files().into_iter().next() {
-                self.open_path(&first);
-            }
-        }
+        self.status = format!(
+            "Opened folder: {}",
+            self.project.as_ref().unwrap().root.display()
+        );
+        self.load_active_into_editor();
     }
 
     fn open_path(&mut self, path: &Path) {
@@ -344,9 +453,7 @@ impl VerilogIde {
                 self.editor_content = text_editor::Content::with_text(&file.content);
             }
         } else {
-            self.editor_content = text_editor::Content::with_text(
-                "Open a Verilog file to start editing...\n",
-            );
+            self.editor_content = text_editor::Content::new();
         }
     }
 
@@ -360,40 +467,79 @@ impl VerilogIde {
         self.problems.push(msg.to_string());
     }
 
-    fn create_module(&mut self, name: &str) {
-        if name.trim().is_empty() {
+    fn project_root(&self) -> Option<PathBuf> {
+        self.project.as_ref().map(|p| p.root.clone())
+    }
+
+    fn create_file(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
             return;
         }
-        let Some(project) = self.project.as_ref() else {
-            self.log_err("Open a project first.");
+        let Some(root) = self.project_root() else {
+            self.log_err("Open a folder first (File → Open Folder).");
             return;
         };
-        let path = project.root.join(format!("{}.v", name.trim()));
-        let body = templates::module_template(name.trim());
+        let path = root.join(name);
+        if path.exists() {
+            self.log_err(&format!("Already exists: {}", path.display()));
+            return;
+        }
+        let body = if is_verilog_name(name) {
+            templates::module_template(name.trim_end_matches(".v").trim_end_matches(".sv"))
+        } else {
+            String::new()
+        };
         if let Err(e) = std::fs::write(&path, body) {
             self.log_err(&e.to_string());
             return;
         }
-        self.tree = Some(project.build_tree());
+        self.refresh_tree();
         self.open_path(&path);
-        self.log(&format!("Created module {}\n", path.display()));
+        self.log(&format!("Created file {}\n", path.display()));
+    }
+
+    fn create_folder(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        let Some(root) = self.project_root() else {
+            self.log_err("Open a folder first (File → Open Folder).");
+            return;
+        };
+        let path = root.join(name);
+        if let Err(e) = std::fs::create_dir_all(&path) {
+            self.log_err(&e.to_string());
+            return;
+        }
+        self.expanded.insert(path.clone());
+        self.refresh_tree();
+        self.log(&format!("Created folder {}\n", path.display()));
+    }
+
+    fn create_module(&mut self, name: &str) {
+        if name.trim().is_empty() {
+            return;
+        }
+        self.create_file(&format!("{}.v", name.trim()));
     }
 
     fn create_testbench(&mut self, dut: &str) {
         if dut.trim().is_empty() {
             return;
         }
-        let Some(project) = self.project.as_ref() else {
-            self.log_err("Open a project first.");
+        let Some(root) = self.project_root() else {
+            self.log_err("Open a folder first.");
             return;
         };
-        let path = project.root.join(format!("{}_tb.v", dut.trim()));
+        let path = root.join(format!("{}_tb.v", dut.trim()));
         let body = templates::testbench_template(dut.trim());
         if let Err(e) = std::fs::write(&path, body) {
             self.log_err(&e.to_string());
             return;
         }
-        self.tree = Some(project.build_tree());
+        self.refresh_tree();
         self.open_path(&path);
         self.log(&format!("Created testbench {}\n", path.display()));
     }
@@ -419,85 +565,155 @@ impl VerilogIde {
         }
     }
 
+    fn active_path(&self) -> Option<&PathBuf> {
+        self.active
+            .and_then(|i| self.open.get(i))
+            .map(|f| &f.path)
+    }
+
     fn view(&self) -> Element<'_, Message> {
-        column![
-            self.view_toolbar(),
-            row![
-                container(self.view_sidebar())
-                    .width(Length::Fixed(SIDEBAR_WIDTH))
-                    .height(Fill)
-                    .padding(0),
-                column![
-                    container(self.view_editor_area()).height(Fill),
-                    container(self.view_bottom())
-                        .height(Length::Fixed(BOTTOM_HEIGHT))
-                        .width(Fill),
-                ]
-                .width(Fill)
-                .spacing(0),
+        let main = row![
+            self.view_activity_bar(),
+            self.view_sidebar(),
+            column![
+                self.view_editor_column(),
+                if self.bottom_visible {
+                    Element::from(self.view_bottom_panel())
+                } else {
+                    Space::new(Length::Fill, Length::Fixed(0.0)).into()
+                },
             ]
-            .spacing(0)
-            .height(Fill),
+            .width(Fill)
+            .spacing(0),
+        ]
+        .height(Fill)
+        .spacing(0);
+
+        column![
+            self.view_menu_bar(),
+            container(main)
+                .width(Fill)
+                .height(Fill)
+                .style(|_| panel_style(BG_EDITOR)),
             self.view_status_bar(),
         ]
         .spacing(0)
-        .padding(0)
         .into()
     }
 
-    fn view_toolbar(&self) -> Element<'_, Message> {
-        row![
-            button("Open").on_press(Message::OpenProject),
-            button("Save")
-                .on_press_maybe(self.active.map(|_| Message::Save)),
-            button("Save All")
-                .on_press_maybe(if self.open.is_empty() {
-                    None
-                } else {
-                    Some(Message::SaveAll)
-                }),
-            button("+ Module").on_press(Message::ShowNewModule),
-            button("+ Testbench").on_press(Message::ShowNewTestbench),
-            button("Sample").on_press(Message::CreateSample),
-            button("Find").on_press(Message::ShowFind),
-            button("About").on_press(Message::ShowAbout),
+    fn view_menu_bar(&self) -> Element<'_, Message> {
+        let file_active = self.menu_open == Some(TopMenu::File);
+        let edit_active = self.menu_open == Some(TopMenu::Edit);
+        let help_active = self.menu_open == Some(TopMenu::Help);
+
+        let bar = row![
+            menu_label("File", file_active, Message::MenuToggle(TopMenu::File)),
+            menu_label("Edit", edit_active, Message::MenuToggle(TopMenu::Edit)),
+            menu_label("Help", help_active, Message::MenuToggle(TopMenu::Help)),
             horizontal_space(),
-            text(
-                self.project
-                    .as_ref()
-                    .map(|p| p.name.clone())
-                    .unwrap_or_else(|| "No project".into())
-            )
-            .size(14),
+            text("Verilog IDE").size(12).color(FG_MUTED),
         ]
-        .spacing(8)
-        .padding(8)
-        .align_y(iced::Alignment::Center)
+        .spacing(4)
+        .padding([4, 8])
+        .align_y(Alignment::Center);
+
+        let dropdown: Element<'_, Message> = match self.menu_open {
+            Some(TopMenu::File) => menu_dropdown(column![
+                menu_item("Open Folder…", Message::OpenProject),
+                menu_item("Open File…", Message::OpenFilePicker),
+                menu_item("New File…", Message::ShowNewFile),
+                menu_item("New Folder…", Message::ShowNewFolder),
+                menu_item("New Verilog Module…", Message::ShowNewModule),
+                menu_item("New Testbench…", Message::ShowNewTestbench),
+                menu_item("Save", Message::Save),
+                menu_item("Save All", Message::SaveAll),
+                menu_item("Close Folder", Message::CloseProject),
+                menu_item("Sample Project…", Message::CreateSample),
+            ]),
+            Some(TopMenu::Edit) => menu_dropdown(column![
+                menu_item("Find…", Message::ShowFind),
+                menu_item("Refresh Explorer", Message::RefreshExplorer),
+            ]),
+            Some(TopMenu::Help) => {
+                menu_dropdown(column![menu_item("About Verilog IDE", Message::ShowAbout)])
+            }
+            None => Space::new(Length::Shrink, Length::Fixed(0.0)).into(),
+        };
+
+        column![bar, dropdown].spacing(0).into()
+    }
+
+    fn view_activity_bar(&self) -> Element<'_, Message> {
+        container(
+            column![
+                activity_icon("⬚", true),
+                Space::new(Length::Fill, Length::Shrink),
+            ]
+            .height(Fill)
+            .padding(4),
+        )
+        .width(Length::Fixed(ACTIVITY_WIDTH))
+        .height(Fill)
+        .style(|_| panel_style(BG_ACTIVITY))
         .into()
     }
 
     fn view_sidebar(&self) -> Element<'_, Message> {
-        let header = text("Explorer").size(14);
-        let body: Element<'_, Message> = if let Some(tree) = &self.tree {
+        let title = row![
+            text("EXPLORER").size(11).color(FG_MUTED),
+            horizontal_space(),
+            sidebar_action("＋", "New File", Message::ShowNewFile),
+            sidebar_action("📁", "New Folder", Message::ShowNewFolder),
+            sidebar_action("↻", "Refresh", Message::RefreshExplorer),
+        ]
+        .align_y(Alignment::Center)
+        .padding([6, 8]);
+
+        let project_header = if let Some(p) = self.project.as_ref() {
+            row![
+                text("▾").size(12).color(FG_MUTED),
+                text(&p.name).size(13).color(FG_TEXT),
+            ]
+            .spacing(4)
+            .padding([2, 8])
+            .into()
+        } else {
+            Space::new(Length::Fill, Length::Fixed(0.0)).into()
+        };
+
+        let tree_body: Element<'_, Message> = if let Some(tree) = &self.tree {
             scrollable(
                 column(self.render_tree_nodes(tree, 0))
-                    .spacing(2)
-                    .padding(4),
+                    .spacing(0)
+                    .padding([0, 4]),
             )
             .height(Fill)
             .into()
         } else {
-            column![
-                text("No project open.").size(13),
-                button("Open Project...").on_press(Message::OpenProject),
-                button("Create Sample...").on_press(Message::CreateSample),
-            ]
-            .spacing(8)
-            .padding(8)
+            scrollable(
+                column![
+                    text("No folder opened").size(13).color(FG_MUTED),
+                    Space::new(Length::Fill, Length::Fixed(8.0)),
+                    sidebar_link("Open Folder…", Message::OpenProject),
+                    sidebar_link("Open File…", Message::OpenFilePicker),
+                    sidebar_link("Sample Project…", Message::CreateSample),
+                ]
+                .padding(12)
+                .spacing(6),
+            )
+            .height(Fill)
             .into()
         };
 
-        column![header, body].spacing(4).padding(4).into()
+        container(
+            column![title, horizontal_rule(1), project_header, tree_body]
+                .spacing(0)
+                .height(Fill),
+        )
+        .width(Length::Fixed(SIDEBAR_WIDTH))
+        .height(Fill)
+        .style(|_| panel_style(BG_SIDEBAR))
+        .into()
     }
 
     fn render_tree_nodes<'a>(
@@ -506,30 +722,31 @@ impl VerilogIde {
         depth: usize,
     ) -> Vec<Element<'a, Message>> {
         let mut items = Vec::new();
+        let indent = depth as f32 * 16.0;
+        let is_active = self.active_path().is_some_and(|p| p == &node.path);
+
         if depth > 0 {
-            let indent = depth as f32 * 14.0;
             if node.is_dir {
                 let expanded = self.expanded.contains(&node.path);
-                let label = if expanded { "▾" } else { "▸" };
-                items.push(
-                    row![
-                        Space::new(Length::Fixed(indent), Length::Shrink),
-                        button(text(format!("{label} {}", node.name)))
-                            .on_press(Message::ToggleDir(node.path.clone()))
-                            .padding([2, 4]),
-                    ]
-                    .into(),
-                );
+                let chevron = if expanded { "▾" } else { "▸" };
+                items.push(tree_row(
+                    indent,
+                    &format!("{chevron} 📁 {}", node.name),
+                    is_active,
+                    Message::ToggleDir(node.path.clone()),
+                ));
             } else {
-                items.push(
-                    row![
-                        Space::new(Length::Fixed(indent), Length::Shrink),
-                        button(text(format!("  {}", node.name)))
-                            .on_press(Message::OpenFile(node.path.clone()))
-                            .padding([2, 4]),
-                    ]
-                    .into(),
-                );
+                let icon = if node.name.ends_with(".v") || node.name.ends_with(".sv") {
+                    "📄"
+                } else {
+                    "·"
+                };
+                items.push(tree_row(
+                    indent,
+                    &format!("  {icon} {}", node.name),
+                    is_active,
+                    Message::OpenFile(node.path.clone()),
+                ));
             }
         }
 
@@ -542,17 +759,92 @@ impl VerilogIde {
         items
     }
 
-    fn view_editor_area(&self) -> Element<'_, Message> {
+    fn view_editor_column(&self) -> Element<'_, Message> {
+        let editor = column![
+            self.view_tab_bar(),
+            container(self.view_editor_body())
+                .width(Fill)
+                .height(Fill)
+                .style(|_| panel_style(BG_EDITOR)),
+        ]
+        .spacing(0)
+        .height(Fill);
+
+        if self.dialog.is_some() {
+            column![editor, self.view_dialog_bar()].spacing(0).height(Fill).into()
+        } else {
+            editor.into()
+        }
+    }
+
+    fn view_tab_bar(&self) -> Element<'_, Message> {
+        if self.open.is_empty() {
+            return container(Space::new(Length::Fill, Length::Fixed(TAB_HEIGHT - 4.0)))
+                .width(Fill)
+                .style(|_| panel_style(BG_TABS))
+                .into();
+        }
+
+        let tabs = scrollable(
+            row(
+                self.open.iter().enumerate().map(|(i, f)| {
+                    let name = f
+                        .path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("untitled");
+                    let title = if f.dirty {
+                        format!("● {name}")
+                    } else {
+                        name.to_string()
+                    };
+                    let selected = self.active == Some(i);
+                    row![
+                        tab_button(title, selected, Message::SelectTab(i)),
+                        button(text("×"))
+                            .on_press(Message::CloseTab(i))
+                            .padding([2, 6])
+                            .style(|_, _| tab_close_style()),
+                    ]
+                    .spacing(0)
+                    .into()
+                }),
+            )
+            .spacing(0)
+            .padding([0, 4]),
+        )
+        .direction(iced::widget::scrollable::Direction::Horizontal(
+            Default::default(),
+        ));
+
+        container(tabs)
+            .width(Fill)
+            .height(Length::Fixed(TAB_HEIGHT))
+            .style(|_| panel_style(BG_TABS))
+            .into()
+    }
+
+    fn view_editor_body(&self) -> Element<'_, Message> {
         if self.open.is_empty() {
             return container(
                 column![
-                    text("Verilog IDE").size(28),
-                    text("Edit Verilog modules and testbenches.").size(14),
-                    button("Open Project Folder").on_press(Message::OpenProject),
-                    button("Create Sample Counter Project").on_press(Message::CreateSample),
+                    text("Verilog IDE").size(32).color(FG_TEXT),
+                    text("Open a folder to start editing.").size(14).color(FG_MUTED),
+                    Space::new(Length::Shrink, Length::Fixed(16.0)),
+                    row![
+                        welcome_button("Open Folder", Message::OpenProject),
+                        welcome_button("Open File", Message::OpenFilePicker),
+                        welcome_button("Sample Project", Message::CreateSample),
+                    ]
+                    .spacing(12)
+                    .align_y(Alignment::Center),
+                    Space::new(Length::Shrink, Length::Fixed(24.0)),
+                    text("File → Open Folder    Ctrl-less for now")
+                        .size(12)
+                        .color(FG_MUTED),
                 ]
-                .spacing(12)
-                .align_x(iced::Alignment::Center),
+                .align_x(Alignment::Center)
+                .spacing(8),
             )
             .width(Fill)
             .height(Fill)
@@ -561,64 +853,52 @@ impl VerilogIde {
             .into();
         }
 
-        let tabs = row(
-            self.open.iter().enumerate().map(|(i, f)| {
-                let name = f
-                    .path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("untitled");
-                let title = if f.dirty {
-                    format!("* {name}")
-                } else {
-                    name.to_string()
-                };
-                row![
-                    button(text(title)).on_press(Message::SelectTab(i)),
-                    button("×")
-                        .on_press(Message::CloseTab(i))
-                        .padding([2, 6]),
-                ]
-                .spacing(2)
-                .into()
-            }),
-        )
-        .spacing(4)
-        .padding([4, 8]);
-
-        let editor = text_editor(&self.editor_content)
+        text_editor(&self.editor_content)
             .height(Fill)
             .on_action(Message::EditorAction)
-            .highlight("v", self.editor_theme);
-
-        let overlay = self.view_dialog();
-
-        column![tabs, editor, overlay]
-            .spacing(0)
-            .height(Fill)
+            .highlight(
+                self.active
+                    .and_then(|i| self.open.get(i))
+                    .and_then(|f| f.path.extension())
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("v"),
+                self.editor_theme,
+            )
             .into()
     }
 
-    fn view_bottom(&self) -> Element<'_, Message> {
-        let tabs = row![
-            button("Console").on_press(Message::BottomTabSelected(BottomTab::Console)),
-            button(text(format!("Problems ({})", self.problems.len())))
-                .on_press(Message::BottomTabSelected(BottomTab::Problems)),
+    fn view_bottom_panel(&self) -> Element<'_, Message> {
+        let panel_tabs = row![
+            panel_tab(
+                "OUTPUT",
+                self.bottom == BottomTab::Console,
+                Message::BottomTabSelected(BottomTab::Console),
+            ),
+            panel_tab(
+                &format!("PROBLEMS ({})", self.problems.len()),
+                self.bottom == BottomTab::Problems,
+                Message::BottomTabSelected(BottomTab::Problems),
+            ),
             horizontal_space(),
-            button("Clear").on_press(Message::ClearBottom),
+            button(text("⌃")).on_press(Message::ToggleBottomPanel),
+            button(text("Clear")).on_press(Message::ClearBottom),
         ]
-        .spacing(8)
-        .padding([4, 8]);
+        .spacing(4)
+        .padding([4, 8])
+        .align_y(Alignment::Center);
 
         let body: Element<'_, Message> = match self.bottom {
             BottomTab::Console => scrollable(
-                text(self.console.as_str()).size(13).font(Font::MONOSPACE),
+                text(self.console.as_str())
+                    .size(12)
+                    .font(Font::MONOSPACE)
+                    .color(FG_TEXT),
             )
             .height(Fill)
             .into(),
             BottomTab::Problems => {
                 if self.problems.is_empty() {
-                    text("No problems.").size(13).into()
+                    text("No problems detected.").size(12).color(FG_MUTED).into()
                 } else {
                     scrollable(
                         column(
@@ -626,11 +906,14 @@ impl VerilogIde {
                                 .iter()
                                 .enumerate()
                                 .map(|(i, p)| {
-                                    text(format!("{}. {p}", i + 1)).size(13).into()
+                                    text(format!("{}. {p}", i + 1))
+                                        .size(12)
+                                        .color(FG_TEXT)
+                                        .into()
                                 })
                                 .collect::<Vec<_>>(),
                         )
-                        .spacing(4)
+                        .spacing(2)
                         .padding(8),
                     )
                     .height(Fill)
@@ -639,20 +922,27 @@ impl VerilogIde {
             }
         };
 
-        column![tabs, body].spacing(0).height(Fill).into()
+        container(column![panel_tabs, horizontal_rule(1), body].spacing(0).height(Fill))
+            .width(Fill)
+            .height(Length::Fixed(BOTTOM_HEIGHT))
+            .style(|_| panel_style(BG_SIDEBAR))
+            .into()
     }
 
     fn view_status_bar(&self) -> Element<'_, Message> {
+        let branch = self
+            .project
+            .as_ref()
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "No Folder".into());
+
         let detail = if let Some(i) = self.active {
             if let Some(f) = self.open.get(i) {
                 let (line, col) = cursor_line_col(&f.content, f.cursor);
-                let dirty = if f.dirty { " *" } else { "" };
+                let dirty = if f.dirty { " ●" } else { "" };
                 format!(
-                    "Ln {line}, Col {col}{dirty}  |  {}",
-                    f.path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("?")
+                    "Ln {line}, Col {col}{dirty}   {}",
+                    f.path.display()
                 )
             } else {
                 self.status.clone()
@@ -661,31 +951,39 @@ impl VerilogIde {
             self.status.clone()
         };
 
-        row![
-            text(&self.status).size(12),
-            horizontal_space(),
-            text(detail).size(12),
-        ]
-        .padding([4, 8])
+        container(
+            row![
+                text(branch).size(12),
+                horizontal_space(),
+                text(detail).size(12),
+            ]
+            .padding([2, 10])
+            .align_y(Alignment::Center),
+        )
+        .width(Fill)
+        .height(Length::Fixed(STATUS_HEIGHT))
+        .style(|_| panel_style(BG_STATUS))
         .into()
     }
 
-    fn view_dialog(&self) -> Element<'_, Message> {
+    fn view_dialog_bar(&self) -> Element<'_, Message> {
         let Some(dialog) = &self.dialog else {
             return Space::new(Length::Shrink, Length::Fixed(0.0)).into();
         };
 
-        let (title, input, show_input): (String, String, bool) = match dialog {
-            Dialog::NewModule { name } => ("New Verilog Module".into(), name.clone(), true),
-            Dialog::NewTestbench { dut } => ("New Testbench".into(), dut.clone(), true),
-            Dialog::Find { query } => ("Find".into(), query.clone(), true),
-            Dialog::About => ("About Verilog IDE".into(), String::new(), false),
+        let (title, input, show_input) = match dialog {
+            Dialog::NewModule { name } => ("New Verilog Module", name.clone(), true),
+            Dialog::NewTestbench { name } => ("New Testbench", name.clone(), true),
+            Dialog::NewFile { name } => ("New File", name.clone(), true),
+            Dialog::NewFolder { name } => ("New Folder", name.clone(), true),
+            Dialog::Find { query } => ("Find", query.clone(), true),
+            Dialog::About => ("About", String::new(), false),
         };
 
-        let content: Element<'_, Message> = if show_input {
+        let body: Element<'_, Message> = if show_input {
             column![
-                text(title).size(16),
-                text_input("…", &input).on_input(Message::DialogInput),
+                text(title).size(14).color(FG_TEXT),
+                text_input("Name…", &input).on_input(Message::DialogInput),
                 row![
                     button("OK").on_press(Message::DialogConfirm),
                     button("Cancel").on_press(Message::DialogCancel),
@@ -696,34 +994,216 @@ impl VerilogIde {
             .into()
         } else {
             column![
-                text("About Verilog IDE").size(16),
+                text("About Verilog IDE").size(14),
                 text("Desktop IDE for Verilog HDL and testbenches."),
-                text("Built with Rust + iced (software renderer)."),
-                button("OK").on_press(Message::DialogCancel),
+                button("Close").on_press(Message::DialogCancel),
             ]
-            .spacing(8)
+            .spacing(6)
             .into()
         };
 
-        container(content)
-            .padding(16)
-            .style(|theme: &Theme| container::Style {
-                background: Some(iced::Background::Color(theme.palette().background)),
-                border: iced::Border {
-                    color: theme.palette().text,
-                    width: 1.0,
-                    radius: 4.0.into(),
-                },
-                ..Default::default()
-            })
+        container(body)
+            .padding(12)
+            .width(Fill)
+            .style(|_| dialog_style())
             .into()
     }
+}
+
+fn is_verilog_name(name: &str) -> bool {
+    name.ends_with(".v") || name.ends_with(".sv")
+}
+
+fn panel_style(bg: Color) -> iced::widget::container::Style {
+    iced::widget::container::Style {
+        background: Some(iced::Background::Color(bg)),
+        border: Border {
+            color: BORDER,
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+fn dialog_style() -> iced::widget::container::Style {
+    iced::widget::container::Style {
+        background: Some(iced::Background::Color(Color::from_rgb(0.2, 0.2, 0.22))),
+        border: Border {
+            color: BORDER,
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        shadow: Shadow::default(),
+        ..Default::default()
+    }
+}
+
+fn tab_close_style() -> iced::widget::button::Style {
+    iced::widget::button::Style {
+        background: None,
+        text_color: FG_MUTED,
+        ..Default::default()
+    }
+}
+
+fn menu_label(label: &'static str, active: bool, msg: Message) -> Element<'static, Message> {
+    button(text(label).size(13))
+        .on_press(msg)
+        .padding([4, 10])
+        .style(move |_, _| iced::widget::button::Style {
+            background: if active {
+                Some(iced::Background::Color(Color::from_rgb(0.28, 0.28, 0.28)))
+            } else {
+                None
+            },
+            text_color: FG_TEXT,
+            ..Default::default()
+        })
+        .into()
+}
+
+fn menu_item(label: &'static str, msg: Message) -> Element<'static, Message> {
+    button(text(label).size(13))
+        .on_press(msg)
+        .width(Fill)
+        .padding([6, 12])
+        .style(|_, _| iced::widget::button::Style {
+            background: None,
+            text_color: FG_TEXT,
+            ..Default::default()
+        })
+        .into()
+}
+
+fn menu_dropdown(items: Column<'_, Message>) -> Element<'_, Message> {
+    container(items.padding(4))
+        .width(Length::Fixed(220.0))
+        .style(|_| iced::widget::container::Style {
+            background: Some(iced::Background::Color(Color::from_rgb(0.24, 0.24, 0.26))),
+            border: Border {
+                color: BORDER,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+fn sidebar_action(icon: &str, _tip: &str, msg: Message) -> Element<'_, Message> {
+    button(text(icon).size(12))
+        .on_press(msg)
+        .padding([2, 4])
+        .style(|_, _| iced::widget::button::Style {
+            background: None,
+            text_color: FG_MUTED,
+            ..Default::default()
+        })
+        .into()
+}
+
+fn sidebar_link(label: &str, msg: Message) -> Element<'_, Message> {
+    button(text(label).size(13))
+        .on_press(msg)
+        .padding([4, 0])
+        .style(|_, _| iced::widget::button::Style {
+            background: None,
+            text_color: Color::from_rgb(0.4, 0.65, 1.0),
+            ..Default::default()
+        })
+        .into()
+}
+
+fn activity_icon(label: &str, _active: bool) -> Element<'_, Message> {
+    container(text(label).size(16).color(FG_TEXT))
+        .padding(8)
+        .center_x(Fill)
+        .into()
+}
+
+fn tree_row(indent: f32, label: &str, active: bool, msg: Message) -> Element<'_, Message> {
+    row![
+        Space::new(Length::Fixed(indent), Length::Shrink),
+        button(text(label).size(12).color(if active {
+            Color::WHITE
+        } else {
+            FG_TEXT
+        }))
+        .on_press(msg)
+        .width(Fill)
+        .padding([3, 4])
+        .style(move |_, _| iced::widget::button::Style {
+            background: if active {
+                Some(iced::Background::Color(Color::from_rgb(0.09, 0.38, 0.65)))
+            } else {
+                None
+            },
+            text_color: FG_TEXT,
+            ..Default::default()
+        }),
+    ]
+    .width(Fill)
+    .into()
+}
+
+fn tab_button(title: String, selected: bool, msg: Message) -> Element<'_, Message> {
+    button(text(title).size(12))
+        .on_press(msg)
+        .padding([8, 14])
+        .style(move |_, _| iced::widget::button::Style {
+            background: Some(iced::Background::Color(if selected {
+                BG_TAB_ACTIVE
+            } else {
+                BG_TABS
+            })),
+            text_color: if selected { FG_TEXT } else { FG_MUTED },
+            ..Default::default()
+        })
+        .into()
+}
+
+fn welcome_button(label: &str, msg: Message) -> Element<'_, Message> {
+    button(text(label).size(13))
+        .on_press(msg)
+        .padding([8, 16])
+        .style(|_, _| iced::widget::button::Style {
+            background: Some(iced::Background::Color(Color::from_rgb(0.09, 0.38, 0.65))),
+            text_color: Color::WHITE,
+            ..Default::default()
+        })
+        .into()
+}
+
+fn panel_tab(label: &str, selected: bool, msg: Message) -> Element<'_, Message> {
+    button(text(label).size(11))
+        .on_press(msg)
+        .padding([4, 8])
+        .style(move |_, _| iced::widget::button::Style {
+            background: if selected {
+                Some(iced::Background::Color(BG_EDITOR))
+            } else {
+                None
+            },
+            text_color: if selected { FG_TEXT } else { FG_MUTED },
+            ..Default::default()
+        })
+        .into()
 }
 
 async fn pick_folder(title: &str) -> Result<Option<PathBuf>, DialogError> {
     let picked = rfd::AsyncFileDialog::new()
         .set_title(title)
         .pick_folder()
+        .await
+        .ok_or(DialogError::Cancelled)?;
+    Ok(Some(picked.path().to_path_buf()))
+}
+
+async fn pick_file(title: &str) -> Result<Option<PathBuf>, DialogError> {
+    let picked = rfd::AsyncFileDialog::new()
+        .set_title(title)
+        .pick_file()
         .await
         .ok_or(DialogError::Cancelled)?;
     Ok(Some(picked.path().to_path_buf()))
