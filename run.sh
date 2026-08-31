@@ -534,7 +534,7 @@ ensure_flake_lock() {
     fi
     if [ "${lock_needs_update}" = true ]; then
         step "Updating flake.lock ..."
-        nix flake lock "$(flake_ref)" --update-lock-file
+        nix flake lock "$(flake_ref)"
         cp -f "${SYSTEM_FLAKE}/flake.lock" "${FLAKE_DIR}/flake.lock"
     fi
     cp -f "${FLAKE_DIR}/flake.lock" "${SYSTEM_LOCK}"
@@ -555,18 +555,17 @@ realize_nix_shell() {
     mkdir -p "${SYSTEM_CACHE}"
     stage_flake
     step "Fetching Nix packages into the system cache (once per machine / flake) ..."
-    # --no-write-lock-file: Nix 2.25+ defaults to refusing lock edits; the staged
-    # path flake already has flake.lock, so never rewrite it from git+file.
+    # --no-update-lock-file: do not rewrite the staged path flake.lock during develop.
     nix develop "$(flake_ref)" \
         --profile "${SYSTEM_PROFILE}" \
-        --no-write-lock-file \
+        --no-update-lock-file \
         --command true
     if [ -f "${SYSTEM_FLAKE}/flake.lock" ]; then
         cp -f "${SYSTEM_FLAKE}/flake.lock" "${SYSTEM_LOCK}"
         cp -f "${SYSTEM_FLAKE}/flake.lock" "${FLAKE_DIR}/flake.lock"
     fi
 
-    if nix print-dev-env "$(flake_ref)" --offline --no-write-lock-file \
+    if nix print-dev-env "$(flake_ref)" --offline --no-update-lock-file \
         | tr -d '\r' > "${SYSTEM_DEVENV}.tmp"; then
         mv -f "${SYSTEM_DEVENV}.tmp" "${SYSTEM_DEVENV}"
         sanitize_shell_file "${SYSTEM_DEVENV}"
@@ -651,7 +650,7 @@ run_inside_nix() {
         nix develop "$(flake_ref)" \
             --profile "${SYSTEM_PROFILE}" \
             --offline \
-            --no-write-lock-file \
+            --no-update-lock-file \
             --command bash "${SCRIPT_DIR}/run.sh" --__launch "$@" &
         launch_pid=$!
     fi
