@@ -1,6 +1,6 @@
 //! Verilog / SystemVerilog syntax highlighter for the iced text editor.
 
-use iced::advanced::text::highlighter::{self, Format, Highlighter as _};
+use iced::advanced::text::highlighter::{self, Format, Highlighter};
 use iced::{Color, Font};
 use std::ops::Range;
 use std::path::Path;
@@ -285,7 +285,7 @@ fn push_span(spans: &mut Vec<(Range<usize>, Highlight)>, start: usize, end: usiz
 }
 
 fn merge_spans(spans: Vec<(Range<usize>, Highlight)>) -> Vec<(Range<usize>, Highlight)> {
-    let mut merged = Vec::new();
+    let mut merged: Vec<(Range<usize>, Highlight)> = Vec::new();
     for (range, highlight) in spans {
         if let Some((last_range, last_highlight)) = merged.last_mut() {
             if last_highlight.0 == highlight.0 && last_range.end == range.start {
