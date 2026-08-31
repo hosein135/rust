@@ -626,40 +626,42 @@ impl VerilogIde {
         .height(Fill)
         .spacing(0);
 
-        let main_area: Element<'_, Message> = if let Some(menu) = self.menu_open {
+        let body = column![
+            self.view_menu_bar(),
+            container(main)
+                .width(Fill)
+                .height(Fill)
+                .style(|_| panel_style(BG_EDITOR)),
+            self.view_status_bar(),
+        ]
+        .height(Fill)
+        .spacing(0);
+
+        if let Some(menu) = self.menu_open {
             stack![
-                container(main)
-                    .width(Fill)
-                    .height(Fill)
-                    .style(|_| panel_style(BG_EDITOR)),
-                container(self.view_menu_dropdown(menu))
-                    .width(Fill)
-                    .height(Fill)
-                    .align_y(Alignment::Start)
-                    .padding(Padding {
-                        top: 2.0,
-                        right: 0.0,
-                        bottom: 0.0,
-                        left: menu_dropdown_left(menu),
-                    }),
+                body,
+                container(
+                    row![
+                        Space::new(Length::Fixed(menu_dropdown_left(menu)), Length::Shrink),
+                        self.view_menu_dropdown(menu),
+                    ]
+                    .align_y(Alignment::Start),
+                )
+                .width(Fill)
+                .align_x(Alignment::Start)
+                .align_y(Alignment::Start)
+                .padding(Padding {
+                    top: MENU_HEIGHT + 2.0,
+                    right: 0.0,
+                    bottom: 0.0,
+                    left: 0.0,
+                }),
             ]
             .height(Fill)
             .into()
         } else {
-            container(main)
-                .width(Fill)
-                .height(Fill)
-                .style(|_| panel_style(BG_EDITOR))
-                .into()
-        };
-
-        column![
-            self.view_menu_bar(),
-            main_area,
-            self.view_status_bar(),
-        ]
-        .spacing(0)
-        .into()
+            body.into()
+        }
     }
 
     fn view_menu_dropdown(&self, menu: TopMenu) -> Element<'_, Message> {
@@ -1268,23 +1270,100 @@ fn panel_tab(label: String, selected: bool, msg: Message) -> Element<'static, Me
 
 async fn pick_folder(title: &str) -> Result<Option<PathBuf>, DialogError> {
     let title = title.to_owned();
-    tokio::task::spawn_blocking(move || {
-        rfd::FileDialog::new()
-            .set_title(&title)
-            .pick_folder()
-    })
-    .await
-    .map_err(|_| DialogError::Cancelled)
+
+    #[cfg(target_os = "linux")]
+    if zenity_available() {
+        return tokio::task::spawn_blocking(move || pick_folder_zenity(&title))
+            .await
+            .map_err(|_| DialogError::Cancelled);
+    }
+
+    let picked = rfd::AsyncFileDialog::new()
+        .set_title(&title)
+        .pick_folder()
+        .await
+        .map(|handle| handle.path().to_path_buf());
+    Ok(picked)
 }
 
 async fn pick_file(title: &str) -> Result<Option<PathBuf>, DialogError> {
     let title = title.to_owned();
-    tokio::task::spawn_blocking(move || {
-        rfd::FileDialog::new()
-            .set_title(&title)
-            .add_filter("Verilog / text", &["v", "sv", "vh", "svh", "txt", "md"])
-            .pick_file()
-    })
-    .await
-    .map_err(|_| DialogError::Cancelled)
+
+    #[cfg(target_os = "linux")]
+    if zenity_available() {
+        return tokio::task::spawn_blocking(move || pick_file_zenity(&title))
+            .await
+            .map_err(|_| DialogError::Cancelled);
+    }
+
+    let picked = rfd::AsyncFileDialog::new()
+        .set_title(&title)
+        .add_filter("Verilog / text", &["v", "sv", "vh", "svh", "txt", "md"])
+        .pick_file()
+        .await
+        .map(|handle| handle.path().to_path_buf());
+    Ok(picked)
+}
+
+#[cfg(target_os = "linux")]
+fn zenity_available() -> bool {
+    std::process::Command::new("zenity")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn zenity_available() -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn pick_folder_zenity(title: &str) -> Result<Option<PathBuf>, DialogError> {
+    let output = std::process::Command::new("zenity")
+        .args(["--file-selection", "--directory", "--title", title])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map_err(|_| DialogError::Cancelled)?;
+
+    if output.status.success() {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok((!path.is_empty()).then(|| PathBuf::from(path)))
+    } else if output.status.code() == Some(1) {
+        Ok(None)
+    } else {
+        Err(DialogError::Cancelled)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn pick_file_zenity(title: &str) -> Result<Option<PathBuf>, DialogError> {
+    let output = std::process::Command::new("zenity")
+        .args([
+            "--file-selection",
+            "--title",
+            title,
+            "--file-filter",
+            "Verilog | *.v *.sv *.vh *.svh",
+            "--file-filter",
+            "Text | *.txt *.md",
+            "--file-filter",
+            "All | *",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map_err(|_| DialogError::Cancelled)?;
+
+    if output.status.success() {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok((!path.is_empty()).then(|| PathBuf::from(path)))
+    } else if output.status.code() == Some(1) {
+        Ok(None)
+    } else {
+        Err(DialogError::Cancelled)
+    }
 }
