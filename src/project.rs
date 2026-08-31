@@ -9,12 +9,19 @@ pub struct IdeProject {
     pub root: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileView {
+    Text,
+    Waveform,
+}
+
 #[derive(Clone, Debug)]
 pub struct OpenFile {
     pub path: PathBuf,
     pub content: String,
     pub dirty: bool,
     pub cursor: usize,
+    pub view: FileView,
 }
 
 #[derive(Clone, Debug)]
@@ -104,6 +111,17 @@ pub fn collect_hdl_sources(root: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Waveform dumps opened by Surfer/wellen (`.vcd` / `.fst` / `.ghw`).
+pub fn is_wave_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref(),
+        Some("vcd" | "fst" | "ghw")
+    )
+}
+
 pub fn is_hdl_source(path: &Path) -> bool {
     matches!(
         path.extension()
@@ -152,7 +170,7 @@ pub fn collect_dir_paths(node: &TreeNode, out: &mut Vec<PathBuf>) {
 fn should_skip(name: &str) -> bool {
     matches!(
         name,
-        "target" | ".git" | "node_modules" | ".verilog-ide-data" | ".idea" | ".vscode"
+        "target" | ".git" | "node_modules" | ".verilog-ide-data" | ".idea" | ".vscode" | "vendor"
     )
 }
 
@@ -204,6 +222,7 @@ pub fn load_file(path: &Path) -> Result<OpenFile, String> {
         content,
         dirty: false,
         cursor: 0,
+        view: FileView::Text,
     })
 }
 

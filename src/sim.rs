@@ -1,5 +1,5 @@
-//! Simulate Verilog + testbench with the bundled [xezim](https://github.com/aionhw/xezim)
-//! library and collect the resulting VCD waveform.
+//! Simulate Verilog + testbench with the vendored [xezim](https://github.com/aionhw/xezim)
+//! library (`vendor/xezim`) and collect the resulting VCD waveform.
 
 use crate::project::{collect_hdl_sources, OpenFile};
 use std::path::{Path, PathBuf};

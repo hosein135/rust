@@ -9,7 +9,11 @@ authors = ["Verilog IDE"]
 
 [dependencies]
 anyhow = "1"
-xezim = { git = "https://github.com/aionhw/xezim", rev = "265595e6da3764682bb1a64151c2debb7fd6ba20" }
+# Vendored at vendor/xezim (https://github.com/aionhw/xezim @ 265595e6).
+xezim = { path = "vendor/xezim" }
+# Wellen is the VCD/FST/GHW engine used by Surfer
+# (vendored at vendor/surfer, https://gitlab.com/surfer-project/surfer @ v0.7.0).
+wellen = { version = "0.25", default-features = false }
 iced = { version = "0.13.1", default-features = false, features = [
     "tiny-skia",
     "fira-sans",
@@ -27,3 +31,9 @@ walkdir = "2"
 lto = true
 codegen-units = 1
 strip = true
+
+# xezim's Cargo.toml still names the git URL; point it at the vendored core
+# so `cargo build` does not fetch GitHub.
+[patch."https://github.com/aionhw/xezim-core.git"]
+xezim-core = { path = "vendor/xezim-core" }
+sv-parser = { path = "vendor/xezim-core/xezim-parser" }

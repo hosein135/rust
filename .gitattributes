@@ -35,3 +35,6 @@
 *.gif binary
 *.ico binary
 *.wasm binary
+
+# Vendored third-party trees
+vendor/** linguist-vendored

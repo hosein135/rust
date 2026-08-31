@@ -19,6 +19,7 @@ Thumbs.db
 *.o
 *.vcd
 *.fst
+vendor/**/target/
 
 # Local data
 .verilog-ide-data/

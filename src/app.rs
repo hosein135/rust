@@ -8,11 +8,12 @@ use crate::verilog_highlighter::{
     self, Settings as VerilogHighlightSettings, VerilogHighlighter,
 };
 use crate::project::{
-    collect_dir_paths, find_first_verilog, load_file, locate_samples_dir, save_file, IdeProject,
-    OpenFile, TreeNode,
+    collect_dir_paths, find_first_verilog, is_wave_path, load_file, locate_samples_dir, save_file,
+    FileView, IdeProject, OpenFile, TreeNode,
 };
 use crate::sim::{self, SimResult};
 use crate::templates::{self, counter_example};
+use crate::waveform::{self, ViewMode, WaveNav, WaveView};
 use iced::keyboard::{self, Key};
 use iced::widget::text::Wrapping;
 use iced::widget::{
@@ -23,7 +24,7 @@ use iced::{
     Alignment, Border, Color, Element, Fill, Font, Length, Padding, Point, Shadow, Subscription,
     Task, Theme,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 const ACTIVITY_WIDTH: f32 = 48.0;
@@ -55,6 +56,7 @@ pub(crate) enum BottomTab {
 pub(crate) enum TopMenu {
     File,
     Edit,
+    View,
     Run,
     Help,
 }
@@ -85,6 +87,14 @@ pub struct VerilogIde {
     menu_open: Option<TopMenu>,
     search_query: String,
     sim_running: bool,
+    view_mode: ViewMode,
+    waveforms: HashMap<PathBuf, WaveStatus>,
+}
+
+enum WaveStatus {
+    Loading,
+    Ready(WaveView),
+    Error(String),
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +130,9 @@ pub enum Message {
     MenuClose,
     RunSim,
     SimFinished(SimResult),
+    SetViewMode(ViewMode),
+    WaveNav(WaveNav),
+    WaveLoaded(PathBuf, Result<WaveView, String>),
 }
 
 #[derive(Debug, Clone)]
@@ -160,6 +173,8 @@ impl VerilogIde {
                 menu_open: None,
                 search_query: String::new(),
                 sim_running: false,
+                view_mode: ViewMode::Waveform,
+                waveforms: HashMap::new(),
             },
             Task::none(),
         )
@@ -203,17 +218,18 @@ impl VerilogIde {
                 Task::perform(pick_file("Open File"), Message::FilePicked)
             }
             Message::FilePicked(Ok(Some(path))) => {
-                if path.is_dir() {
+                let load = if path.is_dir() {
                     self.open_folder_path(path);
+                    Task::none()
                 } else {
                     if self.project.is_none() {
                         if let Some(parent) = path.parent() {
                             self.open_project(parent.to_path_buf());
                         }
                     }
-                    self.open_path(&path);
-                }
-                editor::scroll_to_y(0.0)
+                    self.open_path(&path)
+                };
+                Task::batch([load, editor::scroll_to_y(0.0)])
             }
             Message::FilePicked(_) => Task::none(),
             Message::CreateSample => {
@@ -251,6 +267,7 @@ impl VerilogIde {
                 self.expanded.clear();
                 self.open.clear();
                 self.active = None;
+                self.waveforms.clear();
                 self.status = "Closed folder".into();
                 self.reload_editor()
             }
@@ -261,8 +278,8 @@ impl VerilogIde {
                 Task::none()
             }
             Message::OpenFile(path) => {
-                self.open_path(&path);
-                editor::scroll_to_y(0.0)
+                let load = self.open_path(&path);
+                Task::batch([load, editor::scroll_to_y(0.0)])
             }
             Message::ToggleDir(path) => {
                 if self.expanded.contains(&path) {
@@ -282,6 +299,9 @@ impl VerilogIde {
                 if self.open.get(idx).map(|f| f.dirty).unwrap_or(false) {
                     let _ = save_file(&mut self.open[idx]);
                 }
+                if let Some(file) = self.open.get(idx) {
+                    self.waveforms.remove(&file.path);
+                }
                 self.open.remove(idx);
                 self.active = if self.open.is_empty() {
                     None
@@ -299,6 +319,9 @@ impl VerilogIde {
             }
             Message::EditorPage(direction) => self.page_cursor(direction),
             Message::EditorAction(action) => {
+                if self.active_is_waveform() {
+                    return Task::none();
+                }
                 if let text_editor::Action::Scroll { lines } = action {
                     return editor::scroll_by_lines(lines);
                 }
@@ -451,12 +474,57 @@ impl VerilogIde {
                 } else if let Some(vcd) = result.vcd {
                     self.status = format!("Wrote {}", vcd.display());
                     self.refresh_tree();
+                    self.waveforms.remove(&vcd);
+                    if self.view_mode == ViewMode::Waveform {
+                        let load = self.open_path(&vcd);
+                        return Task::batch([load, editor::scroll_to_y(0.0)]);
+                    }
                 } else {
                     self.status = "Simulation finished (no VCD)".into();
                     self.problems.push(
                         "Simulation finished but no .vcd was produced. Add $dumpfile / $dumpvars to the testbench."
                             .into(),
                     );
+                }
+                Task::none()
+            }
+            Message::SetViewMode(mode) => {
+                self.menu_open = None;
+                self.view_mode = mode;
+                self.apply_view_mode_to_open_files()
+            }
+            Message::WaveNav(nav) => {
+                if let Some(path) = self.active_path().cloned() {
+                    if let Some(WaveStatus::Ready(wave)) = self.waveforms.get_mut(&path) {
+                        wave.apply_nav(nav);
+                    }
+                }
+                Task::none()
+            }
+            Message::WaveLoaded(path, result) => {
+                match result {
+                    Ok(wave) => {
+                        let n = wave.trace_count();
+                        self.log(&format!(
+                            "Loaded waveform {} ({n} signals) with wellen (Surfer).\n",
+                            path.display()
+                        ));
+                        self.waveforms
+                            .insert(path.clone(), WaveStatus::Ready(wave));
+                        self.status = format!("Waveform {} ({n} signals)", path.display());
+                    }
+                    Err(e) => {
+                        self.waveforms
+                            .insert(path.clone(), WaveStatus::Error(e.clone()));
+                        self.log_err(&e);
+                        if let Some(file) = self.open.iter_mut().find(|f| f.path == path) {
+                            file.view = FileView::Text;
+                        }
+                        let reload = self.active_path() == Some(&path);
+                        if reload {
+                            return self.reload_editor();
+                        }
+                    }
                 }
                 Task::none()
             }
@@ -553,6 +621,7 @@ impl VerilogIde {
         self.project = Some(project);
         self.open.clear();
         self.active = None;
+        self.waveforms.clear();
         self.status = format!(
             "Opened folder: {}",
             self.project.as_ref().unwrap().root.display()
@@ -561,35 +630,128 @@ impl VerilogIde {
 
         if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
             if let Some(first) = find_first_verilog(&root) {
-                self.open_path(&first);
+                let _ = self.open_path(&first);
             }
         }
     }
 
-    fn open_path(&mut self, path: &Path) {
+    fn open_path(&mut self, path: &Path) -> Task<Message> {
         self.sync_editor_to_active();
+        let want_wave = is_wave_path(path) && self.view_mode == ViewMode::Waveform;
 
         if let Some(idx) = self.open.iter().position(|f| f.path == path) {
             self.active = Some(idx);
+            if let Some(file) = self.open.get_mut(idx) {
+                file.view = if want_wave {
+                    FileView::Waveform
+                } else {
+                    FileView::Text
+                };
+            }
+            let load = if want_wave {
+                self.ensure_wave_loaded(path)
+            } else {
+                Task::none()
+            };
             self.load_active_into_editor();
-            return;
+            return load;
         }
 
-        match load_file(path) {
-            Ok(file) => {
-                self.open.push(file);
-                self.active = Some(self.open.len() - 1);
-                self.status = format!("Opened {}", path.display());
-                self.load_active_into_editor();
-            }
+        let mut file = match load_file(path) {
+            Ok(file) => file,
+            Err(e) if want_wave => OpenFile {
+                path: path.to_path_buf(),
+                content: String::new(),
+                dirty: false,
+                cursor: 0,
+                view: FileView::Waveform,
+            },
             Err(e) => {
                 self.log_err(&e);
                 self.problems.push(e);
+                return Task::none();
             }
+        };
+        file.view = if want_wave {
+            FileView::Waveform
+        } else {
+            FileView::Text
+        };
+        self.open.push(file);
+        self.active = Some(self.open.len() - 1);
+        self.status = format!("Opened {}", path.display());
+        let load = if want_wave {
+            self.ensure_wave_loaded(path)
+        } else {
+            Task::none()
+        };
+        self.load_active_into_editor();
+        load
+    }
+
+    fn ensure_wave_loaded(&mut self, path: &Path) -> Task<Message> {
+        let skip = matches!(
+            self.waveforms.get(path),
+            Some(WaveStatus::Ready(_)) | Some(WaveStatus::Loading)
+        );
+        if skip {
+            Task::none()
+        } else {
+            self.waveforms
+                .insert(path.to_path_buf(), WaveStatus::Loading);
+            self.status = format!("Loading waveform {}…", path.display());
+            Task::perform(waveform::load_wave_async(path.to_path_buf()), |(p, r)| {
+                Message::WaveLoaded(p, r)
+            })
         }
     }
 
+    fn apply_view_mode_to_open_files(&mut self) -> Task<Message> {
+        self.sync_editor_to_active();
+        let mode = self.view_mode;
+        let paths: Vec<PathBuf> = self.open.iter().map(|f| f.path.clone()).collect();
+        let mut tasks = Vec::new();
+        for path in &paths {
+            if !is_wave_path(path) {
+                continue;
+            }
+            if let Some(file) = self.open.iter_mut().find(|f| f.path == *path) {
+                file.view = match mode {
+                    ViewMode::Waveform => FileView::Waveform,
+                    ViewMode::TextEditor => FileView::Text,
+                };
+                if mode == ViewMode::TextEditor && file.content.is_empty() {
+                    if let Ok(loaded) = load_file(path) {
+                        file.content = loaded.content;
+                    }
+                }
+            }
+            if mode == ViewMode::Waveform {
+                tasks.push(self.ensure_wave_loaded(path));
+            }
+        }
+        self.load_active_into_editor();
+        if tasks.is_empty() {
+            if self.active_is_waveform() {
+                Task::none()
+            } else {
+                editor::scroll_to_y(0.0)
+            }
+        } else {
+            Task::batch(tasks)
+        }
+    }
+
+    fn active_is_waveform(&self) -> bool {
+        self.active
+            .and_then(|i| self.open.get(i))
+            .is_some_and(|f| f.view == FileView::Waveform)
+    }
+
     fn sync_editor_to_active(&mut self) {
+        if self.active_is_waveform() {
+            return;
+        }
         if let Some(i) = self.active {
             if let Some(file) = self.open.get_mut(i) {
                 file.content = self.editor_content.text();
@@ -601,6 +763,9 @@ impl VerilogIde {
 
     fn load_active_into_editor(&mut self) {
         self.editor_scroll_y = 0.0;
+        if self.active_is_waveform() {
+            return;
+        }
         if let Some(i) = self.active {
             if let Some(file) = self.open.get(i) {
                 let cursor = file.cursor;
@@ -618,6 +783,10 @@ impl VerilogIde {
     }
 
     fn reload_editor(&mut self) -> Task<Message> {
+        if self.active_is_waveform() {
+            self.load_active_into_editor();
+            return Task::none();
+        }
         self.load_active_into_editor();
         let (line, _) = self.editor_content.cursor_position();
         let y = (editor::line_top(line) - self.editor_view_h * 0.25).max(0.0);
@@ -702,7 +871,7 @@ impl VerilogIde {
             return;
         }
         self.refresh_tree();
-        self.open_path(&path);
+        let _ = self.open_path(&path);
         self.log(&format!("Created file {}\n", path.display()));
     }
 
@@ -727,6 +896,10 @@ impl VerilogIde {
 
     fn find_next(&mut self) {
         if self.search_query.is_empty() {
+            return;
+        }
+        if self.active_is_waveform() {
+            self.status = "Switch to Text Editor to search in a dump file.".into();
             return;
         }
         self.sync_editor_to_active();
@@ -833,6 +1006,16 @@ impl VerilogIde {
                 menu_item("Find…", Message::ShowFind),
                 menu_item("Refresh Explorer", Message::RefreshExplorer),
             ]),
+            TopMenu::View => menu_dropdown(column![
+                menu_item_owned(
+                    view_mode_label("Text Editor", self.view_mode == ViewMode::TextEditor),
+                    Message::SetViewMode(ViewMode::TextEditor),
+                ),
+                menu_item_owned(
+                    view_mode_label("Waveform", self.view_mode == ViewMode::Waveform),
+                    Message::SetViewMode(ViewMode::Waveform),
+                ),
+            ]),
             TopMenu::Run => menu_dropdown(column![
                 menu_item("Run Simulation (F5)", Message::RunSim),
             ]),
@@ -845,6 +1028,7 @@ impl VerilogIde {
     fn view_menu_bar(&self) -> Element<'_, Message> {
         let file_active = self.menu_open == Some(TopMenu::File);
         let edit_active = self.menu_open == Some(TopMenu::Edit);
+        let view_active = self.menu_open == Some(TopMenu::View);
         let run_active = self.menu_open == Some(TopMenu::Run);
         let help_active = self.menu_open == Some(TopMenu::Help);
 
@@ -852,9 +1036,11 @@ impl VerilogIde {
             row![
                 menu_label("File", file_active, Message::MenuToggle(TopMenu::File)),
                 menu_label("Edit", edit_active, Message::MenuToggle(TopMenu::Edit)),
+                menu_label("View", view_active, Message::MenuToggle(TopMenu::View)),
                 menu_label("Run", run_active, Message::MenuToggle(TopMenu::Run)),
                 menu_label("Help", help_active, Message::MenuToggle(TopMenu::Help)),
                 horizontal_space(),
+                mode_toggle(self.view_mode),
                 run_toolbar_button(self.sim_running),
                 text("Verilog IDE").size(12).color(FG_MUTED),
             ]
@@ -962,9 +1148,10 @@ impl VerilogIde {
                     Message::ToggleDir(node.path.clone()),
                 ));
             } else {
+                let mark = if is_wave_path(&node.path) { "  ~ " } else { "    " };
                 items.push(tree_row(
                     indent,
-                    format!("    {}", node.name),
+                    format!("{mark}{}", node.name),
                     is_active,
                     Message::OpenFile(node.path.clone()),
                 ));
@@ -1014,11 +1201,14 @@ impl VerilogIde {
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("untitled");
-                    let title = if f.dirty {
-                        format!("* {name}")
-                    } else {
-                        name.to_string()
-                    };
+                    let mut title = String::new();
+                    if f.dirty {
+                        title.push_str("* ");
+                    }
+                    if f.view == FileView::Waveform {
+                        title.push_str("~ ");
+                    }
+                    title.push_str(name);
                     let selected = self.active == Some(i);
                     row![
                         tab_button(title, selected, Message::SelectTab(i)),
@@ -1050,7 +1240,7 @@ impl VerilogIde {
             return container(
                 column![
                     text("Verilog IDE").size(32).color(FG_TEXT),
-                    text("Open a folder, then ▶ Run (F5) to simulate with xezim and write a .vcd.")
+                    text("Open a folder, then ▶ Run (F5). Click a .vcd in Waveform mode to view traces.")
                         .size(14)
                         .color(FG_MUTED),
                     Space::new(Length::Shrink, Length::Fixed(16.0)),
@@ -1062,7 +1252,7 @@ impl VerilogIde {
                     .spacing(12)
                     .align_y(Alignment::Center),
                     Space::new(Length::Shrink, Length::Fixed(24.0)),
-                    text("File → Open Folder    Run → Run Simulation (F5)")
+                    text("View → Waveform or Text Editor    File → Open Folder    Run → Run Simulation (F5)")
                         .size(12)
                         .color(FG_MUTED),
                 ]
@@ -1074,6 +1264,10 @@ impl VerilogIde {
             .center_x(Fill)
             .center_y(Fill)
             .into();
+        }
+
+        if self.active_is_waveform() {
+            return self.view_waveform_body();
         }
 
         let line_count = self.editor_content.line_count().max(1);
@@ -1137,6 +1331,73 @@ impl VerilogIde {
         .height(Fill)
         .style(|_| panel_style(BG_EDITOR))
         .into()
+    }
+
+    fn view_waveform_body(&self) -> Element<'_, Message> {
+        let path = match self.active_path() {
+            Some(p) => p,
+            None => {
+                return container(text("No waveform").color(FG_MUTED))
+                    .width(Fill)
+                    .height(Fill)
+                    .center_x(Fill)
+                    .center_y(Fill)
+                    .into();
+            }
+        };
+
+        let body: Element<'_, Message> = match self.waveforms.get(path) {
+            Some(WaveStatus::Ready(wave)) => {
+                let height = wave.content_height().max(self.editor_view_h);
+                scrollable(
+                    container(waveform::canvas(wave, Message::WaveNav))
+                        .width(Fill)
+                        .height(Length::Fixed(height)),
+                )
+                .width(Fill)
+                .height(Fill)
+                .into()
+            }
+            Some(WaveStatus::Loading) | None => container(
+                column![
+                    text("Loading waveform…").size(16).color(FG_TEXT),
+                    text("Parsed with wellen (Surfer).")
+                        .size(13)
+                        .color(FG_MUTED),
+                ]
+                .spacing(8)
+                .align_x(Alignment::Center),
+            )
+            .width(Fill)
+            .height(Fill)
+            .center_x(Fill)
+            .center_y(Fill)
+            .into(),
+            Some(WaveStatus::Error(e)) => container(
+                column![
+                    text("Could not open waveform").size(16).color(FG_TEXT),
+                    text(e.as_str()).size(13).color(FG_MUTED),
+                    Space::new(Length::Shrink, Length::Fixed(8.0)),
+                    welcome_button(
+                        "Open as text",
+                        Message::SetViewMode(ViewMode::TextEditor),
+                    ),
+                ]
+                .spacing(8)
+                .align_x(Alignment::Center),
+            )
+            .width(Fill)
+            .height(Fill)
+            .center_x(Fill)
+            .center_y(Fill)
+            .into(),
+        };
+
+        container(body)
+            .width(Fill)
+            .height(Fill)
+            .style(|_| panel_style(BG_EDITOR))
+            .into()
     }
 
     fn view_bottom_panel(&self) -> Element<'_, Message> {
@@ -1211,12 +1472,27 @@ impl VerilogIde {
 
         let detail = if let Some(i) = self.active {
             if let Some(f) = self.open.get(i) {
-                let (line, col) = cursor_line_col(&f.content, f.cursor);
-                let dirty = if f.dirty { " *" } else { "" };
-                format!(
-                    "Ln {line}, Col {col}{dirty}   {}",
-                    f.path.display()
-                )
+                if f.view == FileView::Waveform {
+                    let extra = self
+                        .waveforms
+                        .get(&f.path)
+                        .and_then(|s| match s {
+                            WaveStatus::Ready(w) => Some(w.cursor_label().unwrap_or_else(|| {
+                                w.time_span_label()
+                            })),
+                            WaveStatus::Loading => Some("loading…".into()),
+                            WaveStatus::Error(_) => Some("error".into()),
+                        })
+                        .unwrap_or_else(|| "waveform".into());
+                    format!("{extra}   {}", f.path.display())
+                } else {
+                    let (line, col) = cursor_line_col(&f.content, f.cursor);
+                    let dirty = if f.dirty { " *" } else { "" };
+                    format!(
+                        "Ln {line}, Col {col}{dirty}   {}",
+                        f.path.display()
+                    )
+                }
             } else {
                 self.status.clone()
             }
@@ -1268,6 +1544,7 @@ impl VerilogIde {
                 text("About Verilog IDE").size(14),
                 text("Desktop IDE for Verilog HDL and testbenches."),
                 text("Run ▶ uses the bundled xezim simulator to write a .vcd waveform."),
+                text("View → Waveform opens .vcd files with wellen (Surfer). View → Text Editor shows the dump as text."),
                 button("Close").on_press(Message::DialogCancel),
             ]
             .spacing(6)
@@ -1349,6 +1626,10 @@ fn menu_label(label: &'static str, active: bool, msg: Message) -> Element<'stati
 }
 
 fn menu_item(label: &'static str, msg: Message) -> Element<'static, Message> {
+    menu_item_owned(label.to_string(), msg)
+}
+
+fn menu_item_owned(label: String, msg: Message) -> Element<'static, Message> {
     button(text(label).size(13))
         .on_press(msg)
         .width(Fill)
@@ -1361,13 +1642,59 @@ fn menu_item(label: &'static str, msg: Message) -> Element<'static, Message> {
         .into()
 }
 
+fn view_mode_label(name: &str, selected: bool) -> String {
+    if selected {
+        format!("●  {name}")
+    } else {
+        format!("   {name}")
+    }
+}
+
 fn menu_dropdown_left(menu: TopMenu) -> f32 {
     match menu {
         TopMenu::File => 8.0,
         TopMenu::Edit => 52.0,
-        TopMenu::Run => 96.0,
-        TopMenu::Help => 140.0,
+        TopMenu::View => 96.0,
+        TopMenu::Run => 148.0,
+        TopMenu::Help => 192.0,
     }
+}
+
+fn mode_toggle(mode: ViewMode) -> Element<'static, Message> {
+    row![
+        mode_chip("Text", mode == ViewMode::TextEditor, Message::SetViewMode(ViewMode::TextEditor)),
+        mode_chip("Wave", mode == ViewMode::Waveform, Message::SetViewMode(ViewMode::Waveform)),
+    ]
+    .spacing(4)
+    .into()
+}
+
+fn mode_chip(label: &'static str, selected: bool, msg: Message) -> Element<'static, Message> {
+    button(text(label).size(12))
+        .on_press(msg)
+        .padding([4, 10])
+        .style(move |_, status| {
+            let hovered = matches!(
+                status,
+                iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
+            );
+            iced::widget::button::Style {
+                background: Some(iced::Background::Color(if selected {
+                    Color::from_rgb(0.09, 0.38, 0.65)
+                } else if hovered {
+                    Color::from_rgb(0.28, 0.28, 0.30)
+                } else {
+                    Color::from_rgb(0.18, 0.18, 0.20)
+                })),
+                text_color: if selected { Color::WHITE } else { FG_TEXT },
+                border: Border {
+                    radius: 3.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        })
+        .into()
 }
 
 fn run_toolbar_button(running: bool) -> Element<'static, Message> {
@@ -1550,6 +1877,7 @@ async fn pick_file(title: &str) -> Result<Option<PathBuf>, DialogError> {
     let picked = rfd::AsyncFileDialog::new()
         .set_title(&title)
         .add_filter("Verilog / text", &["v", "sv", "vh", "svh", "txt", "md"])
+        .add_filter("Waveform", &["vcd", "fst", "ghw"])
         .pick_file()
         .await
         .map(|handle| handle.path().to_path_buf());
@@ -1599,6 +1927,8 @@ fn pick_file_zenity(title: &str) -> Result<Option<PathBuf>, DialogError> {
             title,
             "--file-filter",
             "Verilog | *.v *.sv *.vh *.svh",
+            "--file-filter",
+            "Waveform | *.vcd *.fst *.ghw",
             "--file-filter",
             "Text | *.txt *.md",
             "--file-filter",
