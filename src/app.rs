@@ -8,8 +8,8 @@ use crate::project::{
 use crate::templates::{self, counter_example};
 use iced::highlighter;
 use iced::widget::{
-    button, column, container, horizontal_rule, horizontal_space, row, scrollable, stack, text,
-    text_editor, text_input, Column, Space,
+    button, column, container, horizontal_rule, horizontal_space, mouse_area, row, scrollable,
+    stack, text, text_editor, text_input, Column, Space,
 };
 use iced::{Alignment, Border, Color, Element, Fill, Font, Length, Padding, Shadow, Task, Theme};
 use std::collections::HashSet;
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 const ACTIVITY_WIDTH: f32 = 48.0;
 const SIDEBAR_WIDTH: f32 = 260.0;
 const BOTTOM_HEIGHT: f32 = 160.0;
-const MENU_HEIGHT: f32 = 28.0;
+const MENU_HEIGHT: f32 = 36.0;
 const TAB_HEIGHT: f32 = 36.0;
 const STATUS_HEIGHT: f32 = 24.0;
 
@@ -105,6 +105,7 @@ pub enum Message {
     ToggleBottomPanel,
     ClearBottom,
     MenuToggle(TopMenu),
+    MenuClose,
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +156,10 @@ impl VerilogIde {
                 } else {
                     Some(menu)
                 };
+                Task::none()
+            }
+            Message::MenuClose => {
+                self.menu_open = None;
                 Task::none()
             }
             Message::OpenProject => {
@@ -626,8 +631,7 @@ impl VerilogIde {
         .height(Fill)
         .spacing(0);
 
-        let body = column![
-            self.view_menu_bar(),
+        let content = column![
             container(main)
                 .width(Fill)
                 .height(Fill)
@@ -637,9 +641,10 @@ impl VerilogIde {
         .height(Fill)
         .spacing(0);
 
-        if let Some(menu) = self.menu_open {
+        let content_area: Element<'_, Message> = if let Some(menu) = self.menu_open {
             stack![
-                body,
+                content,
+                mouse_area(Space::new(Fill, Fill)).on_press(Message::MenuClose),
                 container(
                     row![
                         Space::new(Length::Fixed(menu_dropdown_left(menu)), Length::Shrink),
@@ -648,10 +653,11 @@ impl VerilogIde {
                     .align_y(Alignment::Start),
                 )
                 .width(Fill)
+                .height(Length::Shrink)
                 .align_x(Alignment::Start)
                 .align_y(Alignment::Start)
                 .padding(Padding {
-                    top: MENU_HEIGHT + 2.0,
+                    top: 2.0,
                     right: 0.0,
                     bottom: 0.0,
                     left: 0.0,
@@ -660,8 +666,16 @@ impl VerilogIde {
             .height(Fill)
             .into()
         } else {
-            body.into()
-        }
+            content.into()
+        };
+
+        column![
+            self.view_menu_bar(),
+            content_area,
+        ]
+        .height(Fill)
+        .spacing(0)
+        .into()
     }
 
     fn view_menu_dropdown(&self, menu: TopMenu) -> Element<'_, Message> {
@@ -701,8 +715,9 @@ impl VerilogIde {
                 horizontal_space(),
                 text("Verilog IDE").size(12).color(FG_MUTED),
             ]
-            .spacing(4)
-            .padding([4, 8])
+            .height(Fill)
+            .spacing(2)
+            .padding([0, 8])
             .align_y(Alignment::Center),
         )
         .width(Fill)
@@ -1112,19 +1127,32 @@ fn tab_close_style() -> iced::widget::button::Style {
 }
 
 fn menu_label(label: &'static str, active: bool, msg: Message) -> Element<'static, Message> {
-    button(text(label).size(13))
-        .on_press(msg)
-        .padding([4, 10])
-        .style(move |_, _| iced::widget::button::Style {
+    button(
+        text(label)
+            .size(13)
+            .color(FG_TEXT),
+    )
+    .on_press(msg)
+    .padding([6, 12])
+    .style(move |_, status| {
+        let hovered = matches!(status, iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed);
+        iced::widget::button::Style {
             background: if active {
-                Some(iced::Background::Color(Color::from_rgb(0.28, 0.28, 0.28)))
+                Some(iced::Background::Color(Color::from_rgb(0.30, 0.30, 0.32)))
+            } else if hovered {
+                Some(iced::Background::Color(Color::from_rgb(0.26, 0.26, 0.28)))
             } else {
                 None
             },
             text_color: FG_TEXT,
+            border: Border {
+                radius: 3.0.into(),
+                ..Default::default()
+            },
             ..Default::default()
-        })
-        .into()
+        }
+    })
+    .into()
 }
 
 fn menu_item(label: &'static str, msg: Message) -> Element<'static, Message> {
