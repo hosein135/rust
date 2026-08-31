@@ -15,7 +15,7 @@
 #
 # Flow inside nix develop:
 #   1) cargo run (debug) or cargo run --release
-#   xezim (https://github.com/aionhw/xezim) is on PATH for the IDE Run button.
+#      (builds bundled xezim as a Cargo dependency, same as the rest of the crate)
 #
 # Usage:
 #   ./run.sh                # debug run

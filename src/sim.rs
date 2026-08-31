@@ -1,19 +1,20 @@
-//! Run Verilog + testbench through [xezim](https://github.com/aionhw/xezim)
-//! and collect the resulting VCD waveform.
+//! Simulate Verilog + testbench with the bundled [xezim](https://github.com/aionhw/xezim)
+//! library and collect the resulting VCD waveform.
 
 use crate::project::{collect_hdl_sources, OpenFile};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
-const DUMP_WRAP_MODULE: &str = "__ide_vcd_dump";
-const MAX_TIME: &str = "1ms";
+/// 1 ms, matching xezim's `--max-time 1ms` (bare unit is nanoseconds).
+const MAX_TIME_NS: u64 = 1_000_000;
 
 #[derive(Debug, Clone)]
 pub struct SimJob {
-    pub xezim: PathBuf,
     pub root: PathBuf,
-    pub args: Vec<String>,
+    pub top: String,
+    pub sources: Vec<String>,
+    pub source_paths: Vec<String>,
+    pub include_dirs: Vec<String>,
     pub expected_vcd: PathBuf,
 }
 
@@ -26,12 +27,12 @@ pub struct SimResult {
 
 impl SimJob {
     pub fn command_preview(&self) -> String {
-        let mut s = quote_arg(&self.xezim.display().to_string());
-        for a in &self.args {
-            s.push(' ');
-            s.push_str(&quote_arg(a));
-        }
-        s
+        format!(
+            "xezim --wave -s {} --max-time 1ms ({} file{})",
+            self.top,
+            self.sources.len(),
+            if self.sources.len() == 1 { "" } else { "s" }
+        )
     }
 }
 
@@ -40,17 +41,15 @@ pub fn prepare_job(
     active: Option<&Path>,
     open: &[OpenFile],
 ) -> Result<SimJob, String> {
-    let xezim = find_xezim()?;
-    let sources = collect_hdl_sources(root);
-    if sources.is_empty() {
+    let files = collect_hdl_sources(root);
+    if files.is_empty() {
         return Err("No Verilog sources (.v / .sv) in this folder.".into());
     }
 
-    let tb_path = pick_testbench(&sources, active, open)
-        .ok_or_else(|| {
-            "No testbench found. Add a *_tb.v (or *_tb.sv) file, or a module that calls $dumpfile / $finish."
-                .to_string()
-        })?;
+    let tb_path = pick_testbench(&files, active, open).ok_or_else(|| {
+        "No testbench found. Add a *_tb.v (or *_tb.sv) file, or a module that calls $dumpfile / $finish."
+            .to_string()
+    })?;
 
     let tb_src = std::fs::read_to_string(&tb_path)
         .map_err(|e| format!("Read {}: {e}", tb_path.display()))?;
@@ -61,58 +60,40 @@ pub fn prepare_job(
         )
     })?;
 
+    let vcd_name = parse_dumpfile(&tb_src).unwrap_or_else(|| format!("{top}.vcd"));
+    let expected_vcd = resolve_vcd_path(root, &vcd_name);
+    let tb_src = ensure_wave_tasks(&tb_src, &top, &expected_vcd);
+
     let mut include_dirs = Vec::new();
-    include_dirs.push(root.to_path_buf());
-    for src in &sources {
+    include_dirs.push(root.to_string_lossy().into_owned());
+    for src in &files {
         if let Some(parent) = src.parent() {
-            if !include_dirs.iter().any(|d| d == parent) {
-                include_dirs.push(parent.to_path_buf());
+            let p = parent.to_string_lossy().into_owned();
+            if !include_dirs.iter().any(|d| d == &p) {
+                include_dirs.push(p);
             }
         }
     }
 
-    let mut extra_sources = Vec::new();
-    let expected_vcd = if let Some(name) = parse_dumpfile(&tb_src) {
-        resolve_vcd_path(root, &name)
-    } else {
-        let vcd_name = format!("{top}.vcd");
-        let vcd_path = root.join(&vcd_name);
-        extra_sources.push(write_dump_wrap(root, &vcd_name)?);
-        vcd_path
-    };
-
-    let mut args = vec![
-        "--wave".into(),
-        "--simulate".into(),
-        "--error-exit".into(),
-        "--max-time".into(),
-        MAX_TIME.into(),
-        "-s".into(),
-        top.clone(),
-    ];
-    if extra_sources.iter().any(|p| {
-        p.file_stem()
-            .and_then(|s| s.to_str())
-            .is_some_and(|s| s == DUMP_WRAP_MODULE)
-    }) {
-        args.push("-s".into());
-        args.push(DUMP_WRAP_MODULE.into());
-    }
-    for dir in &include_dirs {
-        args.push("-I".into());
-        args.push(dir.to_string_lossy().into_owned());
-    }
-    for src in &sources {
-        args.push(src.to_string_lossy().into_owned());
-    }
-    for src in &extra_sources {
-        args.push(src.to_string_lossy().into_owned());
+    let mut sources = Vec::new();
+    let mut source_paths = Vec::new();
+    for path in &files {
+        source_paths.push(path.to_string_lossy().into_owned());
+        if path == &tb_path {
+            sources.push(tb_src.clone());
+        } else {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("Read {}: {e}", path.display()))?;
+            sources.push(text);
+        }
     }
 
     Ok(SimJob {
-        xezim,
         root: root.to_path_buf(),
-        args,
+        top,
+        sources,
+        source_paths,
+        include_dirs,
         expected_vcd,
     })
 }
@@ -130,103 +111,71 @@ pub async fn run_job_async(job: SimJob) -> SimResult {
 fn run_job(job: &SimJob) -> SimResult {
     let mut log = String::new();
     log.push_str(&format!("cwd: {}\n", job.root.display()));
+    log.push_str(&format!("{}\n", job.command_preview()));
 
-    let mut cmd = Command::new(&job.xezim);
-    cmd.args(&job.args)
-        .current_dir(&job.root)
-        .env("CARGO_TERM_COLOR", "never");
+    xezim::compiler::simulator::set_wave_enabled(true);
 
-    let output = match cmd.output() {
-        Ok(o) => o,
+    let sim = xezim::simulate_multi(
+        &job.sources,
+        MAX_TIME_NS,
+        Some(&job.top),
+        &job.include_dirs,
+        &job.source_paths,
+        None,
+        false,
+        None,
+        None,
+        &[],
+        &[],
+        None,
+        &[],
+        0,
+        u64::MAX,
+        None,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+    );
+
+    match sim {
+        Ok(sim) => {
+            for line in &sim.output {
+                if !line.message.is_empty() {
+                    log.push_str(&line.message);
+                    if !line.message.ends_with('\n') {
+                        log.push('\n');
+                    }
+                }
+            }
+            let vcd = find_vcd(&job.root, &job.expected_vcd);
+            match &vcd {
+                Some(path) => log.push_str(&format!("VCD written: {}\n", path.display())),
+                None => log.push_str(
+                    "Simulation finished but no .vcd was found. The testbench needs $dumpfile / $dumpvars.\n",
+                ),
+            }
+            SimResult {
+                ok: true,
+                log,
+                vcd,
+            }
+        }
         Err(e) => {
-            log.push_str(&format!("failed to spawn xezim: {e}\n"));
-            return SimResult {
+            log.push_str(&e);
+            if !e.ends_with('\n') {
+                log.push('\n');
+            }
+            SimResult {
                 ok: false,
                 log,
                 vcd: None,
-            };
-        }
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !stdout.is_empty() {
-        log.push_str(&stdout);
-        if !stdout.ends_with('\n') {
-            log.push('\n');
-        }
-    }
-    if !stderr.is_empty() {
-        log.push_str(&stderr);
-        if !stderr.ends_with('\n') {
-            log.push('\n');
-        }
-    }
-
-    let ok = output.status.success();
-    if !ok {
-        log.push_str(&format!(
-            "xezim exited with {}\n",
-            output
-                .status
-                .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "signal".into())
-        ));
-    }
-
-    let vcd = find_vcd(&job.root, &job.expected_vcd);
-    match &vcd {
-        Some(path) => log.push_str(&format!("VCD written: {}\n", path.display())),
-        None if ok => log.push_str(
-            "xezim finished but no .vcd was found. The testbench needs $dumpfile / $dumpvars, and the run must pass --wave (already requested).\n",
-        ),
-        None => {}
-    }
-
-    SimResult { ok, log, vcd }
-}
-
-pub fn find_xezim() -> Result<PathBuf, String> {
-    let mut candidates = Vec::new();
-
-    for key in ["XEZIM", "VERILOG_IDE_XEZIM"] {
-        if let Ok(val) = std::env::var(key) {
-            if !val.is_empty() {
-                candidates.push(PathBuf::from(val));
             }
         }
     }
-
-    candidates.extend(path_lookup("xezim"));
-
-    if let Some(home) = home_dir() {
-        candidates.push(home.join(".cargo").join("bin").join(exe_name("xezim")));
-        let cache = cache_root(&home);
-        candidates.push(cache.join("xezim-build").join("bin").join(exe_name("xezim")));
-        candidates.push(cache.join("bin").join(exe_name("xezim")));
-    }
-
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(
-            cwd.join("..")
-                .join("xezim")
-                .join("target")
-                .join("release")
-                .join(exe_name("xezim")),
-        );
-    }
-
-    if let Some(found) = candidates.into_iter().find(|p| p.is_file()) {
-        return Ok(found);
-    }
-
-    Err(
-        "xezim not found. Install https://github.com/aionhw/xezim (`cargo build --release`) \
-         and put it on PATH, or set XEZIM to the binary. On Linux / macOS / WSL, ./run.sh \
-         provides xezim via Nix (first Run compiles it)."
-            .into(),
-    )
 }
 
 fn pick_testbench(
@@ -379,24 +328,56 @@ fn resolve_vcd_path(root: &Path, name: &str) -> PathBuf {
     }
 }
 
-fn write_dump_wrap(root: &Path, vcd_name: &str) -> Result<PathBuf, String> {
-    let dir = root.join(".verilog-ide-data");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join(format!("{DUMP_WRAP_MODULE}.sv"));
-    let vcd_lit = vcd_name.replace('\\', "/").replace('"', "");
-    let body = format!(
-        r#"`timescale 1ns / 1ps
-// Generated by Verilog IDE so xezim can write a VCD (--wave).
-module {DUMP_WRAP_MODULE};
-    initial begin
-        $dumpfile("{vcd_lit}");
-        $dumpvars(0);
-    end
-endmodule
-"#
+fn vcd_literal(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn ensure_wave_tasks(src: &str, top: &str, vcd: &Path) -> String {
+    let lit = vcd_literal(vcd);
+    let has_file = parse_dumpfile(src).is_some();
+    let has_vars = src.contains("$dumpvars");
+    if has_file && has_vars {
+        replace_dumpfile(src, &lit).unwrap_or_else(|| src.to_string())
+    } else {
+        inject_dump_block(src, top, &lit)
+    }
+}
+
+fn replace_dumpfile(src: &str, lit: &str) -> Option<String> {
+    let key = "$dumpfile";
+    let k = src.find(key)?;
+    let bytes = src.as_bytes();
+    let mut i = k + key.len();
+    while i < src.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= src.len() || bytes[i] != b'(' {
+        return None;
+    }
+    i += 1;
+    while i < src.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let q = *bytes.get(i)?;
+    if q != b'"' && q != b'\'' {
+        return None;
+    }
+    let open = i;
+    let close = src[open + 1..].find(q as char)? + open + 1;
+    Some(format!("{}{}{}", &src[..=open], lit, &src[close..]))
+}
+
+fn inject_dump_block(src: &str, top: &str, lit: &str) -> String {
+    let block = format!(
+        "\n    initial begin\n        $dumpfile(\"{lit}\");\n        $dumpvars(0, {top});\n    end\n"
     );
-    std::fs::write(&path, body).map_err(|e| format!("Write {}: {e}", path.display()))?;
-    Ok(path)
+    if let Some(idx) = src.rfind("endmodule") {
+        let mut s = src.to_string();
+        s.insert_str(idx, &block);
+        s
+    } else {
+        format!("{src}\n{block}\n")
+    }
 }
 
 fn find_vcd(root: &Path, expected: &Path) -> Option<PathBuf> {
@@ -434,46 +415,4 @@ fn vcd_looks_valid(path: &Path) -> bool {
         return meta.len() > 16;
     };
     head.contains("$timescale") || head.contains("$var") || head.contains("$date")
-}
-
-fn path_lookup(name: &str) -> Vec<PathBuf> {
-    let exe = exe_name(name);
-    let Some(paths) = std::env::var_os("PATH") else {
-        return Vec::new();
-    };
-    std::env::split_paths(&paths)
-        .map(|dir| dir.join(&exe))
-        .filter(|p| p.is_file())
-        .collect()
-}
-
-fn exe_name(name: &str) -> String {
-    if cfg!(windows) && !name.ends_with(".exe") {
-        format!("{name}.exe")
-    } else {
-        name.to_string()
-    }
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-}
-
-fn cache_root(home: &Path) -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
-        if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("verilog-ide");
-        }
-    }
-    home.join(".cache").join("verilog-ide")
-}
-
-fn quote_arg(arg: &str) -> String {
-    if arg.is_empty() || arg.chars().any(|c| c.is_whitespace() || matches!(c, '"' | '\'')) {
-        format!("\"{}\"", arg.replace('"', "\\\""))
-    } else {
-        arg.to_string()
-    }
 }

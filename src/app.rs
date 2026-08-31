@@ -1267,7 +1267,7 @@ impl VerilogIde {
             column![
                 text("About Verilog IDE").size(14),
                 text("Desktop IDE for Verilog HDL and testbenches."),
-                text("Run ▶ uses xezim (https://github.com/aionhw/xezim) to write a .vcd waveform."),
+                text("Run ▶ uses the bundled xezim simulator to write a .vcd waveform."),
                 button("Close").on_press(Message::DialogCancel),
             ]
             .spacing(6)
