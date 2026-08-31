@@ -669,10 +669,10 @@ impl VerilogIde {
         .align_y(Alignment::Center)
         .padding([6, 8]);
 
-        let project_header = if let Some(p) = self.project.as_ref() {
+        let project_header: Element<'_, Message> = if let Some(p) = self.project.as_ref() {
             row![
                 text("▾").size(12).color(FG_MUTED),
-                text(&p.name).size(13).color(FG_TEXT),
+                text(p.name.as_str()).size(13).color(FG_TEXT),
             ]
             .spacing(4)
             .padding([2, 8])
