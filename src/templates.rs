@@ -3,7 +3,7 @@
 pub fn module_template(name: &str) -> String {
     let safe = sanitize_ident(name);
     format!(
-        r("`timescale 1ns / 1ps
+        r"`timescale 1ns / 1ps
 // {safe}.v — RTL module
 module {safe} (
     input  wire clk,
@@ -28,7 +28,7 @@ pub fn testbench_template(dut: &str) -> String {
     let safe = sanitize_ident(dut);
     let tb = format!("{safe}_tb");
     format!(
-        r("`timescale 1ns / 1ps
+        r"`timescale 1ns / 1ps
 // {tb}.v — testbench for {safe}
 module {tb};
 
@@ -76,7 +76,7 @@ endmodule
 pub fn counter_example() -> (&'static str, &'static str, &'static str, &'static str) {
     (
         "counter.v",
-        r("`timescale 1ns / 1ps
+        r"`timescale 1ns / 1ps
 // 4-bit up counter
 module counter (
     input  wire       clk,
@@ -95,7 +95,7 @@ module counter (
 endmodule
 ",
         "counter_tb.v",
-        r("`timescale 1ns / 1ps
+        r"`timescale 1ns / 1ps
 // Testbench for counter
 module counter_tb;
 
