@@ -529,12 +529,15 @@ ensure_flake_lock() {
     local lock_needs_update=false
     if [ ! -f "${SYSTEM_FLAKE}/flake.lock" ]; then
         lock_needs_update=true
-    elif grep -q 'rust-overlay.url' "${FLAKE_DIR}/flake.nix" \
+    elif grep -qE 'rust-overlay' "${FLAKE_DIR}/flake.nix" \
         && ! grep -q '"rust-overlay"' "${FLAKE_DIR}/flake.lock" 2>/dev/null; then
+        # flake.nix may declare rust-overlay across multiple lines
+        # (rust-overlay = { url = ... }), so do not require "rust-overlay.url".
         lock_needs_update=true
     fi
     if [ "${lock_needs_update}" = true ]; then
         step "Updating flake.lock ..."
+        # Allow rewriting the staged lock (path flake); copy result back to repo.
         nix flake lock "$(flake_ref)"
         cp -f "${SYSTEM_FLAKE}/flake.lock" "${FLAKE_DIR}/flake.lock"
     fi
