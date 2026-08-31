@@ -64,38 +64,6 @@ fn main() {
     println!("cargo:rerun-if-changed=.git/index");
     println!("cargo:rerun-if-changed=.git/refs/tags");
 
-    // UVM checkout for the UVM integration tests
-    // (tests/classes/uvm_integration_tests.rs): a single
-    // https://github.com/nitronis/UVM clone carries the four UVM releases as
-    // subdirectories. Fetched at build time so `cargo test` needs no manual
-    // setup. Best-effort: an existing checkout (XEZIM_UVM_DIR or a ../UVM
-    // sibling) or an offline build skips it — the tests' own locator clones
-    // on demand as a fallback.
-    println!("cargo:rerun-if-env-changed=XEZIM_UVM_DIR");
-    let manifest =
-        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let uvm_dest = manifest.join("target/uvm-checkout");
-    let uvm_present = std::env::var_os("XEZIM_UVM_DIR").is_some()
-        || manifest.join("../UVM/1.2/src/uvm_pkg.sv").exists()
-        || uvm_dest.join("1.2/src/uvm_pkg.sv").exists();
-    if !uvm_present {
-        let _ = std::fs::create_dir_all(manifest.join("target"));
-        let cloned = Command::new("git")
-            .args(["clone", "--depth", "1", "https://github.com/nitronis/UVM"])
-            .arg(&uvm_dest)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if !cloned {
-            // A partial tree would satisfy the exists() probe next build and
-            // poison every later attempt — leave no trace on failure.
-            let _ = std::fs::remove_dir_all(&uvm_dest);
-            println!(
-                "cargo:warning=could not clone https://github.com/nitronis/UVM (offline?) — UVM tests will fetch it on demand"
-            );
-        }
-    }
-
     // VPI symbols must be resolvable by dlopen'd DPI/VPI modules.
     //
     // The flag is spelled differently per linker: GNU/ELF ld takes

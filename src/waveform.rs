@@ -47,15 +47,6 @@ pub enum ViewMode {
     Waveform,
 }
 
-impl ViewMode {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::TextEditor => "Text Editor",
-            Self::Waveform => "Waveform",
-        }
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Level {
     High,
@@ -80,7 +71,6 @@ struct Trace {
 
 #[derive(Clone, Debug)]
 pub struct WaveView {
-    pub path: PathBuf,
     timescale: String,
     t_min: u64,
     t_max: u64,
@@ -250,7 +240,6 @@ pub fn load_wave(path: &Path) -> Result<WaveView, String> {
     };
 
     Ok(WaveView {
-        path: path.to_path_buf(),
         timescale,
         t_min,
         t_max,
