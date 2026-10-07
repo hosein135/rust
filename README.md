@@ -10,6 +10,8 @@ Desktop IDE for **Verilog** HDL and **testbenches**, written in Rust with [iced]
 - Rust full adder (`samples/full_adder`): TxHDL unit `src/adder.rs` and rustdv testbench `src/full_adder_tb.rs`. File → Open Sample Folder opens it. Run compiles both, writes `full_adder.vcd`, and opens the waveform.
 - **Run** button (F5): simulate Verilog + testbench with [xezim](https://github.com/aionhw/xezim) and write a `.vcd` waveform
 - **Waveform / Text Editor** modes: click a `.vcd` to view traces (via [wellen](https://github.com/ekiwi/wellen) from [Surfer](https://gitlab.com/surfer-project/surfer)) or the dump as text
+- **Anon VCD**: flatten and rename the open `.vcd` with [vcd-anon](https://gitlab.com/surfer-project/vcd-anon). Writes `name.anon.vcd` and `name.anon.mapping.txt`
+- **To SAIF**: convert a `.vcd` / `.fst` / `.ghw` dump to a switching-activity `.saif` with [wave2saif](https://gitlab.com/surfer-project/wave2saif)
 - Console + problems panel, find, save shortcuts
 
 ## Setup and run (Linux / macOS / WSL)
@@ -30,7 +32,7 @@ What `run.sh` does (same pattern as [jadex_django/run.sh](../jadex_django/run.sh
 ## Reproducibility
 
 - **Nix**: `devops/flake.lock` pins nixpkgs and rust-overlay; the shell uses Rust **1.92.0** exactly
-- **Cargo**: committed `Cargo.lock` pins crates.io; xezim and Surfer are vendored under `vendor/` so `cargo build` does not fetch their git repos
+- **Cargo**: committed `Cargo.lock` pins crates.io; xezim, Surfer, vcd-anon, and wave2saif are vendored under `vendor/` so `cargo build` does not fetch their git repos
 - **Toolchain file**: `rust-toolchain.toml` selects 1.92.0 for rustup-based builds outside Nix
 
 Useful flags:
@@ -67,6 +69,17 @@ Use **View → Text Editor** or the **Text** chip, then click the same file to s
 
 After **▶ Run**, if Waveform mode is on, the new `.vcd` opens as traces automatically.
 
+## VCD tools
+
+**Anon VCD** and **To SAIF** sit in the menu bar, under **Run**, and on the waveform toolbar. Each one uses the active waveform when it matches, otherwise an open waveform tab, otherwise the newest dump in the folder.
+
+| Button | Tool | Result |
+|--------|------|--------|
+| Anon VCD | [vcd-anon](https://gitlab.com/surfer-project/vcd-anon) | `name.anon.vcd` plus `name.anon.mapping.txt` |
+| To SAIF | [wave2saif](https://gitlab.com/surfer-project/wave2saif) | `name.saif` |
+
+Anon VCD only accepts `.vcd`. To SAIF also accepts `.fst` and `.ghw`. Both crates are path dependencies, so `cargo build` compiles them with the IDE.
+
 ## Manual run (inside Nix shell)
 
 ```bash
@@ -85,6 +98,8 @@ src/waveform.rs   Surfer/wellen waveform pane
 vendor/xezim      Vendored [xezim](https://github.com/aionhw/xezim) (no git fetch)
 vendor/xezim-core Vendored xezim-core (xezim path/patch dep)
 vendor/surfer     Vendored [Surfer](https://gitlab.com/surfer-project/surfer) v0.7.0
+vendor/vcd-anon   Vendored [vcd-anon](https://gitlab.com/surfer-project/vcd-anon) (`519eb8b5`); Anon VCD. Its `build.rs` does not init the wellen submodule (test inputs only)
+vendor/wave2saif  Vendored [wave2saif](https://gitlab.com/surfer-project/wave2saif) (`d89109c7`); To SAIF. Local wellen pin is 0.25 so it shares the IDE's parser
 vendor/txhdl      Vendored [TxHDL](https://github.com/filmil/hdl-txhdl) (Bazel upstream; `lib/Cargo.toml` is the local Cargo entry)
 vendor/rustdv     Vendored [rustdv](https://github.com/rustdv/rustdv)
 samples/full_adder  TxHDL full adder (`src/adder.rs`) and rustdv testbench (`src/full_adder_tb.rs`)

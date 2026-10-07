@@ -14,6 +14,7 @@ use crate::project::{
 };
 use crate::sim::{self, SimResult};
 use crate::templates;
+use crate::wave_tools::{self, WaveToolKind, WaveToolOutput};
 use crate::waveform::{self, ViewMode, WaveNav, WaveView};
 use iced::keyboard::{self, Key};
 use iced::widget::text::Wrapping;
@@ -88,6 +89,7 @@ pub struct VerilogIde {
     menu_open: Option<TopMenu>,
     search_query: String,
     sim_running: bool,
+    tool_running: bool,
     view_mode: ViewMode,
     waveforms: HashMap<PathBuf, WaveStatus>,
 }
@@ -131,6 +133,9 @@ pub enum Message {
     MenuClose,
     RunSim,
     SimFinished(SimResult),
+    AnonymizeVcd,
+    VcdToSaif,
+    WaveToolFinished(Result<WaveToolOutput, String>),
     SetViewMode(ViewMode),
     WaveNav(WaveNav),
     WaveLoaded(PathBuf, Result<WaveView, String>),
@@ -142,7 +147,7 @@ pub enum DialogError {
 }
 
 pub fn run() -> iced::Result {
-    iced::application("Verilog IDE", VerilogIde::update, VerilogIde::view)
+    iced::application("rust hdl ide", VerilogIde::update, VerilogIde::view)
         .theme(|_| Theme::Dark)
         .subscription(VerilogIde::subscription)
         .window(iced::window::Settings {
@@ -165,7 +170,7 @@ impl VerilogIde {
                 editor_content: text_editor::Content::new(),
                 editor_scroll_y: 0.0,
                 editor_view_h: 480.0,
-                console: "Verilog IDE ready.\n".into(),
+                console: "rust hdl ide ready.\n".into(),
                 problems: Vec::new(),
                 bottom: BottomTab::Console,
                 bottom_visible: true,
@@ -174,6 +179,7 @@ impl VerilogIde {
                 menu_open: None,
                 search_query: String::new(),
                 sim_running: false,
+                tool_running: false,
                 view_mode: ViewMode::Waveform,
                 waveforms: HashMap::new(),
             },
@@ -457,6 +463,9 @@ impl VerilogIde {
                 Task::none()
             }
             Message::RunSim => self.start_simulation(),
+            Message::AnonymizeVcd => self.start_wave_tool(WaveToolKind::Anonymize),
+            Message::VcdToSaif => self.start_wave_tool(WaveToolKind::ToSaif),
+            Message::WaveToolFinished(result) => self.finish_wave_tool(result),
             Message::SimFinished(result) => {
                 self.sim_running = false;
                 self.bottom = BottomTab::Console;
@@ -541,7 +550,7 @@ impl VerilogIde {
 
     fn start_simulation(&mut self) -> Task<Message> {
         self.menu_open = None;
-        if self.sim_running {
+        if self.sim_running || self.tool_running {
             return Task::none();
         }
         if self.dialog.is_some() {
@@ -602,6 +611,75 @@ impl VerilogIde {
                 Task::none()
             }
         }
+    }
+
+    fn start_wave_tool(&mut self, kind: WaveToolKind) -> Task<Message> {
+        self.menu_open = None;
+        if self.sim_running || self.tool_running {
+            return Task::none();
+        }
+        let open: Vec<PathBuf> = self.open.iter().map(|file| file.path.clone()).collect();
+        let input = match wave_tools::pick_input(
+            self.active_path().map(PathBuf::as_path),
+            &open,
+            self.project_root().as_deref(),
+            kind,
+        ) {
+            Ok(path) => path,
+            Err(e) => {
+                self.log_err(&e);
+                return Task::none();
+            }
+        };
+
+        self.tool_running = true;
+        self.bottom = BottomTab::Console;
+        self.bottom_visible = true;
+        let (status, label) = match kind {
+            WaveToolKind::Anonymize => ("Anonymizing VCD…", "Anon VCD"),
+            WaveToolKind::ToSaif => ("Converting waveform to SAIF…", "To SAIF"),
+        };
+        self.status = status.into();
+        self.log(&format!("{label}: {}\n", input.display()));
+        Task::perform(wave_tools::run_async(kind, input), Message::WaveToolFinished)
+    }
+
+    fn finish_wave_tool(&mut self, result: Result<WaveToolOutput, String>) -> Task<Message> {
+        self.tool_running = false;
+        self.bottom = BottomTab::Console;
+        self.bottom_visible = true;
+        let output = match result {
+            Ok(output) => output,
+            Err(e) => {
+                self.log_err(&e);
+                return Task::none();
+            }
+        };
+        self.log(&output.log);
+        self.status = format!("Wrote {}", output.output.display());
+        self.refresh_tree();
+        if output.open_as_wave {
+            self.view_mode = ViewMode::Waveform;
+        }
+        self.drop_open_path(&output.output);
+        let load = self.open_path(&output.output);
+        Task::batch([load, editor::scroll_to_y(0.0)])
+    }
+
+    fn drop_open_path(&mut self, path: &Path) {
+        self.sync_editor_to_active();
+        let Some(idx) = self.open.iter().position(|file| file.path == path) else {
+            return;
+        };
+        self.waveforms.remove(path);
+        self.open.remove(idx);
+        self.active = match self.active {
+            // The editor still shows this buffer. Leave no active file so the
+            // next open does not copy that text into a different tab.
+            Some(active) if active == idx => None,
+            Some(active) if active > idx => Some(active - 1),
+            other => other,
+        };
     }
 
     fn refresh_tree(&mut self) {
@@ -1067,9 +1145,11 @@ impl VerilogIde {
             ]),
             TopMenu::Run => menu_dropdown(column![
                 menu_item("Run Simulation (F5)", Message::RunSim),
+                menu_item("Anonymize VCD", Message::AnonymizeVcd),
+                menu_item("Convert VCD to SAIF", Message::VcdToSaif),
             ]),
             TopMenu::Help => {
-                menu_dropdown(column![menu_item("About Verilog IDE", Message::ShowAbout)])
+                menu_dropdown(column![menu_item("About rust hdl ide", Message::ShowAbout)])
             }
         }
     }
@@ -1090,8 +1170,18 @@ impl VerilogIde {
                 menu_label("Help", help_active, Message::MenuToggle(TopMenu::Help)),
                 horizontal_space(),
                 mode_toggle(self.view_mode),
-                run_toolbar_button(self.sim_running),
-                text("Verilog IDE").size(12).color(FG_MUTED),
+                run_toolbar_button(self.sim_running, !self.tool_running),
+                vcd_tool_button(
+                    "Anon VCD",
+                    !self.sim_running && !self.tool_running,
+                    Message::AnonymizeVcd,
+                ),
+                vcd_tool_button(
+                    "To SAIF",
+                    !self.sim_running && !self.tool_running,
+                    Message::VcdToSaif,
+                ),
+                text("rust hdl ide").size(12).color(FG_MUTED),
             ]
             .height(Fill)
             .spacing(2)
@@ -1288,7 +1378,7 @@ impl VerilogIde {
         if self.open.is_empty() {
             return container(
                 column![
-                    text("Verilog IDE").size(32).color(FG_TEXT),
+                    text("rust hdl ide").size(32).color(FG_TEXT),
                     text("Open a folder, then ▶ Run (F5). The full-adder sample is Rust: adder.rs and full_adder_tb.rs.")
                         .size(14)
                         .color(FG_MUTED),
@@ -1301,7 +1391,7 @@ impl VerilogIde {
                     .spacing(12)
                     .align_y(Alignment::Center),
                     Space::new(Length::Shrink, Length::Fixed(24.0)),
-                    text("View → Waveform or Text Editor    File → Open Folder    Run → Run Simulation (F5)")
+                    text("Anon VCD flattens a dump. To SAIF writes switching activity. Run → Run Simulation (F5)")
                         .size(12)
                         .color(FG_MUTED),
                 ]
@@ -1399,6 +1489,34 @@ impl VerilogIde {
             }
         };
 
+        let tools_enabled = !self.sim_running && !self.tool_running;
+        let vcd_only = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("vcd"));
+        let file_label = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("waveform")
+            .to_string();
+        let tool_bar = container(
+            row![
+                vcd_tool_button(
+                    "Anon VCD",
+                    tools_enabled && vcd_only,
+                    Message::AnonymizeVcd,
+                ),
+                vcd_tool_button("To SAIF", tools_enabled, Message::VcdToSaif),
+                horizontal_space(),
+                text(file_label).size(12).color(FG_MUTED),
+            ]
+            .spacing(6)
+            .padding([6, 8])
+            .align_y(Alignment::Center),
+        )
+        .width(Fill)
+        .style(|_| panel_style(BG_TABS));
+
         let body: Element<'_, Message> = match self.waveforms.get(path) {
             Some(WaveStatus::Ready(wave)) => {
                 let height = wave.content_height().max(self.editor_view_h);
@@ -1446,7 +1564,7 @@ impl VerilogIde {
             .into(),
         };
 
-        container(body)
+        container(column![tool_bar, body].spacing(0).height(Fill))
             .width(Fill)
             .height(Fill)
             .style(|_| panel_style(BG_EDITOR))
@@ -1594,8 +1712,9 @@ impl VerilogIde {
             .into()
         } else {
             column![
-                text("About Verilog IDE").size(14),
+                text("About rust hdl ide").size(14),
                 text("Desktop IDE for Verilog and Rust HDL, with testbenches in either language."),
+                text("Anon VCD flattens and renames the open .vcd (vcd-anon). To SAIF writes a .saif switching-activity file (wave2saif)."),
                 text("Run on a Verilog folder uses xezim and writes a .vcd. Run on the Rust full-adder sample compiles the TxHDL unit and the rustdv testbench, writes full_adder.vcd, and opens it."),
                 text("New File: use a .rs name for a TxHDL unit, or *_tb.rs for a rustdv testbench. .v / .sv stay Verilog."),
                 text("View → Waveform opens .vcd files with wellen (Surfer). View → Text Editor shows the dump as text."),
@@ -1751,7 +1870,7 @@ fn mode_chip(label: &'static str, selected: bool, msg: Message) -> Element<'stat
         .into()
 }
 
-fn run_toolbar_button(running: bool) -> Element<'static, Message> {
+fn run_toolbar_button(running: bool, enabled: bool) -> Element<'static, Message> {
     let label = if running { "Running…" } else { "▶ Run" };
     let mut btn = button(text(label).size(13)).padding([4, 14]).style(move |_, status| {
         let hovered = matches!(
@@ -1774,8 +1893,40 @@ fn run_toolbar_button(running: bool) -> Element<'static, Message> {
             ..Default::default()
         }
     });
-    if !running {
+    if !running && enabled {
         btn = btn.on_press(Message::RunSim);
+    }
+    btn.into()
+}
+
+fn vcd_tool_button(label: &'static str, enabled: bool, msg: Message) -> Element<'static, Message> {
+    let mut btn = button(text(label).size(12)).padding([4, 10]).style(move |_, status| {
+        let hovered = matches!(
+            status,
+            iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed
+        );
+        iced::widget::button::Style {
+            background: Some(iced::Background::Color(if !enabled {
+                Color::from_rgb(0.16, 0.22, 0.28)
+            } else if hovered {
+                Color::from_rgb(0.16, 0.48, 0.72)
+            } else {
+                Color::from_rgb(0.12, 0.40, 0.62)
+            })),
+            text_color: if enabled {
+                Color::WHITE
+            } else {
+                FG_MUTED
+            },
+            border: Border {
+                radius: 3.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    });
+    if enabled {
+        btn = btn.on_press(msg);
     }
     btn.into()
 }

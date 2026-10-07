@@ -14,6 +14,10 @@ xezim = { path = "vendor/xezim" }
 # Wellen is the VCD/FST/GHW engine used by Surfer
 # (vendored at vendor/surfer, https://gitlab.com/surfer-project/surfer @ v0.7.0).
 wellen = { version = "0.25", default-features = false }
+# Vendored at vendor/vcd-anon (https://gitlab.com/surfer-project/vcd-anon @ 519eb8b5).
+vcd-anon = { path = "vendor/vcd-anon" }
+# Vendored at vendor/wave2saif (https://gitlab.com/surfer-project/wave2saif @ d89109c7).
+wave2saif = { path = "vendor/wave2saif" }
 iced = { version = "0.13.1", default-features = false, features = [
     "tiny-skia",
     "fira-sans",
@@ -40,6 +44,8 @@ exclude = [
     "vendor/surfer",
     "vendor/txhdl",
     "vendor/rustdv",
+    "vendor/vcd-anon",
+    "vendor/wave2saif",
 ]
 
 [profile.release]

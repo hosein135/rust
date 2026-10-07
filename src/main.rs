@@ -6,6 +6,7 @@ mod project;
 mod sim;
 mod templates;
 mod verilog_highlighter;
+mod wave_tools;
 mod waveform;
 
 fn main() -> iced::Result {

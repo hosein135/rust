@@ -208,6 +208,13 @@ pub fn collect_hdl_sources(root: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// A Value Change Dump (`.vcd`) file.
+pub fn is_vcd_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|s| s.eq_ignore_ascii_case("vcd"))
+}
+
 /// Waveform dumps opened by Surfer/wellen (`.vcd` / `.fst` / `.ghw`).
 pub fn is_wave_path(path: &Path) -> bool {
     matches!(
