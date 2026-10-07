@@ -1,0 +1,17 @@
+{
+  "comment": "Book chapter sim figures: ch19_tinyalubfm on Icarus. Skips without iverilog.",
+  "cmd": [
+    "bash",
+    "sim-common/run_sim.sh",
+    "ch19_tinyalubfm",
+    "tinyalu",
+    "sim-common/hdl/timescale.v",
+    "sim-common/hdl/tinyalu.sv"
+  ],
+  "cwd": "output/examples",
+  "skip_if_missing": "iverilog",
+  "expect_exit": 0,
+  "expect_in_output": [
+    "REGRESSION: PASS"
+  ]
+}

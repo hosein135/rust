@@ -8,6 +8,7 @@ Desktop IDE for **Verilog** HDL and **testbenches**, written in Rust with [iced]
 - Multi-tab code editor with line numbers and syntax highlighting
 - New module / new testbench templates
 - Sample counter + testbench under `samples/`
+- Rust full adder (`samples/full_adder`): TxHDL unit `src/adder.rs` and rustdv testbench `src/full_adder_tb.rs`. File → Open Sample Folder opens it. Run compiles both, writes `full_adder.vcd` (clock, inputs, sum, carry, and the unit's registers), and opens the waveform. New File accepts `.rs` (HDL) and `*_tb.rs` (testbench) as well as Verilog.
 - **Run** button (F5): simulate Verilog + testbench with [xezim](https://github.com/aionhw/xezim) and write a `.vcd` waveform
 - **Waveform / Text Editor** modes: click a `.vcd` to view traces (via [wellen](https://github.com/ekiwi/wellen) from [Surfer](https://gitlab.com/surfer-project/surfer)) or the dump as text
 - Console + problems panel, find, save shortcuts
@@ -83,7 +84,9 @@ src/waveform.rs   Surfer/wellen waveform pane
 vendor/xezim      Vendored [xezim](https://github.com/aionhw/xezim) (no git fetch)
 vendor/xezim-core Vendored xezim-core (xezim path/patch dep)
 vendor/surfer     Vendored [Surfer](https://gitlab.com/surfer-project/surfer) v0.7.0
-samples/          Example counter + testbench
+vendor/txhdl      Vendored [TxHDL](https://github.com/filmil/hdl-txhdl) (Bazel upstream; `lib/Cargo.toml` is the local Cargo entry)
+vendor/rustdv     Vendored [rustdv](https://github.com/rustdv/rustdv)
+samples/          Example counter + testbench, and `full_adder/` (TxHDL + rustdv)
 Cargo.lock        Pinned Rust crate graph
 rust-toolchain.toml  Rust 1.92.0 (rustup)
 devops/flake.nix  Nix dev shell (nixpkgs 25.05)

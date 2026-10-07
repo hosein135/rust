@@ -1,0 +1,11 @@
+[package]
+name = "ch18_basic_testbench_1_0"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/ch18_basic_testbench_1_0.rs"
+
+[dependencies]
+rustdv = { path = "../../../rustdv" }

@@ -1,0 +1,283 @@
+% SPDX-License-Identifier: Apache-2.0
+\section{What the Runtime Is}
+\label{sec:r-overview}
+
+The embedding article~\cite{embedding} argues that a hardware
+description language embedded in Rust needs no parser and no keywords,
+and that what remains is a library. The crate \code{txhdl} is that
+library, and this document is the crate. Every file below is included
+from the tree when the document is built, so a listing here cannot
+differ from the code, and the rule the project keeps is that a concept
+enters the runtime, a compiled example and these documents in the same
+change, or the change is not finished.
+
+The crate is small on purpose. Nine modules and one procedural macro
+crate hold everything:
+
+\begin{itemize}
+\item \code{txhdl::types}: two-valued \code{Bit}, nine-valued
+  \code{Logic}, the numeric vectors \code{U<N>} and \code{I<N>},
+  \code{logic::Vec<N>}, and the two marker traits \code{Transaction}
+  and \code{Tag}.
+\item \code{txhdl::comp}: clocks, wires and channels and their ends,
+  interfaces, crossings, registers and memories, units, configurations,
+  and the executor.
+\item \code{txhdl::pipeline}: operators that take a cycle, all
+  \code{async}.
+\item \code{txhdl::funcs}: operators that cannot, all plain \code{fn}.
+\item \code{txhdl::netlist}: the lowering's target, an expression
+  tree, statements, a \code{Lowered} unit and its two emitters,
+  Verilog and VHDL; and the structural skeleton from the trace walk.
+\item \code{txhdl::foreign}: a Verilog or VHDL module as a unit, run
+  beside the Rust ones.
+\item \code{txhdl::map}: an address map as a trait constant.
+\item \code{txhdl::regmap}: what a map declared with \code{regmap!}
+  stands for at run time.
+\item \code{txhdl::formal}: \code{check!}, \code{assume!} and
+  \code{cover!}.
+\item \code{txhdl\_macros}: the five derives, \code{interface!},
+  \code{with!}, \code{when!}, \code{case!}, \code{station!},
+  \code{regmap!}, \code{\#[pipeline]} and \code{\#[lower]}, without \code{syn} or \code{quote}; and
+  \code{select!}, a \code{macro\_rules!} in the crate root.
+\end{itemize}
+
+The crate is a simulation-shaped prototype: values exist while it
+runs, wires are shared cells, and a testbench may look at anything.
+The lowering to hardware is the experiment the article states, and
+this crate is what it was written against; the experiment has been
+run, Section~\ref{sec:r-lowering}.
+
+\subsection{The model of time}
+\label{sec:r-time}
+
+The executor is the one part of the runtime a reader cannot recover
+from the signatures, so it is stated here before the code.
+
+\textbf{Time runs in ticks.} One poll of the top unit is one tick.
+Every clock is a type with a period and a phase in ticks, and has a
+rising edge at every tick \code{t} with \code{t >= PHASE} and
+\code{(t - PHASE) \% PERIOD == 0}, and a falling edge half a period
+later. The default clock has period 2 and phase 0, so its cycle is two
+ticks and its falling edge is a tick of its own; a single-clock design
+mentions neither number, and its testbench steps by
+\code{Running::cycle}.
+
+\textbf{A process waits, then reads.} The waits are events:
+\code{C::rising()} and \code{C::falling()}, the next edge of a clock;
+\code{rx.wait()}, the next rising edge of the channel's clock at which
+the channel holds a transaction, taken; \code{tx.put(|| v)}, its
+sender's side, the next such edge at which the channel has room, and
+\code{v} sent in the step that edge begins, so a register set after it
+takes its value on the edge the transaction is taken (issue 755); and
+\code{until(C::rising, || cond)},
+or the same with \code{falling}, the next such edge at which a
+condition on state holds. Reads are plain: a register in an
+expression, or \code{Reg::get}, is what the last edge latched, since
+a register is \code{Copy} and has its value's operators; a wire's
+\code{get} returns its driven value, a memory's \code{read} accesses
+its asynchronous read port. Drives are
+deferred: \code{Reg::set} and \code{Mem::write} take effect at the end
+of the step, so a read after a drive in the same iteration still sees
+what the edge latched. A memory refuses an address past its end, a
+read when it is made and a write when it happens, as the netlist does:
+VHDL indexes the array as written and nvc stops on an index out of
+range, and a runtime that wrapped the address agreed with Verilator on
+a word the hardware never had (issue 556).
+
+\textbf{A memory a block RAM cannot hold is refused when it is
+lowered.} A block RAM has two ports, and a read at the address a write
+is at shares the write's port, as a read-modify-write does. A memory
+of more than 4096 bits that is written at two addresses, or reached at
+three, Vivado builds from LUTs, which no test sees and a synthesis an
+hour later shows as lost timing. The lowering counts each memory's
+read and write addresses across the unit's processes and wires, and
+refuses such a memory with a panic that names the unit, the memory and
+the addresses (issue 1285). The remedy is to read it at one address a
+cycle beside the write's, through a multiplexer of the addresses, or
+to mark the field \code{\#[distributed]} when LUT RAM is what is
+meant. A memory of 4096 bits or fewer, a register file or a small
+FIFO, is left alone.
+
+\textbf{A memory can say what Vivado should make it.}
+\code{\#[ram\_style("block")]} on a memory's field, or
+\code{"distributed"}, \code{"registers"} or \code{"ultra"}, puts
+the \code{ram\_style} attribute on the memory in both netlists:
+\code{(* ram\_style = "block" *)} before its declaration in Verilog,
+and the attribute on its signal in VHDL (issue 1371).
+\code{\#[distributed]} says \code{"distributed"}. Vivado chooses a
+memory's kind from its shape, and a memory whose read is registered
+can still come out as LUT RAM, as Razboj's colour bank, 4096 words of
+32 bits, does (issue 1343). The attribute is a request: what a block
+RAM cannot hold Vivado still refuses, and says so in its synthesis
+log as an infeasible \code{ram\_style}, which is where to look. A
+memory that says nothing is left to Vivado, as before.
+
+\textbf{A register can say whether Vivado may use DSP slices.}
+\code{\#[use\_dsp("no")]} on a register's field, or \code{"yes"},
+\code{"logic"} or \code{"simd"}, puts the \code{use\_dsp} attribute
+on it in both netlists (issue 1383). It is what a block RAM's read
+register beside a multiply needs: Vivado pulls up to two registers on
+a path into a multiply's input, and the read's register is one of
+them, which leaves the read asynchronous and the memory LUT RAM, even
+where the multiply ends in LUTs (issue 1343). \code{"no"} on the
+products keeps the read's register where it is, at no cycle's cost.
+
+\textbf{A channel is an elastic buffer of two.} A send is an offer:
+\code{valid} and \code{data} high this step, the transaction in the
+buffer at the end of it; \code{ready} says whether there is room, as
+the edge left it. A receive is a take: \code{ready} high this step,
+the head of the buffer gone at the end of it; \code{peek} is the head
+as the edge left it, and \code{take} is the take of whatever is
+offered, whether one was and the value, for a process that serves
+the channel every cycle. Both commit as a register drive does, so what a
+process sees of a channel does not depend on which process ran first
+in the step, and two units that both run every cycle pass one
+transaction per cycle with \code{valid} and \code{ready} registered
+on both sides and no combinational path between them. That is what a
+lowered unit's channel port sees and drives, which is why a unit with
+channels can be checked as a netlist against its trace. A channel's
+trace is its six wires by side: \code{rx\_data}, \code{rx\_valid} and
+\code{rx\_ready} on the receiver's, \code{tx\_data}, \code{tx\_valid}
+and \code{tx\_ready} on the sender's.
+
+\textbf{An unregistered channel passes an offer in the cycle it is
+made.} \code{chan\_unregistered}, which \code{\#[unregistered]} on a
+\code{let} of \code{chan} in a unit of units makes, is the same
+buffer of two with one bypass (issue 1293). While the buffer is empty,
+the receiver's \code{peek}, \code{head} and \code{recv} see the
+sender's offer of this step, and a take of it takes it this step, so it
+never enters the buffer. An offer the receiver does not take is
+buffered at the edge, as a registered channel's is. \code{ready} stays
+the buffer as the edge left it, so only \code{valid} and \code{data}
+cross in the cycle, and nothing runs from the receiver back to the
+sender. The step polls each process once, so the receiver must run
+after its sender: a receiver that found the channel empty before its
+sender offered in the same step is refused when the sender offers, with
+a panic naming the line that made the channel, rather than see the
+offer a step later than the netlist would. In the netlist the channel
+is the second channel module, \code{<top>\_txhdl\_chan\_u}, whose
+\code{rx\_valid} and \code{rx\_data} are the sender's while the buffer
+is empty. A unit of units whose unregistered channels close a ring of
+wires through its children is refused when it is lowered, naming the
+ring; a child's paths are read from its own lowering, so a child that
+answers from a register breaks a ring.
+
+\textbf{A wire kept as a field is a \code{let} with a name in the
+trace.} \code{Wire<T>} is driven with \code{set} in the step, may be
+read back with \code{get} in the same step, and is set before it is
+read: it keeps the last value set, so a \code{get} before the step's
+\code{set} gives the previous step's value, which the netlist's wire
+would not; a unit's trace shows it under the unit's name as it shows a
+register, and the lowering declares it from the field and drives it
+as the wire the \code{let} would have been, so an internal signal is
+seen in a waveform, and checked in the netlist, with no port for it.
+
+\textbf{Every \code{.await} is a cycle boundary.} A process that has
+crossed an edge at this step cannot cross it again, so a second wait
+written after a first waits for the next edge, as an operator does.
+Waits that share one edge are written inside \code{parallel!}, which
+polls its futures together and returns their outputs as a tuple; that
+is the one case the executor treats specially. Once one wait of the
+group has crossed the edge at this step, the others in the group are
+free, each once, so the group is one wait. State read before a wait,
+at the top of a loop, is read in the previous step and before that
+step's drives commit; state is read after the wait.
+
+\textbf{A process is its waker.} The executor tells processes apart by
+the data pointer of the waker they are polled with. \code{join2} and
+\code{join\_all} give each child a fresh one, so the rule above holds
+per process rather than per unit. \code{parallel!} keeps its futures in
+the one process, which is the difference between the two: \code{join2}
+forks, \code{parallel!} does not.
+
+\textbf{An operator's cycle is in the process's clock.} An operator in
+\code{txhdl::pipeline} waits one edge of whatever clock the process
+last crossed an edge of, which is the only sense a latency has inside
+a process. A process that has crossed no edge yet is in the default
+clock.
+
+\textbf{What the executor does not check.} A process that reads a
+register of another clock other than through \code{ChanCdc} is a
+hazard, and the prototype runs it. The register's type says its clock;
+the process has no type that says one. \code{ChanCdc}, which the
+asynchronous FIFO example runs, commits this hazard on purpose, on its
+memory, under the pointer discipline that makes it safe.
+
+\subsection{What is prototype only}
+
+Two things in the code exist for the simulation and would not be
+lowered. \code{Running} and \code{simulate} drive a design from a
+\code{main}, and \code{now} reports the time step for traces. And the
+shared cells behind every wire, channel and register, with the deferred
+drives that commit at the end of a step, are how a simulation shares
+state; the lowering replaces them with nets and flops.
+
+\subsection{Tracing}
+
+A design can be watched as a waveform. \code{comp::trace} holds a
+registry of probes, each a dotted path, a width and a closure that
+reads the signal; \code{\#[derive(Trace)]} on a unit registers every
+field under its field name, so the hierarchy is the nesting of units
+and nothing is named at construction. Registers, wire ends, channel
+ends and crossings register themselves, plain values register nothing,
+and \code{\#[derive(Value)]} gives a struct or a fieldless enum of the
+design's own its width and bits. \code{Vcd} is the sink: the executor
+calls it at the end of every tick, after the drives have committed,
+and it writes what changed; a clock is written as the level it is,
+high from its rising edge to its falling one. \code{Fst} is the
+same probes with another writer, over the \code{fst-writer} crate,
+the project's first external dependency, pinned by lockfile through
+\code{crate\_universe}. \code{Wave::from\_env} chooses the sink
+by the environment, \code{TXHDL\_FST} or \code{TXHDL\_VCD}, and
+\code{stop} finishes the file. A compound value is one bit vector and
+one signal per field beside it, from \code{Value::parts}; the writer
+has no string variables, so a value keeps its bits.
+The examples document draws the FST through \code{vcdcvt} and
+\code{sqlite2drawtiming}, prebuilt tools pinned by checksum, and
+\code{//tools/dt2tikz}, which turns drawtiming's text into TikZ.
+
+\subsection{Netlists}
+\label{sec:r-lowering}
+
+The probe registry records, for every signal, its kind and the shared
+cell it is on, so the two ends of one wire match. \code{netlist::verilog}
+walks a design through it and writes a Verilog skeleton: a module per
+unit, a \code{reg} per register, ports where a unit holds one end of
+a wire whose other end is elsewhere, and instances with their ports
+connected. It sees fields only, so a unit whose ports are parameters
+of \code{run} yields its registers and nothing else, and it writes no
+behaviour. That is the structural half of the lowering. The
+behavioural half is the rest: \code{\#[pipeline]} lowers an
+\code{async fn} of awaited operators, and \code{\#[lower]} lowers a
+unit's \code{run} loop into a \code{Lowered} unit built from the
+unit's fields, the ports of \code{run} and the statements the macro
+read: registers, memories, wires and channel ports; \code{with!},
+\code{when!}, \code{case!}, \code{if} and \code{select!}; slices,
+concatenation and
+extension; a \code{let} as a wire named for it. The macro builds an
+expression tree, \code{netlist::Expr}, and two emitters render the
+unit, Verilog and VHDL-2008. Both close the loop: the build simulates
+a lowered unit's VHDL under \code{nvc} and its Verilog under
+Verilator, each with a testbench \code{//tools/fst2tb} generates from
+the trace the Rust run wrote, and each test passes only if registers
+and outputs agree at every tick.
+A unit's processes are its loops, one or several under
+\code{join2}, each on the rising or the falling edge of its clock,
+and each a clocked block; memories lower; and a unit with channels
+is checked as any other, since the runtime's channel is a buffer
+with a registered handshake and the netlist's port is what that
+buffer shows. What the macro does not read it refuses by name.
+
+\subsection{Building it}
+
+\begin{lstlisting}[style=ascii,caption={The runtime and everything written against it, built hermetically.},label={lst:r-build}]
+bazel build //lib/...                 # the crate and the macros
+bazel build //lib/examples/...        # every example
+bazel run //lib/examples:ex_fifo      # one that prints a trace
+bazel run @rules_rust//:rustfmt \
+  --@rules_rust//:rustfmt.toml=//:rustfmt.toml -- //lib/...
+\end{lstlisting}
+
+The last line formats the tree at 80 columns, which is the width these
+documents include a file at. A line longer than that overflows its
+frame, visibly, rather than wrapping.

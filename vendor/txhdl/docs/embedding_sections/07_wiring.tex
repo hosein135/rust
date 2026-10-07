@@ -1,0 +1,311 @@
+% SPDX-License-Identifier: Apache-2.0
+\section{Signals, Ports and Interfaces}
+\label{sec:e-wiring}
+
+These three were the muddiest part of the merged specification, and LHDL's
+version of them is where its grammar and its examples disagreed most. The
+embedding settles them, and the settlement is one idea.
+
+\begin{rulebox}[Direction is not a property of a wire]
+The same wire is driven at one end and read at the other. Direction
+belongs to the end, not to the wire, so a unit never holds a wire. It
+holds an end.
+\end{rulebox}
+
+\subsection{A signal has two ends}
+
+Creating a signal yields its ends separately, the way
+\code{std::sync::mpsc} yields a sender and a receiver.
+
+\begin{lstlisting}[caption={A signal is created as a pair. \code{T} is a struct, so a wire may be a bundle without a second concept for the bundled case.},label={lst:split}]
+pub fn signal<T: Copy + Default>() -> (Out<T>, In<T>);
+
+let (tx, rx) = signal::<Beat>();
+\end{lstlisting}
+
+\code{Out<T>} has \code{set} and no \code{get}. \code{In<T>} has \code{get}
+and no \code{set}. A unit given the reading end cannot drive, and the
+compiler says so in the plainest possible terms:
+\code{error[E0599]: no method named `set` found for struct `In`}.
+
+\subsection{Cardinality is the opposite of mpsc, and the types say so}
+
+A channel in software has many senders and one receiver. A wire has one
+driver and many readers. The library inverts the derive accordingly.
+
+\begin{table}[H]
+\caption{Why \code{In} is \code{Clone} and \code{Out} is not.}
+\label{tab:cardinality}
+\centering
+\footnotesize
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & Sender or driver & Receiver or reader \\
+\midrule
+\code{mpsc} & \code{Clone}     & unique \\
+a wire      & unique           & \code{Clone} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+That one line of derive buys the oldest error message in hardware design.
+A second driver on a net would be a second \code{Out}, \code{signal}
+returns exactly one, and \code{Out} is not \code{Clone}, so there is no
+way to make another.
+
+\begin{lstlisting}[caption={Two drivers on one wire. The classic multiple-driver error is a move error.},label={lst:twodrivers}]
+let (tx, _rx) = signal::<u32>();
+let a = Driver { out: tx };
+let b = Driver { out: tx };
+// error[E0382]: use of moved value: `tx`
+\end{lstlisting}
+
+Nothing in the language had to define that rule. Fanout, meanwhile, is
+\code{rx.clone()} and costs nothing, because reading a wire is free.
+
+\subsection{An interface is declared, not written out}
+
+An interface is a named group. Its members are signals and channels, and
+it holds no direction, because its members do not. A \term{role} pairs
+each member with the end this side takes, and a \term{port} is what a unit
+is handed.
+
+Written by hand, that is one struct for the interface and one more per
+role, with every member repeated in each. It is mechanical, and it is also
+where an interface and its roles drift apart. So it is declared.
+
+\begin{lstlisting}[caption={Complete interface declaration and its two roles; all supporting definitions are generated automatically.},label={lst:iface}]
+interface! {
+    Wishbone {
+        adr: Signal<U<32>>,
+        ack: Signal<Bit>,
+        dat: Chan<Beat>,
+    }
+    role Initiator { out adr, in ack, out dat }
+    role Target    { in adr,  out ack, in dat }
+    role Monitor   { in adr,  in ack,  in dat }
+}
+\end{lstlisting}
+
+That expands to the interface, a port struct per role with each member's
+end already the right type, and a constructor yielding one port for each.
+\code{interface!} is a procedural macro, and the reason it is not a
+\code{macro\_rules!} one is the next subsection.
+
+\begin{lstlisting}[caption={Using it. Driving the wrong end is a missing method, not a convention.},label={lst:iface-use}]
+let (m, t, mon) = Wishbone::new();
+
+m.adr.set(U::new(0x1000)); // Initiator drives adr
+t.ack.set(Bit::One);       // Target drives ack
+let a = t.adr.get();       // and reads it at the other end
+let w = mon.adr.get();     // as does the monitor
+\end{lstlisting}
+
+The macro never learns what kind a member is. Every member implements one
+trait, \code{Member}, with \code{Driver} and \code{Reader} associated
+types and a \code{split} that consumes the member and returns both ends.
+A \code{Signal} splits into \code{Out} and \code{In}; a \code{Chan} splits
+into \code{Tx} and \code{Rx}. The macro writes
+\code{<Ty as Member>::Driver} and lets the trait decide, so adding a third
+kind of member changes no macro.
+
+Constructing the interface yields every port at once, which is what keeps
+the guarantee of Section~\ref{sec:e-wiring}. In the constructor a reader
+is cloned, because readers fan out, and a driver is moved. Three roles
+may all read \code{adr}; two may not both drive it.
+
+\subsubsection{Why it is a procedural macro}
+
+It was a \code{macro\_rules!} macro first, and that version compiled
+with three defects that a declaration should not be able to have. It
+spelled the direction \code{inp}, because \code{in} is a keyword and a
+pattern cannot match one as a word. It fixed the number of roles at two.
+And a role that forgot a member compiled, silently, into a port without
+that member.
+
+A procedural macro reads the declaration as data rather than matching it
+as a pattern, and all three go. \code{in} is an identifier to it. Roles
+are a list. And it checks, before emitting anything, that every role
+names every member exactly once and that no member is driven twice:
+
+\begin{lstlisting}[style=ascii,caption={What the declaration cannot be. Both are the macro's own messages; the second would otherwise arrive as a move error naming a temporary.},label={lst:iface-errors}]
+error: role `Target` does not say which end of `dat` it takes
+error: member `adr` is driven by more than one role: A, B
+\end{lstlisting}
+
+The macro is under two hundred lines and uses neither \code{syn} nor
+\code{quote}, because the grammar is four productions. The
+\code{macro\_rules!} version is kept as probe~18, as the record of where
+that route stopped, and Section~\ref{sec:e-walls} gives the other place
+it stops. Both point the same way as Section~\ref{sec:e-elaboration}.
+
+\subsection{The clock is in the type}
+
+Following RHDL~\cite{rhdl}, a signal names the clock domain it is in as a
+second type parameter.
+
+\begin{lstlisting}[caption={A signal knows its clock. \code{Clock} is a trait with a name and, from Section~\ref{sec:e-phase}, a period and a phase; the default is a named clock rather than an absence of one.},label={lst:clock}]
+pub trait Clock: 'static {
+    const NAME: &'static str;
+    const PERIOD: u64 = 2;   // time steps between edges
+    const PHASE: u64 = 0;    // time step of the first edge
+}
+
+pub struct DefaultClock;
+impl Clock for DefaultClock { const NAME: &'static str = "clk"; }
+
+pub struct Out<T, C: Clock = DefaultClock>(..);
+pub struct In<T, C: Clock = DefaultClock>(..);
+pub struct Reg<T, C: Clock = DefaultClock>(..);
+\end{lstlisting}
+
+The default is the decision worth explaining. It is not \code{()}, and
+it is not ``no clock''. It is \emph{the} clock: the one a single-clock
+design has, which is most designs. A single-clock design then never
+mentions a domain, \code{In<u32>} is a complete type, and a two-clock
+design names exactly the second clock. \code{()} would say nothing is
+there, and a register cannot live in nothing.
+
+The default is also a domain like any other. It does not unify with
+\code{Clk400}, so a signal from the default clock handed to a port in
+another is refused, and so is any other pairing:
+
+\begin{lstlisting}[style=ascii,caption={A domain crossing without a crossing. Both are refused, the second showing the default is not a wildcard.},label={lst:clock-err}]
+expected `In<u32, Clk400>`, found `In<u32, Clk100>`
+expected `In<u32, Clk400>`, found `In<u32>`
+\end{lstlisting}
+
+Values cross clock domains through explicit channel bridges such as
+\code{ChanCdc} in \code{//lib/parts}, which accepts transactions on one
+clock and delivers them on the other (issue 1017). Internally,
+\code{ChanCdc} implements an asynchronous dual-clock FIFO: write and
+read pointers are Gray-coded and synchronized across domains via
+two-stage flip-flop synchronizers. Raw wires cannot bridge domains
+directly because signal endpoints must belong to matching clock types,
+preventing unmitigated domain crossings. While the merged specification
+relied on compiler tag analysis to flag clock domain mismatches, the
+embedded runtime enforces this invariant through the Rust type system.
+
+A unit that does not care which clock it is in says so by being generic
+over \code{C: Clock}, which is the Rust way of saying it and costs the
+unit nothing.
+
+\subsubsection{Clocks and tags are different things}
+
+Section~\ref{sec:e-binding} gave a \code{Tag}: a synchronisation domain
+with a policy, handshake and capacity. That is LHDL's idea, and it is
+about how data moves. A \code{Clock} defines the physical switching edge
+that triggers register updates. A single clock domain can host multiple
+synchronisation tags, accommodating elastic pipelines and raw synchronous
+paths concurrently. The system configuration maps tags onto physical
+clocks. Decoupling these concepts avoids forcing every elastic domain to
+instantiate a distinct hardware clock network.
+
+\subsubsection{Two clocks stand in a stated relation}
+\label{sec:e-phase}
+
+A design with two clocks depends on how they stand to each other, and
+on nothing else about them. The frequency in hertz is a physical fact
+and belongs to the configuration, as Section~\ref{sec:e-main} put it
+there. The ratio of the two periods and the offset between their edges
+are what a FIFO between them is built against, and those are stated on
+the clock: a period and a phase, in ticks, a unit common to every
+clock of the design. A clock with period 4 and phase 2 rises at 2, 6,
+10 and falls at 4, 8, 12: the falling edge is half a period after the
+rising one, which is why the default clock has period 2 rather than 1,
+so that its falling edge is a tick of its own. The defaults are 2 and
+0, so a single-clock design mentions neither. This is the same
+statement SDC makes with \code{create\_clock -period -waveform}, and it
+was chosen for that reason: it is the form a constraint file already
+takes.
+
+A register is then in a clock, \code{Reg<T, C>}, with the same default
+as a wire, and a process in that clock waits for \code{C::rising()} or
+\code{C::falling()}. The executor runs time in ticks and each clock has
+its edges at the ticks its period and phase name; the waits built on
+an edge, a channel's \code{wait} on the rising edge and \code{until} on
+whichever edge it is given, are in the channel's or the named clock,
+Section~\ref{sec:e-regread}. An operator's cycle is a cycle of whatever
+clock the process last crossed an edge of, which is the only sense a
+latency has in a process.
+
+One thing the executor does not do is check that a process stays in
+its domain. A process in one clock that reads a register of another
+other than through \code{ChanCdc} is a hazard, and the prototype runs
+it rather than refusing it, because the register's type says which
+clock it is in and the process's type says nothing. That is also the
+hazard \code{ChanCdc} commits on purpose: its memory is written by one
+clock and read by the other, and the pointer discipline is what makes
+that safe. It is why the runtime has a \code{Mem<T, N, C>} as a type
+rather than an array of registers: a memory's read port is a wire, and
+the discipline is the designer's. \code{ex\_fifo.rs} in the examples
+document~\cite{examples} runs it between a producer clock of period 4
+and a consumer clock of period 6 and phase 2; its trace shows the
+producer with nothing to push at the edge the FIFO is full, which is
+the backpressure crossing the domains the other way.
+
+\subsection{Where the ends go}
+
+A unit does not store a reference to the interface. It is handed its port
+when \code{run} is called, which is what the inputs and outputs of
+\code{Unit} are for, and what makes wiring a call rather than a graph of
+back-references.
+
+\begin{lstlisting}[caption={The parent creates the interface and hands each child the end it takes.},label={lst:wire-up}]
+impl Unit<(), ()> for Top {
+    async fn run(&mut self, _i: (), _o: ()) {
+        let (m, t) = Wishbone::new();
+        join2(
+            self.cpu.run(m, ()),
+            self.ram.run(t, ()),
+        ).await;
+    }
+}
+\end{lstlisting}
+
+\subsubsection{An unregistered channel is a hop that costs no cycle}
+
+A channel between two units is registered on both sides, so a
+transaction takes a cycle to cross it, and a request that crosses ten
+of them on its way to a memory and back waits ten cycles for the
+crossings alone. Marking a channel \code{\#[unregistered]} where a
+unit of units makes it takes the register off its forward side: while
+the channel is empty, the receiver sees the sender's \code{valid} and
+\code{data} in the cycle they are offered, and \code{ready} stays a
+register (issue 1293). Listing~\ref{lst:wire-unreg} is the chain of
+\code{ex\_unreg}, whose two inner channels are unregistered; the same
+chain registered answers two cycles later.
+
+\lstinputlisting[rangebeginprefix=//\ begin\{,rangebeginsuffix=\},%
+rangeendprefix=//\ end\{,rangeendsuffix=\},includerangemarker=false,%
+linerange=chains-chains,caption={Two channels a unit
+of units makes, marked unregistered, each sender joined before its
+receiver: from \code{lib/examples/ex\_unreg.rs}.},label={lst:wire-unreg}]{lib/examples/ex_unreg.rs}
+
+An unregistered hop is not free in time. The receiver's logic now
+follows the sender's in one cycle, so every one lengthens a path, and
+it is for hops whose two ends are short: a stage that only forwards,
+or one that answers from a register. Two rules keep the run and the
+netlist in step. The receiver has to run after its sender in the join,
+since the run polls each unit once a step, and a run that joins them
+the other way stops naming the channel. A ring of wires through the
+children closed by an unregistered channel has no such order, and it
+is refused when the unit is lowered, naming the ring.
+
+\begin{table*}[t]
+\caption{The four concepts, and what each one is responsible for. Reading
+down the table is the life of a wire.}
+\label{tab:wiring}
+\centering
+\footnotesize
+\begin{tabular}{@{}llll@{}}
+\toprule
+Concept & Is & Knows about direction & Held by \\
+\midrule
+\code{Signal<T>}, \code{Chan<T>} & one wire, or one handshaked channel & no & nobody \\
+\code{Out<T>} / \code{In<T>}, \code{Tx<T>} / \code{Rx<T>} & one end of one member & yes, by which methods exist & a unit \\
+interface & a named group of members & no & the unit containing both ends \\
+role and port & a group of ends, one per member & yes, by construction & passed to \code{run} \\
+\bottomrule
+\end{tabular}
+\end{table*}

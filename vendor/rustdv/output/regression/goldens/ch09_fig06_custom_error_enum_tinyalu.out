@@ -1,0 +1,3 @@
+1 decodes to Add
+4 decodes to Mul
+decode failed: invalid ALU op code: 0x07

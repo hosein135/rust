@@ -1,0 +1,2 @@
+2 commands logged
+first: AluCommand { a: 5, b: 3, op: Add }

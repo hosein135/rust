@@ -1,0 +1,8 @@
+error[E0382]: borrow of moved value: `test_name`
+ --> src/main.rs:8:20
+  |
+4 |     let banner = move || format!("*** {test_name} ***");
+  |                  ------- value moved into closure here
+...
+8 |     println!("{}", test_name);
+  |                    ^^^^^^^^^ value borrowed here after move

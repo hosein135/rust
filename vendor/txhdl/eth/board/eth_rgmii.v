@@ -1,0 +1,173 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// RGMII to GMII, for a gigabit PHY such as the JL2121 on the Alinx
+// AX7A200B, on a Xilinx 7-series part.
+//
+// RGMII sends a GMII byte as two nibbles a cycle: the low nibble while
+// the clock is high and the high nibble while it is low, with the valid
+// line on the rising edge and valid xor error on the falling one. The
+// FPGA's primitives do the two edges: an ODDR per line out and an IDDR
+// per line in.
+//
+// Transmit: the byte and `tx_en` are taken on `clk125`, and the PHY's
+// transmit clock is the same clock through the same kind of register,
+// so the clock's edges leave the FPGA aligned with the data's. RGMII
+// asks one side or the other to delay the clock into the middle of the
+// data, and on this board the PHY does it. This wrapper used to supply
+// a quarter cycle of its own as well, and the two delays together put
+// the PHY's sampling edge where the data changes: the board received
+// every frame and the host got most of them back with a bad check
+// sequence, about one bit in ten thousand wrong. The vendor's own design
+// for this board sends the clock edge-aligned, and pings through it
+// without loss. See issue #231.
+//
+// Receive: `rx_clk`, the PHY's receive clock shifted as below, clocks
+// the IDDRs and the receiving half of the MAC. The receive clock goes
+// through an MMCM, which removes the delay of the global buffer behind
+// it, and is shifted by `RX_CLOCK_PHASE`; the shift that centres the
+// sampling edge depends on the PHY and the routing, and is 78.75 degrees
+// on the flagship, where flagship/board/flagship_io.xdc times it.
+//
+// What the PHY does with its receive clock is known in part (#864).
+//
+// * Measured. Clocked through a plain global buffer, about 3.4 ns late,
+//   the MAC accepted no frame (#231). Through the MMCM, shifts of 45 to
+//   112.5 degrees received and 180 did not, and on October 3, 2026 the
+//   flagship received at 78.75. Timed at the pins, those points fit a
+//   PHY that sends its receive clock centred in the data, delayed about
+//   2 ns, and not one that sends it on the data's edge; the run that
+//   received nothing does not tell the two apart, since a buffer 3.4 ns
+//   late samples where a centred source changes as well.
+// * The chip. It answers MDIO at address 0 with the identifier
+//   `937c 4032`, which JLSemi's Linux driver names `JL2XXX_PHY_ID`, its
+//   gigabit family; its OUI field holds the low 22 bits of JLSemi's
+//   OUI, 64-DF-10, as a plain number rather than in 802.3's bit order.
+// * Its register. That driver puts the receive delay at bit 9, 2 ns, of
+//   register 17 on page 3336, and leaves it as the chip powers up.
+//   Nothing here reads it, since reading a page means writing the page
+//   register, which is left for the user to allow.
+// * Not known without the JL2121's data sheet: that bit's value at power
+//   on, on this board, and so whether the centring is the PHY's own
+//   delay or something on the board. A 2 ns difference in the traces
+//   would be some thirty centimetres, so the PHY is the likely one.
+//
+// The shift is on the clock and not on the five data lines on
+// purpose, and why is at the MMCM below. `RX_CLOCK_PHASE` is a parameter
+// so that the shift can be moved without reading this file.
+//
+// Only gigabit works. At 100 or 10 Mbit a PHY sends one nibble per
+// clock cycle and the MAC would have to take bytes over two cycles,
+// which neither half of the MAC does.
+`timescale 1ps / 1ps
+module eth_rgmii #(
+  // How far the receive clock is shifted, in degrees of its own cycle.
+  // 90, 2 ns, is the point the sweep under #231 settled on, and the
+  // echo keeps it; the flagship sets 78.75, which its timing centres.
+  parameter real RX_CLOCK_PHASE = 90.0
+) (
+  // The transmit side, GMII, on clk125.
+  input clk125,
+  input [7:0] txd,
+  input tx_en,
+  // The receive side, GMII, on rx_clk.
+  output rx_clk,
+  output [7:0] rxd,
+  output rx_dv,
+  output rx_er,
+  // The PHY.
+  output eth_txck,
+  output eth_txctl,
+  output [3:0] eth_txd,
+  input eth_rxck,
+  input eth_rxctl,
+  input [3:0] eth_rxd
+);
+  // The byte and `tx_en` are registered here first, so the path into the
+  // output registers starts at a flip-flop rather than at the MAC's
+  // byte select. Without it the whole of that select, and the route from
+  // wherever the MAC is placed to the pins, had one cycle, and the
+  // flagship's slack on clk125 fell from +0.905 to +0.155 ns when other
+  // logic moved the MAC's cells (issue 1263). The stream leaves a cycle
+  // later, both lines alike, which Ethernet does not notice.
+  reg [7:0] txd_q = 8'h00;
+  reg tx_en_q = 1'b0;
+  always @(posedge clk125) begin
+    txd_q <= txd;
+    tx_en_q <= tx_en;
+  end
+
+  // Transmit: low nibble on the rising edge, high nibble on the falling.
+  genvar i;
+  generate
+    for (i = 0; i < 4; i = i + 1) begin : txd_oddr
+      ODDR #(.DDR_CLK_EDGE("SAME_EDGE"), .INIT(1'b0), .SRTYPE("SYNC")) o (
+        .Q(eth_txd[i]), .C(clk125), .CE(1'b1),
+        .D1(txd_q[i]), .D2(txd_q[i + 4]), .R(1'b0), .S(1'b0)
+      );
+    end
+  endgenerate
+  // The control line: tx_en on both edges, since the MAC sends no errors.
+  ODDR #(.DDR_CLK_EDGE("SAME_EDGE"), .INIT(1'b0), .SRTYPE("SYNC")) txctl_oddr (
+    .Q(eth_txctl), .C(clk125), .CE(1'b1),
+    .D1(tx_en_q), .D2(tx_en_q), .R(1'b0), .S(1'b0)
+  );
+  // The transmit clock: high then low, on the same clock as the data,
+  // so the two leave the pins aligned and the PHY adds the delay.
+  ODDR #(.DDR_CLK_EDGE("SAME_EDGE"), .INIT(1'b0), .SRTYPE("SYNC")) txck_oddr (
+    .Q(eth_txck), .C(clk125), .CE(1'b1),
+    .D1(1'b1), .D2(1'b0), .R(1'b0), .S(1'b0)
+  );
+
+  // Receive: the PHY's clock through an MMCM that shifts it by
+  // `RX_CLOCK_PHASE`, and then onto the global clock network. The shift
+  // puts the sampling edge in the middle of the data rather than where
+  // it changes.
+  //
+  // The shift is made once, on the clock, rather than by delaying the
+  // five data lines with an `IDELAYE2` each. Both were measured on the
+  // board under #231: five delays of 20 to 31 taps let between a quarter
+  // and a third of the frames through, because each delay element brings
+  // its own error and the bits drift apart; a delay on the clock alone,
+  // in the other direction, let none through.
+  wire rxck_ibuf, rxck_shifted, rxck_fb, rxck_fb_buf, rx_locked;
+  IBUF rxck_in (.I(eth_rxck), .O(rxck_ibuf));
+  MMCME2_BASE #(
+    .CLKIN1_PERIOD(8.0),
+    .CLKFBOUT_MULT_F(8.0),
+    .DIVCLK_DIVIDE(1),
+    .CLKOUT0_DIVIDE_F(8.0),
+    .CLKOUT0_PHASE(RX_CLOCK_PHASE)
+  ) rxmmcm (
+    .CLKIN1(rxck_ibuf),
+    .CLKFBIN(rxck_fb_buf),
+    .CLKFBOUT(rxck_fb),
+    .CLKOUT0(rxck_shifted),
+    .LOCKED(rx_locked),
+    .RST(1'b0),
+    .PWRDWN(1'b0)
+  );
+  BUFG rxck_fb_bufg (.I(rxck_fb), .O(rxck_fb_buf));
+  BUFG rxck_bufg (.I(rxck_shifted), .O(rx_clk));
+
+  // Both nibbles and both halves of the control line, presented
+  // together on the rising edge.
+  wire [3:0] rx_lo, rx_hi;
+  wire ctl_rise, ctl_fall;
+  generate
+    for (i = 0; i < 4; i = i + 1) begin : rxd_iddr
+      IDDR #(.DDR_CLK_EDGE("SAME_EDGE_PIPELINED"), .INIT_Q1(1'b0),
+             .INIT_Q2(1'b0), .SRTYPE("SYNC")) d (
+        .Q1(rx_lo[i]), .Q2(rx_hi[i]), .C(rx_clk), .CE(1'b1),
+        .D(eth_rxd[i]), .R(1'b0), .S(1'b0)
+      );
+    end
+  endgenerate
+  IDDR #(.DDR_CLK_EDGE("SAME_EDGE_PIPELINED"), .INIT_Q1(1'b0),
+         .INIT_Q2(1'b0), .SRTYPE("SYNC")) rxctl_iddr (
+    .Q1(ctl_rise), .Q2(ctl_fall), .C(rx_clk), .CE(1'b1),
+    .D(eth_rxctl), .R(1'b0), .S(1'b0)
+  );
+  assign rxd = {rx_hi, rx_lo};
+  assign rx_dv = ctl_rise;
+  assign rx_er = ctl_rise ^ ctl_fall;
+endmodule

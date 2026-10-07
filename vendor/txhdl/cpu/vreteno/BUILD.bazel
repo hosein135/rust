@@ -1,0 +1,919 @@
+# SPDX-License-Identifier: Apache-2.0
+# Vreteno: an RV32IMAC core in TxHDL. The library holds the core, the
+# ISA, the reference model and the programs; the binary runs the
+# demonstration and writes its waveform; the test runs the core
+# against the model in lockstep.
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//tools:opt_test.bzl", "opt_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# The hand-written tops, for //tools/topcheck (issue 508).
+exports_files([
+    "board/vreteno_board.v",
+    "board/vreteno_board_ila.v",
+    "board/vreteno_board_jtag.v",
+])
+
+rust_library(
+    name = "vreteno32",
+    srcs = [
+        "src/board.rs",
+        "src/core.rs",
+        "src/debug.rs",
+        "src/dmem.rs",
+        "src/hart.rs",
+        "src/rom.rs",
+        "src/isa.rs",
+        "src/lib.rs",
+        "src/machine/clint.rs",
+        "src/machine/memory.rs",
+        "src/machine/eth.rs",
+        "src/machine/fbpeer.rs",
+        "src/machine/trng.rs",
+        "src/machine/mod.rs",
+        "src/machine/plic.rs",
+        "src/machine/uart.rs",
+        "src/model.rs",
+        "src/pair.rs",
+        "src/program.rs",
+        "src/run.rs",
+        "src/term.rs",
+        "src/timer.rs",
+        "src/uart.rs",
+    ],
+    crate_name = "vreteno32",
+    edition = "2021",
+    deps = [
+        "//ddr3",
+        "//gpu/razboj",
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+        "@crates//:smoltcp",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The same library optimised, for the fast machine alone (issue 1132):
+# the model at opt-level 3 runs some nine times faster than at the
+# build's default of 0, and only //cpu/vreteno:machine pays the longer
+# compile.
+rust_library(
+    name = "vreteno32_opt",
+    srcs = [
+        "src/board.rs",
+        "src/core.rs",
+        "src/debug.rs",
+        "src/dmem.rs",
+        "src/hart.rs",
+        "src/rom.rs",
+        "src/isa.rs",
+        "src/lib.rs",
+        "src/machine/clint.rs",
+        "src/machine/memory.rs",
+        "src/machine/eth.rs",
+        "src/machine/fbpeer.rs",
+        "src/machine/trng.rs",
+        "src/machine/mod.rs",
+        "src/machine/plic.rs",
+        "src/machine/uart.rs",
+        "src/model.rs",
+        "src/pair.rs",
+        "src/program.rs",
+        "src/run.rs",
+        "src/term.rs",
+        "src/timer.rs",
+        "src/uart.rs",
+    ],
+    crate_name = "vreteno32",
+    edition = "2021",
+    rustc_flags = ["-Copt-level=3"],
+    deps = [
+        "//ddr3",
+        "//gpu/razboj",
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+        "@crates//:smoltcp",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The board's design as one lowered unit, on the programs compiled for
+# the core, and its netlist with the DDR3 controller in it.
+rust_test(
+    name = "zephyr_port_test",
+    srcs = ["tests/zephyr_dts.rs"],
+    compile_data = [
+        "//zephyr:port_sources",
+    ],
+    edition = "2021",
+    # The peripherals' maps, which the drivers' are held to (issues 678
+    # and 680).
+    deps = [
+        ":vreteno32",
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+)
+
+# The board programs against the map they run on. They are built
+# `#[cfg(board_run)]`, so no other target compiles their constants,
+# and a wrong address shows only when it runs, as a bus error trap
+# (issues 415 and 417).
+rust_test(
+    name = "board_programs_test",
+    srcs = ["tests/board_programs.rs"],
+    compile_data = [
+        "//cpu/vreteno/rust:addressed_sources",
+        "//cpu/vreteno/rust/hal:lib.rs",
+    ],
+    edition = "2021",
+    deps = [
+        ":vreteno32",
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+)
+
+# The whole board, several programs and a card identified at 400 kHz,
+# run built optimised with its checks on (issue 1250): at the build's
+# default of opt-level 0 it took 670 to 1100 s, and some 35 s so.
+opt_test(
+    name = "board_test",
+    size = "medium",
+    test = ":board_test_rust",
+)
+
+# The test itself, which `board_test` above builds optimised and runs.
+# Manual, so that it is not run a second time as it is.
+rust_test(
+    name = "board_test_rust",
+    srcs = [
+        "tests/board.rs",
+        "//cpu/vreteno/rust:ico_list.rs",
+    ],
+    crate_root = "tests/board.rs",
+    edition = "2021",
+    tags = ["manual"],
+    deps = [
+        ":vreteno32",
+        "//ddr3",
+        "//gpu/razboj",
+        "//cpu/vreteno/rust:boot_program",
+        "//cpu/vreteno/rust:ddr3_program",
+        "//cpu/vreteno/rust:ethrx_program",
+        "//cpu/vreteno/rust:ethtx_program",
+        "//cpu/vreteno/rust:faultsay_program",
+        "//cpu/vreteno/rust:flashid_program",
+        "//cpu/vreteno/rust:phydelay_program",
+        "//cpu/vreteno/rust:phyregs_program",
+        "//cpu/vreteno/rust:sdprobe_program",
+        "//cpu/vreteno/rust:hello_program",
+        "//cpu/vreteno/rust:irq_program",
+        "//cpu/vreteno/rust:ddr3bw_program",
+        "//cpu/vreteno/rust:cpi_program",
+        "//cpu/vreteno/rust:eglboard_program",
+        "//cpu/vreteno/rust:ddr3ram_program",
+        "//cpu/vreteno/rust:steps_program",
+        "//cpu/vreteno/rust:trng_program",
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+)
+
+# A stock OpenOCD on the simulated board, through the RISC-V debug
+# transport behind BSCANE2 and OpenOCD's own BSCAN tunnel (issue 154):
+# examine, halt, pc, memory by system bus access, resume.
+rust_test(
+    name = "openocd_test",
+    size = "large",
+    srcs = ["tests/openocd.rs"],
+    data = [
+        "//cpu/vreteno/rust:gdbprobe_elf",
+        "//third_party/gdb",
+        "//third_party/openocd",
+    ],
+    edition = "2021",
+    env = {
+        "GDB": "$(rootpath //third_party/gdb)",
+        "GDBPROBE": "$(rootpath //cpu/vreteno/rust:gdbprobe_elf)",
+        "OPENOCD": "$(rootpath //third_party/openocd)",
+    },
+    deps = [
+        ":vreteno32",
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+        "//tools/openocd:remote_bitbang",
+    ],
+)
+
+# The board's netlist with the DDR3 test in its memories, for a
+# simulation (`sim`) or for the board (`board`):
+#   bazel run //cpu/vreteno:board_netlist -- sim
+rust_binary(
+    name = "board_netlist",
+    srcs = ["src/bin/board_netlist.rs"],
+    edition = "2021",
+    deps = [
+        ":vreteno32",
+        "//cpu/vreteno/rust:boot_program",
+        "//cpu/vreteno/rust:ddr3_board_program",
+        "//cpu/vreteno/rust:ddr3_program",
+        "//cpu/vreteno/rust:fade_program",
+        "//lib:txhdl",
+    ],
+)
+
+genrule(
+    name = "board_sim_v",
+    outs = ["board_sim.v"],
+    cmd = "$(location :board_netlist) sim > $@",
+    tools = [":board_netlist"],
+)
+
+genrule(
+    name = "board_v",
+    outs = ["board.v"],
+    cmd = "$(location :board_netlist) board > $@",
+    tools = [":board_netlist"],
+)
+
+# The same board with the fading program in it, for the LED
+# demonstration of the pulse width modulator.
+genrule(
+    name = "board_fade_v",
+    outs = ["board_fade.v"],
+    cmd = "$(location :board_netlist) fade > $@",
+    tools = [":board_netlist"],
+)
+
+# The board with the loader in its boot memory, which is the bitstream
+# that ends the resynthesis loop: what the core runs arrives on the
+# serial port and lives in the memory. See issue #135.
+genrule(
+    name = "board_boot_v",
+    outs = ["board_boot.v"],
+    cmd = "$(location :board_netlist) boot > $@",
+    tools = [":board_netlist"],
+)
+
+# The board as a fast machine, for software too large for the
+# cycle-level runs (issue 1016):
+#   bazel run //cpu/vreteno:machine -- --image $PWD/fw_jump.bin --dtb ...
+rust_binary(
+    name = "machine",
+    srcs = ["src/bin/machine.rs"],
+    edition = "2021",
+    rustc_flags = ["-Copt-level=3"],
+    deps = [":vreteno32_opt"],
+)
+
+# The library's unit tests: the encoders against the decoder, and the
+# core's, the model's, the timer's and the debug module's own.
+rust_test(
+    name = "isa_test",
+    crate = ":vreteno32",
+    edition = "2021",
+)
+
+# Every compressed halfword, disassembled by the GNU tools the build
+# fetches, for the test below to read.
+genrule(
+    name = "compressed_listing",
+    outs = ["compressed.txt"],
+    cmd = """
+        t=$$(mktemp -d)
+        {
+            echo '.option rvc'
+            echo '.text'
+            i=0
+            while [ $$i -lt 65536 ]; do
+                if [ $$((i & 3)) -ne 3 ]; then
+                    printf '.insn 0x%04x\\n' $$i
+                fi
+                i=$$((i + 1))
+            done
+        } > $$t/all.S
+        $(location @riscv_none_elf_gcc//:as) -march=rv32imc -o $$t/all.o $$t/all.S
+        $(location @riscv_none_elf_gcc//:objdump) -d -M no-aliases,numeric $$t/all.o > $@
+        rm -rf $$t
+    """,
+    tools = [
+        "@riscv_none_elf_gcc//:as",
+        "@riscv_none_elf_gcc//:objdump",
+    ],
+)
+
+# Fastboot's copy-and-jump (issue 143), assembled from the file the
+# Zephyr image builds, as the bytes of the routine alone.
+genrule(
+    name = "fastboot_jump_bin",
+    srcs = ["//zephyr:fastboot/app/src/jump.S"],
+    outs = ["fastboot_jump.bin"],
+    cmd = """
+        t=$$(mktemp -d)
+        $(location @riscv_none_elf_gcc//:as) -march=rv32imc -o $$t/j.o $<
+        $(location @riscv_none_elf_gcc//:objcopy) -O binary -j .text.fb_jump $$t/j.o $@
+        rm -rf $$t
+    """,
+    tools = [
+        "@riscv_none_elf_gcc//:as",
+        "@riscv_none_elf_gcc//:objcopy",
+    ],
+)
+
+# That routine run on the model, from places it was not assembled for.
+rust_test(
+    name = "fastboot_jump_test",
+    srcs = ["tests/fastboot_jump.rs"],
+    data = [":fastboot_jump_bin"],
+    edition = "2021",
+    env = {"FB_JUMP": "$(rootpath :fastboot_jump_bin)"},
+    deps = [":vreteno32"],
+)
+
+# The decoder of compressed instructions against that listing.
+rust_test(
+    name = "compressed_test",
+    srcs = ["tests/compressed.rs"],
+    data = [":compressed_listing"],
+    edition = "2021",
+    env = {"COMPRESSED_LISTING": "$(rootpath :compressed_listing)"},
+    deps = [":vreteno32"],
+)
+
+# Run the demonstration:  bazel run //cpu/vreteno
+rust_binary(
+    name = "vreteno",
+    srcs = ["src/main.rs"],
+    edition = "2021",
+    deps = [
+        ":vreteno32",
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+)
+
+# The same machine running the A extension's program instead of the
+# demonstration, so that the netlist is co-simulated against atomics
+# too (issue 1010).
+rust_binary(
+    name = "vreteno_amo",
+    srcs = ["src/main.rs"],
+    edition = "2021",
+    rustc_env = {"VRETENO_PROGRAM": "atomics"},
+    deps = [
+        ":vreteno32",
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+)
+
+# Rust compiled for the core, run on it: the hello world of issue 79.
+#   bazel run //cpu/vreteno:hello
+rust_binary(
+    name = "hello",
+    srcs = ["src/bin/hello.rs"],
+    edition = "2021",
+    deps = [
+        ":vreteno32",
+        "//cpu/vreteno/rust:hello_program",
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+)
+
+# The same run as a test, so the toolchain and the core are checked
+# together by `bazel test //...` and not only by hand.
+rust_test(
+    name = "hello_test",
+    crate = ":hello",
+    edition = "2021",
+)
+
+# The trap dispatcher at work, on the same machine: three environment
+# calls and a timer interrupt through `vreteno_hal::trap`.
+#   bazel run //cpu/vreteno:traps
+rust_binary(
+    name = "traps",
+    srcs = ["src/bin/traps.rs"],
+    edition = "2021",
+    deps = [
+        ":vreteno32",
+        "//cpu/vreteno/rust:traps_program",
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+)
+
+rust_test(
+    name = "traps_test",
+    crate = ":traps",
+    edition = "2021",
+)
+
+# The same, in C++: the other toolchain, the same core.
+#   bazel run //cpu/vreteno:hello_cc
+rust_binary(
+    name = "hello_cc",
+    srcs = ["src/bin/hello_cc.rs"],
+    edition = "2021",
+    deps = [
+        ":vreteno32",
+        "//cpu/vreteno/cpp:hello_cc_program",
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+)
+
+rust_test(
+    name = "hello_cc_test",
+    crate = ":hello_cc",
+    edition = "2021",
+)
+
+# The core against the model, every cycle.
+rust_test(
+    name = "lockstep_test",
+    srcs = ["tests/lockstep.rs"],
+    edition = "2021",
+    # The random programs under paging run every fetch over the bus,
+    # and take two minutes alone, past the default five beside the
+    # board's simulations (issue 1014).
+    timeout = "long",
+    deps = [
+        ":vreteno32",
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+)
+
+# Two cores on one bus, with everything they say compared:
+#   bazel test //cpu/vreteno:pair_test
+# The two machine counters, against the core alone: a model that steps
+# on a retirement cannot say how many cycles went by.
+#   bazel test //cpu/vreteno:counters_test
+rust_test(
+    name = "counters_test",
+    srcs = ["tests/counters.rs"],
+    edition = "2021",
+    deps = [
+        ":vreteno32",
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+)
+
+rust_test(
+    name = "pair_test",
+    srcs = ["tests/pair.rs"],
+    edition = "2021",
+    deps = [
+        ":vreteno32",
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+)
+
+filegroup(
+    name = "sources",
+    srcs = glob([
+        "src/*.rs",
+        "src/bin/*.rs",
+        "tests/*.rs",
+        "board/*.v",
+        "board/jtag/*.tcl",
+        # The program compiled for the core and its linker script are
+        # a package of their own, so they come by label rather than by
+        # a glob, which cannot cross a package boundary.
+    ]) + [
+        "//cpu/vreteno/rust:sources",
+        "//cpu/vreteno/cpp:sources",
+    ],
+)
+
+# Synthesis of the core's Verilog, as the document build wrote it, on an
+# Artix-7 part, with the hermetic Vivado. Manual: a cold run installs
+# Vivado first, about 300 GB of transient disk and an hour or two.
+#
+#   bazel build //cpu/vreteno:vreteno_synth
+load(
+    "@rules_vivado//build/vivado:rules.bzl",
+    "vivado_ila",
+    "vivado_ip",
+    "vivado_program_device",
+    "vivado_program_flash",
+    "vivado_project",
+    "vivado_read_ila",
+    "vivado_repl",
+    "vivado_synthesis",
+)
+load("//tools/vivado:defs.bzl", "vivado_place_and_route2", "vivado_synthesis2")
+
+vivado_project(
+    name = "vreteno_project",
+    srcs = ["//docs:vreteno.v"],
+    part = "xc7a200tfbg484-2",
+    top_level = "vreteno",
+    xdcs = ["vreteno.xdc"],
+    tags = ["manual"],
+)
+
+vivado_synthesis(
+    name = "vreteno_synth",
+    project = ":vreteno_project",
+    tags = ["manual"],
+)
+
+# Implementation: synthesis again through the newer rule, which writes
+# its timing summary, then place and route with the timing summary,
+# the utilization and the DRC report of the routed design. The core is
+# synthesised out of context, so its ports are the partition's pins and
+# not pads: with the debug port it has more ports than the package has
+# pins, and placement failed on them (issue 971). The constraints name
+# the clock and no pins, so the bitstream is a stub; the reports are the
+# point.
+#
+#   bazel build //cpu/vreteno:vreteno_pnr
+filegroup(
+    name = "vreteno_xdc",
+    srcs = ["vreteno.xdc"],
+)
+
+vivado_synthesis2(
+    name = "vreteno_synth2",
+    srcs = ["//docs:vreteno.v"],
+    part = "xc7a200tfbg484-2",
+    synth_design_options = "-mode out_of_context",
+    top = "vreteno",
+    xdcs = [":vreteno_xdc"],
+    tags = ["manual"],
+)
+
+vivado_place_and_route2(
+    name = "vreteno_pnr",
+    synthesis = ":vreteno_synth2",
+    # No pins, so the bitstream is the stub the comment above names:
+    # under rules_vivado 3.16 a failed write_bitstream fails the build
+    # unless the target opts in (issue 967).
+    placeholder_bitstream = True,
+    xdcs = [":vreteno_xdc"],
+    # vivado_ci: the nightly Vivado job builds it (#1030).
+    tags = [
+        "manual",
+        "vivado_ci",
+    ],
+)
+
+# The board on the Alinx AX7A200B: the lowered design with the DDR3 test
+# in its memories, AMD's MIG controller, which makes the design's clock,
+# and the hand-written top with the resets and the pins. The
+# constraints name the board's pins, the memory's among them, so this
+# bitstream is real. Manual, as every Vivado target is.
+#
+#   bazel build //cpu/vreteno:vreteno_board_pnr
+filegroup(
+    name = "ax7a200_xdc",
+    srcs = [
+        "board/ax7a200.xdc",
+        "board/ax7a200_ddr3.xdc",
+        "board/ax7a200_io.xdc",
+        "//lib/parts:hdl_xdc",
+        "//lib/board:bscan_user4.xdc",
+    ],
+)
+
+vivado_synthesis2(
+    name = "vreteno_board_synth",
+    srcs = [
+        ":board_v",
+        "board/vreteno_board.v",
+        "//lib/board:bscan_user4",
+        "//ddr3:hdl",
+        "//lib/parts:hdl",
+    ],
+    part = "xc7a200tfbg484-2",
+    top = "vreteno_board",
+    xdcs = [":ax7a200_xdc"],
+    deps = ["//ddr3:ddr3_mig_axi"],
+    tags = ["manual"],
+)
+
+vivado_place_and_route2(
+    name = "vreteno_board_pnr",
+    synthesis = ":vreteno_board_synth",
+    xdcs = [":ax7a200_xdc"],
+    tags = ["manual"],
+)
+
+# The same board with the fading program in it: the demonstration of
+# the pulse width modulator on a real LED. See issue #248.
+vivado_synthesis2(
+    name = "vreteno_board_fade_synth",
+    srcs = [
+        ":board_fade_v",
+        "board/vreteno_board.v",
+        "//lib/board:bscan_user4",
+        "//ddr3:hdl",
+        "//lib/parts:hdl",
+    ],
+    part = "xc7a200tfbg484-2",
+    top = "vreteno_board",
+    xdcs = [":ax7a200_xdc"],
+    deps = ["//ddr3:ddr3_mig_axi"],
+    tags = ["manual"],
+)
+
+# The same board with the loader in it.
+vivado_synthesis2(
+    name = "vreteno_board_boot_synth",
+    srcs = [
+        ":board_boot_v",
+        "board/vreteno_board.v",
+        "//lib/board:bscan_user4",
+        "//ddr3:hdl",
+        "//lib/parts:hdl",
+    ],
+    part = "xc7a200tfbg484-2",
+    top = "vreteno_board",
+    xdcs = [":ax7a200_xdc"],
+    deps = ["//ddr3:ddr3_mig_axi"],
+    tags = ["manual"],
+)
+
+vivado_place_and_route2(
+    name = "vreteno_board_fade_pnr",
+    synthesis = ":vreteno_board_fade_synth",
+    xdcs = [":ax7a200_xdc"],
+    tags = ["manual"],
+)
+
+vivado_place_and_route2(
+    name = "vreteno_board_boot_pnr",
+    synthesis = ":vreteno_board_boot_synth",
+    xdcs = [":ax7a200_xdc"],
+    tags = ["manual"],
+)
+
+# Write the fading demonstration into the board.
+vivado_program_device(
+    name = "vreteno_board_fade_prog",
+    prog_daemon = "//cpu/vreteno/board/remote:hw_server",
+    deps = [":vreteno_board_fade_pnr"],
+    tags = ["manual"],
+)
+
+# Write the loader into the board, after which a program goes down the
+# serial port rather than through Vivado:
+#
+#   bazel run //cpu/vreteno:vreteno_board_boot_prog -- \
+#       --hostport localhost:3122 --device '*/xilinx_tcf/Digilent/*'
+#   bazel run //cpu/vreteno/board/remote:load -- \
+#       --image=$PWD/bazel-bin/cpu/vreteno/rust/hello_ram_bin.bin
+vivado_program_device(
+    name = "vreteno_board_boot_prog",
+    prog_daemon = "//cpu/vreteno/board/remote:hw_server",
+    deps = [":vreteno_board_boot_pnr"],
+    tags = ["manual"],
+)
+
+# Program the board where it is, on the machine .bazelrc names in
+# TXHDL_BOARD_SERVER: the daemon brings hw_server up there and a tunnel
+# here, //cpu/vreteno/board/remote says how; then Vivado connects to
+# the tunnel. The run starts the daemon itself and waits up to two
+# minutes for the server to answer (issue 392), so bringing the tunnel
+# up first is optional:
+#
+#   bazel run //cpu/vreteno/board/remote:hw_server
+#   bazel run //cpu/vreteno:vreteno_board_prog -- \
+#       --hostport localhost:3122 --device '*/xilinx_tcf/Digilent/*'
+#
+# This writes the FPGA itself, which the next power cycle forgets.
+vivado_program_device(
+    name = "vreteno_board_prog",
+    prog_daemon = "//cpu/vreteno/board/remote:hw_server",
+    deps = [":vreteno_board_pnr"],
+    tags = ["manual"],
+)
+
+# Write the bitstream into the board's QSPI flash, a Micron MT25QL128
+# over a 4-bit bus; the same tunnel:
+#
+#   bazel run //cpu/vreteno:vreteno_board_flash -- \
+#       --hostport localhost:3122 --device '*/xilinx_tcf/Digilent/*'
+#
+# The part is the one this board answers with, read off the chip over
+# JTAG: `Mfg ID : 20  Memory Type : ba  Memory Capacity : 18`, which is
+# 128 Mbit, 16 MiB. The a200t examples name an MT25QL256, and a target
+# that names it is refused by Vivado with `Part identified : mt25ql128
+# Part selected : mt25ql256`. Board revisions differ here, so read the
+# chip rather than a manual. See issue #210.
+vivado_program_flash(
+    name = "vreteno_board_flash",
+    size = 16,
+    flash_part = "mt25ql128-spi-x1_x2_x4",
+    interface = "SPIx4",
+    deps = [":vreteno_board_pnr"],
+    tags = ["manual"],
+)
+
+# The bitstream leaves the flash's program area alone: its configuration
+# data ends before 0x00A0_0000, where programs begin (issue 312; the
+# layout is in docs/flagship.tex). Manual, since the bitstream needs
+# Vivado; `vivado_program_flash` writes only the bitstream today, so
+# this is the check that a program placed there would survive.
+sh_test(
+    name = "vreteno_board_fits_test",
+    srcs = ["//tools/bitfit:fits_test.sh"],
+    args = [
+        "$(rootpath //tools/bitfit)",
+        "0xa00000",
+        "$(rootpaths :vreteno_board_pnr)",
+    ],
+    data = [
+        ":vreteno_board_pnr",
+        "//tools/bitfit",
+    ],
+    tags = ["manual"],
+)
+
+# The board with a logic analyser in it (issue 239): the same design
+# under a top that adds Vivado's integrated logic analyser on the
+# nets a reader of the board asks about first, listed at the head of
+# `board/vreteno_board_ila.v` with the reason for each. The analyser
+# is generated as an IP core with those probe widths, the bitstream
+# is built beside the shipping one and is not it, and a capture is
+# read back over the JTAG cable. Manual, as every Vivado target is.
+#
+#   bazel build //cpu/vreteno:vreteno_board_ila_pnr
+#   bazel run //cpu/vreteno/board/remote:hw_server
+#   bazel run //cpu/vreteno:vreteno_board_ila_prog -- \
+#       --hostport localhost:3122 --device '*/xilinx_tcf/Digilent/*'
+#   bazel run //cpu/vreteno:vreteno_board_ila_read
+vivado_ila(
+    name = "board_ila",
+    data_depth = 4096,
+    part = "xc7a200tfbg484-2",
+    # rst, halt, calib, uart_tx, rx, brk, pwm_pins, vaw, var, vw,
+    # net_tx, said, ui_rst: each channel is its valid and its data.
+    probe_widths = [1, 1, 1, 1, 1, 1, 4, 36, 36, 37, 10, 1, 1],
+    tags = ["manual"],
+)
+
+vivado_synthesis2(
+    name = "vreteno_board_ila_synth",
+    srcs = [
+        ":board_v",
+        "board/vreteno_board_ila.v",
+        "//lib/board:bscan_user4",
+        "//ddr3:hdl",
+        "//lib/parts:hdl",
+    ],
+    part = "xc7a200tfbg484-2",
+    top = "vreteno_board_ila",
+    xdcs = [":ax7a200_xdc"],
+    deps = [
+        ":board_ila",
+        "//ddr3:ddr3_mig_axi",
+    ],
+    tags = ["manual"],
+)
+
+vivado_place_and_route2(
+    name = "vreteno_board_ila_pnr",
+    synthesis = ":vreteno_board_ila_synth",
+    xdcs = [":ax7a200_xdc"],
+    tags = ["manual"],
+)
+
+vivado_program_device(
+    name = "vreteno_board_ila_prog",
+    prog_daemon = "//cpu/vreteno/board/remote:hw_server",
+    deps = [":vreteno_board_ila_pnr"],
+    tags = ["manual"],
+)
+
+vivado_read_ila(
+    name = "vreteno_board_ila_read",
+    deps = [":vreteno_board_ila_pnr"],
+    tags = ["manual"],
+)
+
+# Vivado's JTAG-to-AXI master (issue 241): a host on the board's bus
+# reached over the JTAG cable, so that memory and every peripheral can
+# be read and written from the hardware manager whatever the core is
+# doing. Generated as an IP core; no bursts, since every peripheral on
+# this bus serves one beat at a time.
+vivado_ip(
+    name = "jtag_axi",
+    config = {
+        "PROTOCOL": "0",
+        "M_AXI_ADDR_WIDTH": "32",
+        "M_AXI_DATA_WIDTH": "32",
+        "M_HAS_BURST": "0",
+    },
+    part = "xc7a200tfbg484-2",
+    tags = ["manual"],
+    vlnv = "xilinx.com:ip:jtag_axi:1.2",
+)
+
+# The board with a JTAG master on its bus (issue 241): the same design
+# under a top that puts Vivado's JTAG-to-AXI master on the lowered
+# board's second host port, so that the hardware manager reads and
+# writes every address the map names, whatever the core is doing.
+# Manual, as every Vivado target is.
+#
+#   bazel build //cpu/vreteno:vreteno_board_jtag_pnr
+#   bazel run //cpu/vreteno:vreteno_board_jtag_prog -- \
+#       --hostport localhost:3122 --device '*/xilinx_tcf/Digilent/*'
+vivado_synthesis2(
+    name = "vreteno_board_jtag_synth",
+    srcs = [
+        ":board_v",
+        "board/vreteno_board_jtag.v",
+        "//lib/board:bscan_user4",
+        "//ddr3:hdl",
+        "//lib/parts:hdl",
+    ],
+    part = "xc7a200tfbg484-2",
+    top = "vreteno_board_jtag",
+    xdcs = [":ax7a200_xdc"],
+    deps = [
+        ":jtag_axi",
+        "//ddr3:ddr3_mig_axi",
+    ],
+    tags = ["manual"],
+)
+
+vivado_place_and_route2(
+    name = "vreteno_board_jtag_pnr",
+    synthesis = ":vreteno_board_jtag_synth",
+    xdcs = [":ax7a200_xdc"],
+    tags = ["manual"],
+)
+
+vivado_program_device(
+    name = "vreteno_board_jtag_prog",
+    prog_daemon = "//cpu/vreteno/board/remote:hw_server",
+    deps = [":vreteno_board_jtag_pnr"],
+    tags = ["manual"],
+)
+
+# The bus from the cable: words written into the data memory and the
+# DDR3 through the JTAG master and read back, and the timer read
+# twice, from Vivado's hardware manager against the board. The
+# hardware server is at localhost:3122, as the programming targets
+# expect; HOSTPORT in the environment says otherwise.
+#
+#   bazel run //cpu/vreteno/board/remote:hw_server
+#   bazel run //cpu/vreteno:vreteno_board_jtag_probe
+vivado_repl(
+    name = "vreteno_board_jtag_probe",
+    data = [":vreteno_board_jtag_pnr"],
+    script = "board/jtag/probe.tcl",
+    use_terminal = False,
+    tags = ["manual"],
+)
+
+# The debug module from the cable (issue 154): halt the core, read its
+# registers by the abstract command, resume it. Same bitstream, any
+# program running.
+#
+#   bazel run //cpu/vreteno:vreteno_board_dm_probe
+vivado_repl(
+    name = "vreteno_board_dm_probe",
+    data = [":vreteno_board_jtag_pnr"],
+    script = "board/jtag/dm_probe.tcl",
+    use_terminal = False,
+    tags = ["manual"],
+)
+
+# The instruction cache (issue 1021): a loop fetched from the data
+# memory runs from the cache, and code stored and fenced with
+# `fence.i` is what runs.
+rust_test(
+    name = "icache_test",
+    srcs = ["tests/icache.rs"],
+    edition = "2021",
+    deps = [":vreteno32"],
+)
+
+# The machine model's timing mode (issue 1392) against the board's own
+# programs: cpi.rs's warm loop and ethperf.rs's copies, run with
+# `--timing`, give the cycles the calibrated costs give, which are
+# within about one per cent of what the board measured.
+sh_test(
+    name = "timing_test",
+    srcs = ["timing_test.sh"],
+    args = [
+        "$(rootpath :machine)",
+        "$(rootpath //cpu/vreteno/rust:cpi_ram_bin)",
+        "$(rootpath //cpu/vreteno/rust:ethperf_ram_bin)",
+    ],
+    data = [
+        ":machine",
+        "//cpu/vreteno/rust:cpi_ram_bin",
+        "//cpu/vreteno/rust:ethperf_ram_bin",
+    ],
+)

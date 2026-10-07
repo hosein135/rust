@@ -1,0 +1,11 @@
+error[E0603]: function `widen` is private
+  --> src/main.rs:20:24
+   |
+20 |     let w = predictor::widen(0xFF);  // reaching for a private helper
+   |                        ^^^^^ private function
+   |
+note: the function `widen` is defined here
+  --> src/main.rs:5:5
+   |
+5  |     fn widen(x: u8) -> u16 {     // no pub: private to this module
+   |     ^^^^^^^^^^^^^^^^^^^^^^

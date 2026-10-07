@@ -1,0 +1,11 @@
+[package]
+name = "ch16_tasks_queues"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/ch16_tasks_queues.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+rustdv = { path = "../../../rustdv" }

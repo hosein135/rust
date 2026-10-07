@@ -1,0 +1,380 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Building a Zephyr image with this repository's own toolchain.
+
+Zephyr's build is CMake, Kconfig and its own Python, and none of that
+becomes Bazel here. What Bazel does is hand that build every tool it
+needs, pinned by checksum, and take the image out the other end, so
+that the port under `//zephyr` is compiled by `bazel test //...`
+rather than by a reader following a README (issue 390).
+
+The flag that matters is `-DZEPHYR_MODULES`. Zephyr's own
+documentation says `ZEPHYR_EXTRA_MODULES`, and that does nothing
+here: Zephyr collects it and hands it to a script it runs only
+`if(WEST OR ZEPHYR_MODULES)`. A hermetic build has no `west` by
+construction, so a rule written from the documented flag would fetch
+Zephyr, build an ELF, pass, and be testing a Zephyr with none of this
+repository in it.
+"""
+
+# The Python packages Zephyr's build imports come from the `zephyr_py`
+# hub, which `pip.parse` makes for Python 3.12 only, and the hub picks
+# a package by rules_python's version setting. That setting is 3.12
+# because this module makes 3.12 the default, which only the root
+# module may: from a workspace that depends on TxHDL the default is the
+# root's, the hub matches nothing, and analysis fails (issue 1001). So
+# the packages are taken at 3.12 here, whoever the root is, the same
+# version as the interpreter the rule runs them with.
+_PYTHON_VERSION = "@rules_python//python/config_settings:python_version"
+
+def _python_312_impl(_settings, _attr):
+    return {_PYTHON_VERSION: "3.12"}
+
+_python_312 = transition(
+    implementation = _python_312_impl,
+    inputs = [],
+    outputs = [_PYTHON_VERSION],
+)
+
+def _zephyr_image_impl(ctx):
+    if bool(ctx.attr.sample) == bool(ctx.attr.app):
+        fail("give exactly one of `sample` and `app`")
+    elf = ctx.actions.declare_file(ctx.label.name + ".elf")
+    binary = ctx.actions.declare_file(ctx.label.name + ".bin")
+    config = ctx.actions.declare_file(ctx.label.name + ".config")
+
+    # The module's root is the package the port lives in, which is
+    # what CMake wants; a file's dirname would be whichever file the
+    # glob happened to put first.
+    module = ctx.attr.module.label.package
+
+    # What an application links that Bazel built: static libraries, C
+    # sources and headers, each handed to CMake as a list of its own
+    # (issue 996). A header is included as `<its directory>/<its name>`,
+    # so the directory above its own is the one put on the path.
+    extra = ctx.files.extra
+    libs = [f.path for f in extra if f.extension == "a"]
+    srcs = [f.path for f in extra if f.extension == "c"]
+    incs = []
+    for f in extra:
+        if f.extension == "h":
+            d = f.dirname.rsplit("/", 1)[0]
+            if d not in incs:
+                incs.append(d)
+
+    inputs = depset(
+        ctx.files.module + ctx.files._cmake + ctx.files._ninja +
+        ctx.files._dtc + ctx.files._python + ctx.files._py_deps + extra,
+        transitive = [
+            depset(ctx.files._zephyr),
+            depset(ctx.files._mbedtls),
+            depset(ctx.files._gcc),
+        ],
+    )
+
+    # The devicetree tooling's packages: the `site-packages` directory
+    # of each, taken from the files the pip rules hand over rather than
+    # searched for, so that the path is the same in a sandbox and out
+    # of one (issue 721).
+    site = []
+    for f in ctx.files._py_deps:
+        at = f.path.find("/site-packages/")
+        if at >= 0:
+            d = f.path[:at + len("/site-packages")]
+            if d not in site:
+                site.append(d)
+    if not site:
+        fail("no site-packages among the Python dependencies")
+
+    # The build runs where Bazel put it, so every path handed to CMake
+    # is made absolute from the execution root rather than assumed.
+    ctx.actions.run_shell(
+        inputs = inputs,
+        outputs = [elf, binary, config],
+        command = _SCRIPT,
+        env = {
+            "ZEPHYR_ROOT": ctx.files._zephyr[0].owner.workspace_root,
+            "MBEDTLS_ROOT": ctx.files._mbedtls[0].owner.workspace_root,
+            "CMAKE": ctx.files._cmake[0].path,
+            "NINJA": ctx.files._ninja[0].path,
+            "DTC": ctx.files._dtc[0].path,
+            "PYTHON": ctx.files._python[0].path,
+            "PY_SITE": ":".join(site),
+            "GCC_BIN": ctx.files._gcc_bin[0].dirname,
+            "MODULE_DIR": module,
+            "BOARD": ctx.attr.board,
+            "SAMPLE": ctx.attr.sample,
+            "APP": ctx.attr.app,
+            "EXTRA_CONF": (
+                ctx.file.conf.path if ctx.file.conf else ""
+            ),
+            "EXTRA_LIBS": ";".join(libs),
+            "EXTRA_SOURCES": ";".join(srcs),
+            "EXTRA_INCLUDES": ";".join(incs),
+            "OUT_ELF": elf.path,
+            "OUT_BIN": binary.path,
+            "OUT_CONFIG": config.path,
+        },
+        mnemonic = "ZephyrImage",
+        progress_message = "Building Zephyr %s for %s" % (
+            ctx.attr.sample or ctx.attr.app,
+            ctx.attr.board,
+        ),
+    )
+    # Named groups as well as the default, so that a check can ask for
+    # the generated configuration on its own: what is worth asserting
+    # on is that file and not the image beside it.
+    return [
+        DefaultInfo(files = depset([elf, binary, config])),
+        OutputGroupInfo(
+            bin = depset([binary]),
+            config = depset([config]),
+            elf = depset([elf]),
+        ),
+    ]
+
+_SCRIPT = r"""
+set -eu
+root=$(pwd)
+
+# Where Bazel unpacked Zephyr. Taken from the fetched repository's own
+# root rather than searched for: a `find` for a marker file picks up
+# Zephyr's test data, which has trees that look like a Zephyr.
+zbase=$root/$ZEPHYR_ROOT
+
+# The tools, on one path of our own and ahead of the system's, so that
+# the fetched ones are the ones found; the system's /usr/bin and /bin stay
+# on the path for the shell's own commands.
+bin=$root/.zbin
+rm -rf "$bin" && mkdir -p "$bin"
+ln -sf "$root/$CMAKE" "$bin/cmake"
+ln -sf "$root/$NINJA" "$bin/ninja"
+ln -sf "$root/$DTC" "$bin/dtc"
+ln -sf "$root/$PYTHON" "$bin/python3"
+ln -sf "$root/$PYTHON" "$bin/python"
+export PATH="$bin:$root/$GCC_BIN:/usr/bin:/bin"
+
+# The devicetree tooling, where the pip rules put it: each package's
+# directory, as the rule found it among its inputs.
+PYTHONPATH=""
+IFS=: read -r -a dirs <<< "$PY_SITE"
+for d in "${dirs[@]}"; do
+  PYTHONPATH="$PYTHONPATH${PYTHONPATH:+:}$root/$d"
+done
+export PYTHONPATH
+
+export ZEPHYR_BASE="$zbase"
+export ZEPHYR_TOOLCHAIN_VARIANT=cross-compile
+export CROSS_COMPILE="$root/$GCC_BIN/riscv-none-elf-"
+
+build=$root/.zbuild
+rm -rf "$build"
+
+# Zephyr names a module whose module.yml names none after its directory,
+# and its own glue for Mbed TLS, under modules/mbedtls, answers only to
+# `mbedtls`. The fetched tree's directory is Bazel's name for the
+# repository, so the module is handed over through a link of that name.
+mods=$root/.zmods
+rm -rf "$mods" && mkdir -p "$mods"
+ln -sf "$root/$MBEDTLS_ROOT" "$mods/mbedtls"
+
+# `ZEPHYR_MODULES` and not `ZEPHYR_EXTRA_MODULES`: see this file's
+# module docstring. The roots are given as well, since the board and
+# the SoC live here rather than in Zephyr's tree.
+conf_arg=""
+if [ -n "$EXTRA_CONF" ]; then
+  conf_arg="-DEXTRA_CONF_FILE=$root/$EXTRA_CONF"
+fi
+
+# What the application links that Bazel built, made absolute, as the
+# lists TXHDL_LIBS, TXHDL_SOURCES and TXHDL_INCLUDES its CMakeLists.txt
+# reads (issue 996).
+absolute() {
+  local out="" p
+  IFS=';' read -r -a parts <<< "$1"
+  for p in "${parts[@]}"; do
+    [ -n "$p" ] && out="$out${out:+;}$root/$p"
+  done
+  echo "$out"
+}
+txhdl_libs=$(absolute "$EXTRA_LIBS")
+txhdl_sources=$(absolute "$EXTRA_SOURCES")
+txhdl_includes=$(absolute "$EXTRA_INCLUDES")
+
+# An application of this repository is inside the module, one of
+# Zephyr's own samples inside Zephyr.
+src="$zbase/$SAMPLE"
+if [ -n "$APP" ]; then
+  src="$root/$MODULE_DIR/$APP"
+fi
+
+# The build runs in a sandbox whose path changes on every run, and the
+# compiler writes the paths it was given into the debug information and
+# into `__FILE__`. Mapped to `.`, every one of them is relative to the
+# execution root, the build directory's among them, so two builds of
+# one tree give one `.elf` (issue 711). The compiler's own headers are
+# found through the real path of its executable, in Bazel's
+# repository cache, which is this machine's and not the tree's; that is
+# mapped to a name too.
+gcc_root=$(dirname "$(dirname "$(readlink -f "$root/$GCC_BIN/riscv-none-elf-gcc")")")
+remap="-ffile-prefix-map=$root=. -ffile-prefix-map=$gcc_root=riscv-none-elf-gcc"
+# CMake reaches some of Zephyr's sources, and of the module's, through
+# their real paths, where Bazel keeps them: Zephyr in the repository
+# cache, the module in the workspace. Each is found from a file's real
+# path, since in a sandbox only the files are links, and mapped to the
+# name it has under the execution root.
+zreal=$(dirname "$(readlink -f "$zbase/VERSION")")
+mreal=$(dirname "$(dirname "$(readlink -f "$root/$MODULE_DIR/zephyr/module.yml")")")
+remap="$remap -ffile-prefix-map=$zreal=./$ZEPHYR_ROOT"
+remap="$remap -ffile-prefix-map=$mreal=./$MODULE_DIR"
+breal=$(dirname "$(dirname "$(readlink -f "$root/$MBEDTLS_ROOT/zephyr/module.yml")")")
+remap="$remap -ffile-prefix-map=$breal=./$MBEDTLS_ROOT"
+
+# Zephyr keeps a cache of what the compiler can do, and looks for a
+# writable place for it in XDG_CACHE_HOME, then HOME, then its own tree.
+# A sandbox gives it neither of the first two, so it wrote into the
+# fetched Zephyr, which is an input of this action and lives in the
+# repository cache every workspace here shares: each build changed its
+# own inputs, and no image was ever a cache hit (issue 936). Named here,
+# inside the build directory, it is the action's own.
+"$root/$CMAKE" -B "$build" -S "$src" -G Ninja \
+  -DUSER_CACHE_DIR="$build/.usercache" \
+  -DBOARD="$BOARD" $conf_arg \
+  -DEXTRA_CFLAGS="$remap" \
+  -DEXTRA_CXXFLAGS="$remap" \
+  -DEXTRA_AFLAGS="$remap" \
+  -DBOARD_ROOT="$root/$MODULE_DIR" \
+  -DSOC_ROOT="$root/$MODULE_DIR" \
+  -DDTS_ROOT="$root/$MODULE_DIR" \
+  -DZEPHYR_MODULES="$root/$MODULE_DIR;$mods/mbedtls" \
+  -DTXHDL_LIBS="$txhdl_libs" \
+  -DTXHDL_SOURCES="$txhdl_sources" \
+  -DTXHDL_INCLUDES="$txhdl_includes" \
+  > "$build.log" 2>&1 || { cat "$build.log"; exit 1; }
+
+"$root/$CMAKE" --build "$build" >> "$build.log" 2>&1 || {
+  cat "$build.log"; exit 1;
+}
+
+cp "$build/zephyr/zephyr.elf" "$root/$OUT_ELF"
+cp "$build/zephyr/zephyr.bin" "$root/$OUT_BIN"
+# Kconfig names the module by its absolute path, on the comment lines
+# that open and close its section; the path is the sandbox's, and is
+# taken off so that the file says the module's place in the tree.
+sed "s|$root/||g" "$build/zephyr/.config" > "$root/$OUT_CONFIG"
+"""
+
+zephyr_image = rule(
+    implementation = _zephyr_image_impl,
+    doc = "A Zephyr image for a board of this repository's, built " +
+          "with the fetched CMake, ninja, devicetree compiler, " +
+          "Python and RISC-V compiler; the shell's own commands still " +
+          "come from the system.",
+    attrs = {
+        "board": attr.string(
+            doc = "The board, as `-DBOARD` takes it.",
+            mandatory = True,
+        ),
+        "module": attr.label(
+            doc = "The port: this repository as a Zephyr module.",
+            allow_files = True,
+            mandatory = True,
+        ),
+        "conf": attr.label(
+            doc = "An extra Kconfig fragment merged into the build, " +
+                  "for turning on what a sample does not.",
+            allow_single_file = [".conf"],
+        ),
+        "sample": attr.string(
+            doc = "The application, as a path inside Zephyr's tree. " +
+                  "Exactly one of this and `app`.",
+        ),
+        "app": attr.string(
+            doc = "The application, as a path inside the module, for " +
+                  "one this repository writes (issue 143).",
+        ),
+        "extra": attr.label_list(
+            doc = "What the application links that Bazel built: " +
+                  "static libraries (`.a`), C sources (`.c`) and " +
+                  "headers (`.h`), handed to its CMakeLists.txt as " +
+                  "TXHDL_LIBS, TXHDL_SOURCES and TXHDL_INCLUDES " +
+                  "(issue 996).",
+            allow_files = [".a", ".c", ".h"],
+        ),
+        "_cmake": attr.label(
+            default = "@cmake_host//:cmake",
+            allow_files = True,
+        ),
+        "_dtc": attr.label(default = "@dtc//:dtc", allow_files = True),
+        "_gcc": attr.label(default = "@riscv_none_elf_gcc//:all"),
+        "_gcc_bin": attr.label(
+            default = "@riscv_none_elf_gcc//:objcopy",
+            allow_files = True,
+        ),
+        "_ninja": attr.label(default = "@ninja//:ninja", allow_files = True),
+        "_py_deps": attr.label_list(
+            cfg = _python_312,
+            default = [
+                "@zephyr_py//pyyaml",
+                "@zephyr_py//pykwalify",
+                "@zephyr_py//pyelftools",
+                "@zephyr_py//packaging",
+                "@zephyr_py//anytree",
+                "@zephyr_py//intelhex",
+                "@zephyr_py//six",
+                "@zephyr_py//docopt",
+                "@zephyr_py//python_dateutil",
+                "@zephyr_py//ruamel_yaml",
+                "@zephyr_py//ruamel_yaml_clib",
+            ],
+        ),
+        "_python": attr.label(
+            default = "@python_3_12_host//:python",
+            allow_files = True,
+        ),
+        "_zephyr": attr.label(default = "@zephyr//:all"),
+        # Zephyr's Mbed TLS, a module of every image: Zephyr builds it
+        # only when CONFIG_MBEDTLS asks, which the entropy driver does
+        # for its SHA-256 (issue 780).
+        "_mbedtls": attr.label(default = "@zephyr_mbedtls//:all"),
+    },
+)
+
+# A test that `target` analyses when the default Python is another
+# version than the one this module makes the default, which is what a
+# workspace depending on TxHDL has (issue 1001). It takes the target
+# under a transition and none of its files, so the target is analysed
+# and not built: an image that would not analyse fails the test at
+# analysis, and one that would costs nothing more.
+def _other_python_impl(settings, attr):
+    return {_PYTHON_VERSION: attr.python_version}
+
+_other_python = transition(
+    implementation = _other_python_impl,
+    inputs = [],
+    outputs = [_PYTHON_VERSION],
+)
+
+def _analyses_under_python_test_impl(ctx):
+    script = ctx.actions.declare_file(ctx.label.name + ".sh")
+    ctx.actions.write(
+        output = script,
+        is_executable = True,
+        content = "#!/usr/bin/env bash\necho '%s analyses with Python %s as the default'\n" % (
+            ctx.attr.target[0].label,
+            ctx.attr.python_version,
+        ),
+    )
+    return [DefaultInfo(executable = script)]
+
+analyses_under_python_test = rule(
+    implementation = _analyses_under_python_test_impl,
+    test = True,
+    doc = "Passes when `target` analyses with another Python as the default.",
+    attrs = {
+        "target": attr.label(mandatory = True, cfg = _other_python),
+        "python_version": attr.string(
+            mandatory = True,
+            doc = "The default Python a dependent workspace might have.",
+        ),
+    },
+)

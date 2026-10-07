@@ -1,0 +1,357 @@
+% SPDX-License-Identifier: Apache-2.0
+%
+% HDMI in TxHDL. Built by //docs:hdmi. Every listing is included from
+% the tree, and every printout and figure is what the build made by
+% running the example.
+\documentclass[journal,9pt]{IEEEtran}
+
+% Listings of Rust set by rustfmt at 80 columns: 5.6pt is what fits
+% the frame of a column (issue 1061).
+\newcommand{\listingsize}{\fontsize{5.6}{6.6}\selectfont}
+\input{housestyle}
+\input{memmap}
+
+\InputIfFileExists{buildstamp.tex}{}{}
+\providecommand{\buildstamp}{Draft build (outside the Bazel flow).}
+
+% A range of the HDMI part, by its begin/end markers.
+\newcommand{\hdmipart}[3]{%
+\lstinputlisting[rangebeginprefix=//\ begin\{,rangebeginsuffix=\},%
+rangeendprefix=//\ end\{,rangeendsuffix=\},includerangemarker=false,%
+linerange=#1-#1,caption={#2},label={#3}]{lib/parts/src/hdmi.rs}}
+
+\title{HDMI in TxHDL}
+
+\author{Filip Filmar and Dragiša Janković%
+\thanks{Both authors are independent. Filip Filmar is the
+corresponding author, at f@hdlfactory.com; Dragiša Janković is
+reached at linkedin.com/in/dragisa-jankovic.}%
+\thanks{This is the tutorial on the HDMI part, for a reader who knows
+the AXI link and its AXI-Lite bridge~\cite{axi}. Every listing is
+included from the project repository \code{HDL/txhdl} at build time,
+and every printout and figure is what the build produced by running
+the example. The cover~\cite{cover} lists every document.}%
+\thanks{The authors used a large language model, Claude, as an
+assistant in exploring the concepts and in writing and constructing
+the documents and the programs; every commit of the repository says
+so and preserves the prompts that led to it, verbatim.}%
+\thanks{\buildstamp}}
+
+\markboth{HDMI in TxHDL}{Filmar and Janković: HDMI in TxHDL}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+The Alinx AX7A200B development board transmits High-Definition Multimedia
+Interface (HDMI) video through an onboard Silicon Image SiI9134
+transmitter. The transceiver chip handles transition-minimized
+differential signaling (TMDS) encoding and serialization. The FPGA
+supplies a synchronous pixel clock, 24-bit parallel RGB color data,
+horizontal and vertical synchronization strobes, and a display data enable
+signal, initializing device registers over an I2C management bus. The
+TxHDL implementation comprises two core units expressed within the lowered
+subset: a video controller that sequences raster timing and scans a 12-bit
+framebuffer accessible over AXI-Lite, and a dedicated I2C master that
+releases transmitter reset and streams configuration tables. The build
+suite exercises both units in a $16 \times 12$ scaled test mode against an
+emulated AXI-Lite host and an I2C device model, validating pixel timing and
+simulating synthesized netlists under \code{nvc} and Verilator. A
+companion board demonstration configures standard $640 \times 480$
+resolution at 60~Hz, synthesizes to a verified bitstream in Vivado, and
+displays test patterns on physical HDMI monitors.
+\end{abstract}
+
+\section{What Is Here}
+\label{sec:h-what}
+
+The \code{hdmi} module in \code{txhdl\_parts} provides two hardware units.
+
+\code{Hdmi} serves as the primary video peripheral. Running synchronously
+on the pixel clock, it drives the transmitter inputs: 24-bit color bus
+\code{rgb} (with red occupying the most significant byte), active-low
+synchronization strobes \code{hsync} and \code{vsync}, and data enable
+\code{de}, asserted during active video scan. Its internal memory stores
+12-bit pixels (four bits each for red, green, and blue), with each
+framebuffer entry replicated across a square of \code{1 << SHIFT} screen
+pixels. Host processors update framebuffer contents across the unit's
+AXI-Lite slave interface.
+
+\code{I2cInit} automates transceiver initialization. It asserts external
+chip reset, observes a stabilization delay upon reset deassertion, and
+streams a sequence of configuration registers over I2C. The state machine
+asserts \code{done} once the configuration sequence concludes, or asserts
+\code{failed} if the transmitter fails to acknowledge any transmitted byte.
+
+\section{The Raster}
+\label{sec:h-raster}
+
+A video frame comprises a rectangular raster of columns and rows divided
+into active display intervals and blanking intervals. Each axis sequences
+through active pixels, a front porch, a synchronization pulse, and a back
+porch. For $640 \times 480$ resolution at 60~Hz, total line length spans 800
+pixel clocks and frame height spans 525 scanlines. At a nominal 25.175~MHz
+clock, pixel periods are 39.7~ns, with both synchronization pulses active
+low. Listing~\ref{lst:h-modes} defines these timing parameters. The unit
+parameterizes all eight values as type constants, enabling lightweight
+test modes in simulation.
+
+\hdmipart{modes}{640 by 480 at 60~Hz.}{lst:h-modes}
+
+The controller tracks coordinates via column counter \code{hc} and row
+counter \code{vc}. Combinational functions in Listing~\ref{lst:h-fns}
+evaluate these counters to establish active display bounds and sync pulse
+assertions. Synchronous block RAM reads sample the framebuffer into register
+\code{px} on the rising clock edge. Synchronization strobes and data
+enables register concurrently on the same edge, aligning timing controls
+precisely with pixel data at the transmitter pins.
+
+Three geometric helper functions operate across both axes generically
+because compiler lowering binds constant function parameters by positional
+argument order~\cite{i127}. Earlier compiler revisions bound parameters
+by lexical identifier, forcing functions to duplicate names from
+surrounding modules and requiring redundant axis-specific implementations.
+Dedicated termination functions handle terminal column and row indices,
+matching respective 8-bit and 7-bit counter bit widths.
+
+\hdmipart{fns}{The raster's functions.}{lst:h-fns}
+
+\section{The Framebuffer and the Bus}
+\label{sec:h-bus}
+
+The internal framebuffer provides $2^{15}$ addressable entries, indexed
+with the row coordinate in the upper seven bits and the column in the lower
+eight bits. Configured for $640 \times 480$ with a pixel scaling factor
+\code{SHIFT} of 2, the active display spans $160 \times 120$ distinct
+framebuffer pixels, leaving remaining storage unmapped.
+
+Listing~\ref{lst:h-regs} declares the three-word register interface:
+read-only register \code{status}, exposing vertical blanking state and
+total frame count; read-write register \code{cursor}, holding active column
+and row coordinates; and write-only register \code{pixel}, accepting pixel
+color values. The \code{regmap!} macro synthesizes read multiplexers, write
+strobes, and host software field accessors from this unified description.
+
+\hdmipart{regs}{The video peripheral's words.}{lst:h-regs}
+
+Writing to \code{pixel} stores color data at the current cursor coordinates
+and auto-increments the pointer. Upon crossing a scanline boundary, the
+cursor wraps to the start of the subsequent row, returning to the origin
+after completing the final line. Software sets the cursor once and streams
+continuous pixel spans via fixed-burst AXI transfers, which the bridge
+translates into consecutive single-beat writes at the constant register
+address.
+
+\hdmipart{state}{The video peripheral's state.}{lst:h-state}
+
+\hdmipart{run}{The video peripheral's step.}{lst:h-run}
+
+Output color expansion constructs intermediate signals for each color
+channel before bitwise concatenation. Earlier lowering passes failed to
+resolve chained expressions following function calls, incorrectly treating
+them as static constants (issue~128)~\cite{i128}.
+
+\section{Configuring the Chip}
+\label{sec:h-i2c}
+
+The I2C physical bus comprises two open-drain signals, serial clock (SCL)
+and serial data (SDA), pulled up to positive supply rails by onboard
+resistors. Bus masters initiate transfers with a START condition (SDA
+transitioning low while SCL remains high) and terminate with a STOP
+condition (SDA transitioning high while SCL remains high). Data octets
+transfer most-significant bit first, shifting while SCL is low and
+sampling while SCL is high, followed by an acknowledge cycle during which
+the recipient pulls SDA low.
+
+The I2C master subdivides each bit period into four quarters of \code{DIV}
+clock cycles, driving SCL low during the first and fourth quarters. Each
+transaction comprises 29 four-quarter intervals: START framing, 7-bit slave
+address plus write flag with ACK, register index with ACK, payload data with
+ACK, and STOP framing. Control outputs \code{scl\_low} and \code{sda\_low}
+pull bus lines low actively. Inbound signal \code{sda\_in} allows the master
+to sample ACK status at the midpoint of the third quarter.
+
+The controller partitions into two concurrent processes. The timing
+process maintains a divider counter modulo \code{DIV}, generating
+quarter-bit phase strobes and registering external status signals
+\code{done} and \code{failed}. The sequencing process expresses transfer
+protocols directly: asserting reset for \code{HOLD} intervals, awaiting
+post-reset recovery, and iterating through configuration entries. Each
+table entry executes START generation, three serialized bytes with
+acknowledge checks, and STOP generation. Compiler lowering assigns these
+sequential waits into state registers and synthesizes loop counters
+automatically, eliminating manual phase and step tracking. The sequence
+terminates in a permanent wait state once \code{written} asserts.
+
+\hdmipart{i2cstate}{The master's registers.}{lst:h-i2cstate}
+
+\hdmipart{i2c}{The master's two processes.}{lst:h-i2c}
+
+Listing~\ref{lst:h-table} provides the configuration table programmed by
+the master: enabling operational power states for the board-wired input
+buses and setting output format to DVI mode without auxiliary HDMI
+info-packets. Because reference documentation omitted register
+specifications, these values were derived and later verified on physical
+hardware, where the SiI9134 accepted each transaction and activated video
+output. Helper functions in the source supply table entries to the sequencer.
+
+\hdmipart{table}{The chip's configuration, confirmed on the
+board.}{lst:h-table}
+
+\section{The Run}
+\label{sec:h-run}
+
+Example \code{ex\_hdmi} instantiates the video controller behind
+\code{LiteBridge<1, ..>} and a host transaction tracker in a scaled mode
+of $16 \times 12$ active pixels. Framebuffer pixels are scaled $2 \times 2$,
+yielding an $8 \times 6$ backing store. The host client resets the cursor
+to the origin and paints all 48 pixels across a single fixed burst, ramping
+red horizontally, green vertically, and blue diagonally. The host then polls
+\code{status} until two subsequent video frames display.
+
+Concurrently, the I2C master executes against \code{I2cDevice}, a bus model
+that acknowledges received octets and logs transaction data. Test
+assertions verify that transmitted values match the configuration table.
+
+The verification harness reconstructs full frames from active pixels
+marked by \code{de} following vertical sync, comparing all 192 screen
+pixels of the final frame against expected pattern colors. A coordinate
+shift of a single row or column would immediately trigger mismatch
+assertions at $2 \times 2$ pixel borders.
+
+\begin{figure*}[t]
+\centering
+\input{hdmi_timing.tex}
+\caption{The run: the pixels written on \code{w}, the syncs and the
+enable frame after frame, and the chip's reset and
+the I2C lines while the two transactions go out, until \code{done}.}
+\label{fig:h-run}
+\end{figure*}
+
+\lstinputlisting[caption={\code{ex\_hdmi.rs}. Run with
+\code{bazel run //lib/examples:ex\_hdmi}.},%
+label={lst:h-ex}]{lib/examples/ex_hdmi.rs}
+
+\lstinputlisting[style=ascii,caption={What \code{ex\_hdmi} printed when
+the build ran it: the two transactions the device was sent, and the
+last whole frame, one screen pixel per framebuffer pixel.},%
+label={lst:h-out}]{out_hdmi.txt}
+
+Both units undergo lowering, and the build suite simulates generated
+netlists at their port boundaries under \code{nvc} and Verilator against
+this test stimulus. Unit tests within the module verify sync pulse timing,
+data enable delays, and I2C protocol waveforms against reference mode
+definitions.
+
+\section{On the Board}
+\label{sec:h-board}
+
+The board-level demonstration is implemented in \code{//hdmi} without an
+active bus host. Netlist generation initializes the framebuffer with a
+static test image comprising eight vertical color bars, a grayscale ramp,
+and a bounding border, with AXI-Lite inputs tied inactive. On the flagship
+system, the processor core accesses the peripheral at slot~3 of its
+peripheral map (\mmget{at}{hdmi}).
+
+\lstinputlisting[caption={\code{hdmi/src/netlist.rs}: the netlist, with
+the test picture.},label={lst:h-netlist}]{hdmi/src/netlist.rs}
+
+An MMCM synthesizes the pixel clock from the 200~MHz board reference:
+dividing by 10 and multiplying by 63 establishes a 1260~MHz internal
+oscillator, which divided by 50 produces 25.2~MHz (within 0.1\% of the
+25.175~MHz nominal rate). An \code{ODDR} primitive inverts the clock driving
+the transceiver, centering transmitter sampling edges within pixel data
+eyes. I2C pins configure as open-drain buffers driven low when pulling and
+tri-stated otherwise. The clock manager lock signal provides system reset,
+passing through dual synchronizers clocked by the pixel domain. Lowered
+modules reset exclusively via their \code{rst} input (issue~509).
+
+\lstinputlisting[caption={\code{hdmi/board/hdmi\_demo.v}: the
+demonstration.},label={lst:h-demo}]{hdmi/board/hdmi_demo.v}
+
+Vivado synthesizes the lowered units and top wrapper via
+\code{bazel build //hdmi:demo\_synth} without errors or critical warnings;
+the 87 informational warnings reflect unused tied-low AXI-Lite inputs.
+Implementation via \code{bazel build //hdmi:demo\_pnr} achieves timing
+closure with 35.872~ns setup slack and 0.164~ns hold slack across 398
+endpoints. The design utilizes 60 LUTs, 86 flip-flops, 12 block RAM tiles,
+and 36 I/O pins. Because external PCB trace delays are unmodeled in
+constraints, reported margins apply to internal FPGA logic.
+
+Board timing and LED pins reside in \code{hdmi/board/ax7a200\_hdmi.xdc},
+while the 32 transceiver pin constraints are defined in
+\code{hdmi/board/hdmi\_pins.xdc}, which the flagship build imports directly.
+
+\lstinputlisting[caption={\code{hdmi/board/ax7a200\_hdmi.xdc}: the
+board's pins.},label={lst:h-xdc}]{hdmi/board/ax7a200_hdmi.xdc}
+
+\lstinputlisting[caption={\code{hdmi/board/hdmi\_pins.xdc}: the
+chip's pins.},label={lst:h-pins}]{hdmi/board/hdmi_pins.xdc}
+
+\section{What Is Not Done}
+\label{sec:h-not}
+
+The hardware demonstration was validated on physical hardware. On September
+19, 2026, an HDMI monitor attached to the AX7A200B displayed the test
+pattern stored in the framebuffer: eight color bars (white, yellow, cyan,
+green, magenta, red, blue, and black) spanning the upper two-thirds, a
+grayscale gradient below, and a white border. Diagnostic LEDs confirmed
+clock lock and configuration success, with every I2C transaction
+acknowledged.
+
+These results confirmed three initial design parameters. First, the
+configuration register sequence succeeded, activating TMDS video output.
+Second, 24-bit RGB wiring matches transceiver pin ordering, as evidenced
+by correct color bar sequence (any red-blue swap would transform yellow into
+cyan). Third, 3.3~V LVCMOS signaling operates correctly, aligning with
+vendor reference designs.
+
+Board validation identified one revision difference. Vendor reference
+designs drive two reset pins on FPGA balls L18 and Y17 to support hardware
+revisions 1.0 and 2.0. The design now drives both pins simultaneously to
+guarantee reliable reset release across board revisions.
+
+External pin timing constraints remain uncharacterized; while stable video
+confirms adequate operational margin, precise setup and hold windows at the
+connector are unmeasured.
+
+The peripheral currently operates entirely within the pixel clock domain,
+including its bus interface. Connecting a processor running on a separate
+system clock requires clock-domain crossing across all five AXI-Lite
+channels. In TxHDL, module \code{ChanCdc} provides channel-level
+synchronization (issue 131)~\cite{i131}. The flagship SoC instantiates five
+instances of handwritten module \code{chan\_cdc} to bridge these domains.
+
+Current architectural boundaries fix the framebuffer at 12 bits per pixel
+with maximum dimensions of $256 \times 128$. Video timing constants are
+fixed at compile time by type parameters, and I2C initialization executes
+a single static table.
+
+\IEEEtriggeratref{1}
+\begin{thebibliography}{9}
+
+\bibitem{axi}
+F.~Filmar and D.~Janković, ``AXI in TxHDL,'' project repository
+\code{HDL/txhdl}, \code{//docs:axi}, 2026.
+
+\bibitem{i127}
+Issue 127, ``fix(lower): a function's const parameters are bound by
+name, not by position,'' project repository \code{HDL/txhdl}, 2026.
+
+\bibitem{i128}
+Issue 128, ``fix(lower): a method chain on a function call becomes a
+constant naming missing variables,'' project repository
+\code{HDL/txhdl}, 2026.
+
+\bibitem{i131}
+Issue 131, ``feat(test): co-simulate a unit of several clocks, and
+lower a clock-crossing channel,'' project repository \code{HDL/txhdl},
+2026.
+
+\bibitem{cover}
+F.~Filmar and D.~Janković, ``TxHDL documents,'' project repository
+\code{HDL/txhdl}, \code{//docs:cover}, 2026.
+
+\end{thebibliography}
+
+\end{document}

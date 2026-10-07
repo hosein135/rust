@@ -1,0 +1,4 @@
+[package]
+name = "ch12_closures_iterators"
+version = "0.1.0"
+edition = "2024"

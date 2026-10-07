@@ -1,0 +1,14 @@
+error[E0382]: borrow of moved value: `t`
+  --> src/main.rs:15:44
+   |
+13 |     let t = Transaction { a: 5, b: 3, op: 1 };
+   |         - move occurs because `t` has type `Transaction`, which
+   |           does not implement the `Copy` trait
+14 |     scoreboard(t);
+   |                - value moved here
+15 |     println!("monitor logging: a was {}", t.a);
+   |                                           ^^^ value borrowed here after move
+   |
+note: consider changing this parameter type in function `scoreboard` to
+      borrow instead if owning the value isn't necessary
+help: consider cloning the value if the performance cost is acceptable

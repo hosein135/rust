@@ -1,0 +1,14 @@
+error[E0382]: borrow of moved value: `log`
+  --> src/main.rs:14:29
+   |
+9  |     for cmd in log {
+   |                --- `log` moved due to this implicit call
+   |                    to `.into_iter()`
+...
+14 |     println!("{} commands", log.len());
+   |                             ^^^ value borrowed here after move
+   |
+help: consider borrowing to avoid moving into the for loop
+   |
+9  |     for cmd in &log {
+   |                +

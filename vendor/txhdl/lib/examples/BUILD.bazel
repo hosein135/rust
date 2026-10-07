@@ -1,0 +1,1521 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# One compiled example per concept in the runtime. The article's appendix
+# includes each file verbatim, so a listing there is also a build target
+# here, and a concept with no example is a concept nobody has checked.
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test", "rustfmt_test")
+load("//lib:foreign.bzl", "verilog_unit", "vhdl_unit")
+
+package(default_visibility = ["//visibility:public"])
+
+EXAMPLES = [
+    "ex_values",
+    "ex_transaction",
+    "ex_interface",
+    "ex_unit",
+    "ex_pipeline",
+    "ex_hierarchy",
+]
+
+[
+    rust_library(
+        name = name,
+        srcs = [name + ".rs"],
+        edition = "2021",
+        deps = ["//lib:txhdl"],
+        proc_macro_deps = ["//lib:txhdl_macros"],
+    )
+    for name in EXAMPLES
+]
+
+# Two clocks, and the one way across them, ChanCdc (issue 1017).
+rust_library(
+    name = "ex_clock",
+    srcs = ["ex_clock.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A design is a program:  bazel run //lib/examples:ex_config -- asic
+rust_binary(
+    name = "ex_config",
+    srcs = ["ex_config.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+)
+
+# Blinky:  bazel run //lib/examples:ex_blinky
+rust_binary(
+    name = "ex_blinky",
+    srcs = ["ex_blinky.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A state machine:  bazel run //lib/examples:ex_case
+rust_binary(
+    name = "ex_case",
+    srcs = ["ex_case.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A frame's length after the crossing:  bazel run //lib/examples:ex_framelen
+rust_binary(
+    name = "ex_framelen",
+    srcs = ["ex_framelen.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# One Ethernet wire, two users:  bazel run //lib/examples:ex_ethshare
+rust_binary(
+    name = "ex_ethshare",
+    srcs = ["ex_ethshare.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The engines through the real bridge:  bazel run //lib/examples:ex_dmawb
+rust_binary(
+    name = "ex_dmawb",
+    srcs = ["ex_dmawb.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# Words to a frame and back:  bazel run //lib/examples:ex_ethdma
+rust_binary(
+    name = "ex_ethdma",
+    srcs = ["ex_ethdma.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The Ethernet slot registers:  bazel run //lib/examples:ex_ethslots
+rust_binary(
+    name = "ex_ethslots",
+    srcs = ["ex_ethslots.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# Writing memory in bursts:  bazel run //lib/examples:ex_dmaw
+rust_binary(
+    name = "ex_dmaw",
+    srcs = ["ex_dmaw.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The scanout path, memory to pixels:  bazel run //lib/examples:ex_scanout
+rust_binary(
+    name = "ex_scanout",
+    srcs = ["ex_scanout.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A scanout a line ahead of the beam, and a line that starves:
+#   bazel run //lib/examples:ex_scanpair
+rust_binary(
+    name = "ex_scanpair",
+    srcs = ["ex_scanpair.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The video peripheral with a scanout beside it, programmed over its
+# slot:  bazel run //lib/examples:ex_scanvideo
+rust_binary(
+    name = "ex_scanvideo",
+    srcs = ["ex_scanvideo.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# Reading memory in bursts:  bazel run //lib/examples:ex_dma
+rust_binary(
+    name = "ex_dma",
+    srcs = ["ex_dma.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The RISC-V debug transport, driven as OpenOCD's BSCAN tunnel drives
+# it (issue 154):  bazel run //lib/examples:ex_dtm
+rust_binary(
+    name = "ex_dtm",
+    srcs = ["ex_dtm.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+)
+
+# The clock-crossing channel, lowered:  bazel run //lib/examples:ex_cdc
+rust_binary(
+    name = "ex_cdc",
+    srcs = ["ex_cdc.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# An asynchronous FIFO between two clocks:  bazel run //lib/examples:ex_fifo
+rust_binary(
+    name = "ex_fifo",
+    srcs = ["ex_fifo.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A round-robin arbiter:  bazel run //lib/examples:ex_arbiter
+rust_binary(
+    name = "ex_arbiter",
+    srcs = ["ex_arbiter.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# Two events at one edge:  bazel run //lib/examples:ex_join
+rust_binary(
+    name = "ex_join",
+    srcs = ["ex_join.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# Several invocations in flight:  bazel run //lib/examples:ex_inflight
+rust_binary(
+    name = "ex_inflight",
+    srcs = ["ex_inflight.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A structural netlist:  bazel run //lib/examples:ex_netlist
+rust_binary(
+    name = "ex_netlist",
+    srcs = ["ex_netlist.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# Both edges of a clock:  bazel run //lib/examples:ex_edges
+rust_binary(
+    name = "ex_edges",
+    srcs = ["ex_edges.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# One mac, lowered twice:  bazel run //lib/examples:ex_lower
+rust_binary(
+    name = "ex_lower",
+    srcs = ["ex_lower.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The reset, which no unit declares:  bazel run //lib/examples:ex_reset
+rust_binary(
+    name = "ex_reset",
+    srcs = ["ex_reset.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A register starts where the unit's Default puts it, at every depth:
+#   bazel run //lib/examples:ex_start
+rust_binary(
+    name = "ex_start",
+    srcs = ["ex_start.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A loop whose only wait is a channel's:  bazel run //lib/examples:ex_chanwait
+rust_binary(
+    name = "ex_chanwait",
+    srcs = ["ex_chanwait.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A reset drops a memory's write and keeps its words:  bazel run //lib/examples:ex_rstmem
+rust_binary(
+    name = "ex_rstmem",
+    srcs = ["ex_rstmem.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A unit that answers its own reset writes its memory under it:
+#   bazel run //lib/examples:ex_rstmemown
+rust_binary(
+    name = "ex_rstmemown",
+    srcs = ["ex_rstmemown.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A reset empties the channel between two units:  bazel run //lib/examples:ex_flush
+rust_binary(
+    name = "ex_flush",
+    srcs = ["ex_flush.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# Whether a receive took something:  bazel run //lib/examples:ex_recv_some
+rust_binary(
+    name = "ex_recv_some",
+    srcs = ["ex_recv_some.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A unit that answers the reset itself:  bazel run //lib/examples:ex_ownrst
+rust_binary(
+    name = "ex_ownrst",
+    srcs = ["ex_ownrst.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A unit's own reset, and its check only out of it:  bazel run //lib/examples:ex_rstcheck
+rust_binary(
+    name = "ex_rstcheck",
+    srcs = ["ex_rstcheck.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A unit between two channels, lowered:  bazel run //lib/examples:ex_stage
+rust_binary(
+    name = "ex_stage",
+    srcs = ["ex_stage.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A compound value in a waveform:  bazel run //lib/examples:ex_packet
+rust_binary(
+    name = "ex_packet",
+    srcs = ["ex_packet.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# An ALU, lowered:  bazel run //lib/examples:ex_alu
+rust_binary(
+    name = "ex_alu",
+    srcs = ["ex_alu.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The operators, lowered:  bazel run //lib/examples:ex_ops
+rust_binary(
+    name = "ex_ops",
+    srcs = ["ex_ops.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# `if` in a lowered loop:  bazel run //lib/examples:ex_if
+rust_binary(
+    name = "ex_if",
+    srcs = ["ex_if.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A register read in place:  bazel run //lib/examples:ex_inplace
+rust_binary(
+    name = "ex_inplace",
+    srcs = ["ex_inplace.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The drives of one struct, named once:  bazel run //lib/examples:ex_with
+rust_binary(
+    name = "ex_with",
+    srcs = ["ex_with.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A FIFO with a channel at each end:  bazel run //lib/examples:ex_queue
+rust_binary(
+    name = "ex_queue",
+    srcs = ["ex_queue.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The same station written by hand in Verilog, as a unit.
+verilog_unit(
+    name = "station_verilog",
+    src = "station.v",
+    top = "station_v",
+)
+
+# A reservation station, beside its Verilog:
+#   bazel run //lib/examples:ex_station
+rust_binary(
+    name = "ex_station",
+    srcs = ["ex_station.rs"],
+    edition = "2021",
+    deps = [
+        ":station_verilog",
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# An ALU as a stream, its results out of order: the unit, and its run
+# on its own, lowered:  bazel run //lib/examples:ex_stream_alu
+rust_library(
+    name = "stream_alu",
+    srcs = ["stream_alu.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+rust_binary(
+    name = "ex_stream_alu",
+    srcs = ["ex_stream_alu.rs"],
+    edition = "2021",
+    deps = [
+        ":stream_alu",
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A unit of units: a station feeding the stream ALU, lowered whole:
+#   bazel run //lib/examples:ex_compose
+rust_binary(
+    name = "ex_compose",
+    srcs = ["ex_compose.rs"],
+    edition = "2021",
+    deps = [
+        ":stream_alu",
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# Unregistered channels (issue 1293): a chain of three stages, its
+# inner channels registered and then unregistered:
+#   bazel run //lib/examples:ex_unreg
+rust_binary(
+    name = "ex_unreg",
+    srcs = ["ex_unreg.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# What #[unregistered] refuses (issue 1293): a ring of wires, at the
+# lowering, and a receiver joined before its sender, in the run.
+rust_test(
+    name = "unreg_test",
+    srcs = ["unreg_test.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# What the lowering refuses of a memory no block RAM can hold (issue
+# 1285): two reads beside a write, two writes; and what it lowers.
+rust_test(
+    name = "mem_ports_test",
+    srcs = ["mem_ports_test.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# Two clocks in one netlist, checked against one run: a counter on
+# each, and a parent that holds both. The test of issue 131:
+#   bazel run //lib/examples:ex_twoclock
+rust_binary(
+    name = "ex_twoclock",
+    srcs = ["ex_twoclock.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# Two clocks, the slow child first, so the netlist names `slow` before
+# `clk`: a port on `clk` is still replayed on `clk` (issue 888):
+#   bazel run //lib/examples:ex_slowfirst
+rust_binary(
+    name = "ex_slowfirst",
+    srcs = ["ex_slowfirst.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A foreign module inside a netlist: a hand-written module, with a
+# parameter, a clock pin and an inout, instantiated by a unit of units:
+#   bazel run //lib/examples:ex_blackbox
+rust_binary(
+    name = "ex_blackbox",
+    srcs = ["ex_blackbox.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A module written by hand, in both languages, for a unit of units to
+# instantiate: the source the simulations of its netlist need.
+exports_files([
+    "blinker.v",
+    "blinker.vhd",
+])
+
+# An SPI master on AXI-Lite, against a model of a flash chip:
+#   bazel run //lib/examples:ex_spi
+rust_binary(
+    name = "ex_spi",
+    srcs = ["ex_spi.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The system control block: identity, reset cause and a soft reset:
+#   bazel run //lib/examples:ex_syscon
+rust_binary(
+    name = "ex_syscon",
+    srcs = ["ex_syscon.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A watchdog timer behind AXI-Lite:
+#   bazel run //lib/examples:ex_wdog
+rust_binary(
+    name = "ex_wdog",
+    srcs = ["ex_wdog.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# General purpose pins behind AXI-Lite, with an interrupt:
+#   bazel run //lib/examples:ex_gpio
+# One thing run twice and compared:  bazel run //lib/examples:ex_redundant
+rust_binary(
+    name = "ex_redundant",
+    srcs = ["ex_redundant.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A register map declared once:  bazel run //lib/examples:ex_regmap
+rust_binary(
+    name = "ex_regmap",
+    srcs = ["ex_regmap.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The SD host moving blocks through memory, back to back:
+#   bazel run //lib/examples:ex_sddma
+rust_binary(
+    name = "ex_sddma",
+    srcs = ["ex_sddma.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# An SD card host, against a model card:  bazel run //lib/examples:ex_sd
+rust_binary(
+    name = "ex_sd",
+    srcs = ["ex_sd.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# An entropy source:  bazel run //lib/examples:ex_trng
+rust_binary(
+    name = "ex_trng",
+    srcs = ["ex_trng.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The entropy source's adaptive proportion test, tripped by a biased
+# source (issue 918):  bazel run //lib/examples:ex_trng_apt
+rust_binary(
+    name = "ex_trng_apt",
+    srcs = ["ex_trng_apt.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A trace buffer read out after a halt:  bazel run //lib/examples:ex_tracer
+rust_binary(
+    name = "ex_tracer",
+    srcs = ["ex_tracer.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The configuration flash through STARTUPE2, the master and the window
+# on one chip:  bazel run //lib/examples:ex_cfgflash
+rust_binary(
+    name = "ex_cfgflash",
+    srcs = ["ex_cfgflash.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A flash read as memory:  bazel run //lib/examples:ex_flashwin
+rust_binary(
+    name = "ex_flashwin",
+    srcs = ["ex_flashwin.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A peripheral written in software:  bazel run //lib/examples:ex_remote
+rust_binary(
+    name = "ex_remote",
+    srcs = ["ex_remote.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+# One word behind two AXI-Lite links, each taken as one port:
+#   bazel run //lib/examples:ex_bundle
+rust_binary(
+    name = "ex_bundle",
+    srcs = ["ex_bundle.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+
+# Four pulse width modulated outputs:  bazel run //lib/examples:ex_pwm
+rust_binary(
+    name = "ex_pwm",
+    srcs = ["ex_pwm.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+rust_binary(
+    name = "ex_gpio",
+    srcs = ["ex_gpio.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A unit's ports as named structs, an interface role among them:
+#   bazel run //lib/examples:ex_ports
+rust_binary(
+    name = "ex_ports",
+    srcs = ["ex_ports.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A memory, lowered:  bazel run //lib/examples:ex_mem
+rust_binary(
+    name = "ex_mem",
+    srcs = ["ex_mem.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# An immediate decoder, lowered:  bazel run //lib/examples:ex_imm
+rust_binary(
+    name = "ex_imm",
+    srcs = ["ex_imm.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# An array of registers, lowered:  bazel run //lib/examples:ex_regs
+rust_binary(
+    name = "ex_regs",
+    srcs = ["ex_regs.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# An array of child units, lowered:  bazel run //lib/examples:ex_lanes
+rust_binary(
+    name = "ex_lanes",
+    srcs = ["ex_lanes.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A lattice of network nodes, lowered:  bazel run //lib/examples:ex_mesh
+rust_binary(
+    name = "ex_mesh",
+    srcs = ["ex_mesh.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A multiply-accumulate, lowered:  bazel run //lib/examples:ex_mul
+rust_binary(
+    name = "ex_mul",
+    srcs = ["ex_mul.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A value wider than 128 bits, lowered:  bazel run //lib/examples:ex_wide
+rust_binary(
+    name = "ex_wide",
+    srcs = ["ex_wide.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The channel as hardware, a buffer of two:  bazel run //lib/examples:ex_buffer
+rust_binary(
+    name = "ex_buffer",
+    srcs = ["ex_buffer.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# An internal signal kept as a wire, seen:  bazel run //lib/examples:ex_wire
+rust_binary(
+    name = "ex_wire",
+    srcs = ["ex_wire.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A function under #[lower], inlined:  bazel run //lib/examples:ex_fn
+rust_binary(
+    name = "ex_fn",
+    srcs = ["ex_fn.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# Multiplication, remainder and negation (issue 496):  bazel run //lib/examples:ex_arith
+rust_binary(
+    name = "ex_arith",
+    srcs = ["ex_arith.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# An `if` and a `match` that yield a value (issue 496):  bazel run //lib/examples:ex_valif
+rust_binary(
+    name = "ex_valif",
+    srcs = ["ex_valif.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# Ranges and `contains` (issue 496):  bazel run //lib/examples:ex_range
+rust_binary(
+    name = "ex_range",
+    srcs = ["ex_range.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# `as` in a lowered body (issue 496):  bazel run //lib/examples:ex_cast
+rust_binary(
+    name = "ex_cast",
+    srcs = ["ex_cast.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# An array of ports and a loop over it (issue 500):  bazel run //lib/examples:ex_loop
+rust_binary(
+    name = "ex_loop",
+    srcs = ["ex_loop.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A lowered function on a literal (issue 555):  bazel run //lib/examples:ex_litfn
+rust_binary(
+    name = "ex_litfn",
+    srcs = ["ex_litfn.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# Every way a `let` can want a taken name:  bazel run //lib/examples:ex_names
+rust_binary(
+    name = "ex_names",
+    srcs = ["ex_names.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A whole link made in one line:  bazel run //lib/examples:ex_link
+rust_binary(
+    name = "ex_link",
+    srcs = ["ex_link.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A struct of ports holding structs of ports:  bazel run //lib/examples:ex_nested
+rust_binary(
+    name = "ex_nested",
+    srcs = ["ex_nested.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A side from another crate passed whole:  bazel run //lib/examples:ex_side
+rust_binary(
+    name = "ex_side",
+    srcs = ["ex_side.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A child's input held at a constant:  bazel run //lib/examples:ex_tie
+rust_binary(
+    name = "ex_tie",
+    srcs = ["ex_tie.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A process of several waits, a state machine:  bazel run //lib/examples:ex_seq
+rust_binary(
+    name = "ex_seq",
+    srcs = ["ex_seq.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# An offer that completes on the edge it is taken:  bazel run //lib/examples:ex_put
+rust_binary(
+    name = "ex_put",
+    srcs = ["ex_put.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A check, an assumption and a cover point:  bazel run //lib/examples:ex_formal
+rust_binary(
+    name = "ex_formal",
+    srcs = ["ex_formal.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A for of a constant count that waits, a state per turn:  bazel run //lib/examples:ex_serial
+rust_binary(
+    name = "ex_serial",
+    srcs = ["ex_serial.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A wait under if, a state with a way around it:  bazel run //lib/examples:ex_frame
+rust_binary(
+    name = "ex_frame",
+    srcs = ["ex_frame.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# An output held across the states of a process:  bazel run //lib/examples:ex_hold
+rust_binary(
+    name = "ex_hold",
+    srcs = ["ex_hold.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# Helpers from another file, with structs:  bazel run //lib/examples:ex_helpers
+rust_binary(
+    name = "ex_helpers",
+    srcs = [
+        "ex_helpers.rs",
+        "helpers/codes.rs",
+    ],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A counted loop bounded by a register:  bazel run //lib/examples:ex_repeat
+rust_binary(
+    name = "ex_repeat",
+    srcs = ["ex_repeat.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# An address map as a trait constant:  bazel run //lib/examples:ex_map
+rust_binary(
+    name = "ex_map",
+    srcs = ["ex_map.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# Names a target reserves, escaped:  bazel run //lib/examples:ex_reserved
+rust_binary(
+    name = "ex_reserved",
+    srcs = ["ex_reserved.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A field the netlist names differently:  bazel run //lib/examples:ex_rename
+rust_binary(
+    name = "ex_rename",
+    srcs = ["ex_rename.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The stage's own Verilog, from its lowering, made a unit again by
+# Verilator; the example co-runs the two:  bazel run //lib/examples:ex_foreign
+genrule(
+    name = "stage_v",
+    outs = ["stage.v"],
+    cmd = "TXHDL_VERILOG=$@ $(location :ex_stage) > /dev/null",
+    tools = [":ex_stage"],
+)
+
+verilog_unit(
+    name = "stage_verilog",
+    src = ":stage.v",
+    top = "stage",
+)
+
+# The stage's VHDL, the same way, with nvc as a child process.
+genrule(
+    name = "stage_vhd",
+    outs = [
+        "stage.vhd",
+        "stage.vhd.ports",
+    ],
+    cmd = "TXHDL_VHDL=$(location stage.vhd) $(location :ex_stage) > /dev/null",
+    tools = [":ex_stage"],
+)
+
+vhdl_unit(
+    name = "stage_vhdl",
+    src = ":stage.vhd",
+    entity = "stage",
+)
+
+rust_binary(
+    name = "ex_foreign",
+    srcs = ["ex_foreign.rs"],
+    edition = "2021",
+    deps = [
+        ":stage_verilog",
+        ":stage_vhdl",
+        "//lib:txhdl",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A tap between channels, sends under when!:  bazel run //lib/examples:ex_tap
+rust_binary(
+    name = "ex_tap",
+    srcs = ["ex_tap.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# Two processes, one per edge, lowered:  bazel run //lib/examples:ex_twoproc
+rust_binary(
+    name = "ex_twoproc",
+    srcs = ["ex_twoproc.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# An AXI4 link, peer to peer, out of order:
+#   bazel run //lib/examples:ex_axi
+rust_binary(
+    name = "ex_axi",
+    srcs = ["ex_axi.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# An AXI router, one host and three peripherals:
+#   bazel run //lib/examples:ex_axi_router
+rust_binary(
+    name = "ex_axi_router",
+    srcs = ["ex_axi_router.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# An AXI4 arbiter, two hosts sharing one memory:
+#   bazel run //lib/examples:ex_axi_arbiter
+rust_binary(
+    name = "ex_axi_arbiter",
+    srcs = ["ex_axi_arbiter.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# An AXI4 to AXI-Lite bridge, two register banks behind it:
+#   bazel run //lib/examples:ex_axi_lite
+rust_binary(
+    name = "ex_axi_lite",
+    srcs = ["ex_axi_lite.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A platform-level interrupt controller of three sources, claimed and
+# completed by a host on its AXI-Lite link:
+#   bazel run //lib/examples:ex_plic
+rust_binary(
+    name = "ex_plic",
+    srcs = ["ex_plic.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# Sv32 translation as a kernel meets it: page tables behind the walker,
+# a fetch that walks once and then hits, faults that the kernel answers,
+# and the data port walked first:
+#   bazel run //lib/examples:ex_mmu
+rust_binary(
+    name = "ex_mmu",
+    srcs = ["ex_mmu.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A host on AXI4 pins, joined to the link's channels, with a RAM behind:
+#   bazel run //lib/examples:ex_axi_pins
+rust_binary(
+    name = "ex_axi_pins",
+    srcs = ["ex_axi_pins.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The link's peripheral end on a peripheral's AXI4 pins, the mirror of
+# ex_axi_pins (issue 1023):
+#   bazel run //lib/examples:ex_axi_per_pins
+rust_binary(
+    name = "ex_axi_per_pins",
+    srcs = ["ex_axi_per_pins.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# An I2C master on AXI-Lite, with a device on the two lines:
+#   bazel run //lib/examples:ex_i2c
+rust_binary(
+    name = "ex_i2c",
+    srcs = ["ex_i2c.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# An MDIO master on AXI-Lite, with a PHY on the line:
+#   bazel run //lib/examples:ex_mdio
+rust_binary(
+    name = "ex_mdio",
+    srcs = ["ex_mdio.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The simplest AXI peripheral, a register of one word, as hardware:
+#   bazel run //lib/examples:ex_axi_reg
+rust_binary(
+    name = "ex_axi_reg",
+    srcs = ["ex_axi_reg.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# An AXI link reaching a Wishbone peripheral through the bridge:
+#   bazel run //lib/examples:ex_axi_wb
+rust_binary(
+    name = "ex_axi_wb",
+    srcs = ["ex_axi_wb.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# Ethernet behind AXI-Lite, the wire looped back:
+#   bazel run //lib/examples:ex_eth
+rust_binary(
+    name = "ex_eth",
+    srcs = ["ex_eth.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# Video for an HDMI encoder chip, behind AXI-Lite, with its I2C setup:
+#   bazel run //lib/examples:ex_hdmi
+rust_binary(
+    name = "ex_hdmi",
+    srcs = ["ex_hdmi.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# Accepting many AXI transactions and forwarding them for processing:
+#   bazel run //lib/examples:ex_axi_serve
+rust_binary(
+    name = "ex_axi_serve",
+    srcs = ["ex_axi_serve.rs"],
+    edition = "2021",
+    deps = [
+        "//lib:txhdl",
+        "//lib/parts:txhdl_parts",
+    ],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The cheat sheet's counter:  bazel run //lib/examples:ex_cheat
+rust_binary(
+    name = "ex_cheat",
+    srcs = ["ex_cheat.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# A waveform:  bazel run //lib/examples:ex_trace > counter.vcd
+rust_binary(
+    name = "ex_trace",
+    srcs = ["ex_trace.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The files the documents include verbatim. The filegroup hands them
+# to the document build and the formatter check below reads the same
+# list, so a new example joins both at once.
+SOURCES = [n + ".rs" for n in EXAMPLES] + [
+        "ex_clock.rs",
+        "ex_config.rs",
+        "ex_blinky.rs",
+        "ex_case.rs",
+        "ex_fifo.rs",
+        "ex_arbiter.rs",
+        "ex_trace.rs",
+        "ex_join.rs",
+        "ex_inflight.rs",
+        "ex_netlist.rs",
+        "ex_edges.rs",
+        "ex_lower.rs",
+        "ex_cdc.rs",
+        "ex_dtm.rs",
+        "ex_dma.rs",
+        "ex_dmaw.rs",
+        "ex_dmawb.rs",
+        "ex_ethdma.rs",
+        "ex_ethshare.rs",
+        "ex_framelen.rs",
+        "ex_ethslots.rs",
+        "ex_scanout.rs",
+        "ex_scanpair.rs",
+        "ex_scanvideo.rs",
+        "ex_reset.rs",
+        "ex_ownrst.rs",
+        "ex_rstmem.rs",
+        "ex_rstmemown.rs",
+        "ex_flush.rs",
+        "ex_recv_some.rs",
+        "ex_start.rs",
+        "ex_chanwait.rs",
+        "ex_rstcheck.rs",
+        "ex_stage.rs",
+        "ex_packet.rs",
+        "ex_cheat.rs",
+        "ex_alu.rs",
+        "ex_ops.rs",
+        "ex_if.rs",
+        "ex_inplace.rs",
+        "ex_with.rs",
+        "ex_queue.rs",
+        "ex_station.rs",
+        "stream_alu.rs",
+        "ex_stream_alu.rs",
+        "ex_compose.rs",
+        "ex_unreg.rs",
+        "ex_twoclock.rs",
+        "ex_slowfirst.rs",
+        "ex_blackbox.rs",
+        "blinker.v",
+        "blinker.vhd",
+        "ex_gpio.rs",
+        "ex_cfgflash.rs",
+        "ex_flashwin.rs",
+        "ex_pwm.rs",
+        "ex_bundle.rs",
+        "ex_remote.rs",
+        "ex_redundant.rs",
+        "ex_regmap.rs",
+        "ex_sd.rs",
+        "ex_sddma.rs",
+        "ex_tracer.rs",
+        "ex_trng.rs",
+        "ex_trng_apt.rs",
+        "ex_spi.rs",
+        "ex_syscon.rs",
+        "ex_wdog.rs",
+        "ex_ports.rs",
+        "ex_axi.rs",
+        "ex_axi_serve.rs",
+        "ex_axi_arbiter.rs",
+        "ex_axi_router.rs",
+        "ex_axi_lite.rs",
+        "ex_i2c.rs",
+        "ex_mdio.rs",
+        "ex_axi_per_pins.rs",
+        "ex_axi_pins.rs",
+        "ex_plic.rs",
+        "ex_mmu.rs",
+        "ex_eth.rs",
+        "ex_hdmi.rs",
+        "ex_axi_wb.rs",
+        "ex_axi_reg.rs",
+        "station.v",
+        "ex_mem.rs",
+        "ex_imm.rs",
+        "ex_twoproc.rs",
+        "ex_mul.rs",
+        "ex_lanes.rs",
+        "ex_mesh.rs",
+        "ex_regs.rs",
+        "ex_wide.rs",
+        "ex_tap.rs",
+        "ex_buffer.rs",
+        "ex_wire.rs",
+        "ex_fn.rs",
+        "ex_litfn.rs",
+        "ex_arith.rs",
+        "ex_valif.rs",
+        "ex_range.rs",
+        "ex_cast.rs",
+        "ex_loop.rs",
+        "ex_names.rs",
+        "ex_reserved.rs",
+        "ex_tie.rs",
+        "ex_side.rs",
+        "ex_nested.rs",
+        "ex_link.rs",
+        "ex_seq.rs",
+        "ex_put.rs",
+        "ex_formal.rs",
+        "ex_serial.rs",
+        "ex_frame.rs",
+        "ex_hold.rs",
+        "ex_helpers.rs",
+        "ex_repeat.rs",
+        "ex_map.rs",
+        "ex_rename.rs",
+        "ex_foreign.rs",
+]
+
+filegroup(
+    name = "sources",
+    # A module of ex_helpers, in a file of its own because that is what
+    # the example shows (issue 504). It is a source of that target and
+    # not a target, so it is here rather than in SOURCES, which names
+    # a target by each file; fmt_test checks it through ex_helpers.
+    srcs = SOURCES + ["helpers/codes.rs"],
+)
+
+# The documents set source at 80 columns and never break a line, so an
+# example wider than that overflows its frame. //:fmt_test checks the
+# crates but not this package, which is the one place the width is
+# load bearing (issue 281), so the check lives here, beside the list it
+# reads. Every one of those files is a target of its own named after
+# it; the three foreign wrappers have no Rust source and are not here.
+rustfmt_test(
+    name = "fmt_test",
+    targets = [":" + s[:-3] for s in SOURCES if s.endswith(".rs")],
+)
+
+# A call of a function under #[lower] whose argument is worked out as
+# `lowered` runs: a `let mut`, or a port a loop's index names. The
+# call's wires are added where the call is, not with the unit's own
+# wires, which are written before those values exist (issue 1186).
+rust_test(
+    name = "inline_run_test",
+    srcs = ["inline_run_test.rs"],
+    edition = "2021",
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)

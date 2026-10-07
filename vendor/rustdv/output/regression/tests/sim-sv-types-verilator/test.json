@@ -1,0 +1,20 @@
+{
+  "comment": "Verilator real/string access, unpacked struct/union members, write scheduling and ReadOnly guards.",
+  "cmd": ["bash", "rustdv/framework-tests/run.sh", "sv_types_"],
+  "cwd": ".",
+  "skip_if_missing": "verilator",
+  "env": { "SIM": "verilator" },
+  "expect_exit": 0,
+  "timeout": 600,
+  "expect_in_output": [
+    "rustdv: found 6 test(s)",
+    "sv_types_scalar_round_trip PASSED",
+    "sv_types_aggregate_members PASSED",
+    "sv_types_real_scheduled_readonly_rejected PASSED",
+    "sv_types_real_immediate_readonly_rejected PASSED",
+    "sv_types_string_scheduled_readonly_rejected PASSED",
+    "sv_types_string_immediate_readonly_rejected PASSED",
+    "REGRESSION: PASS",
+    "RTL FINAL: PASS"
+  ]
+}

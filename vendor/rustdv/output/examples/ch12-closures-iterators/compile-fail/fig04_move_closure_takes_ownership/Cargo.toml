@@ -1,0 +1,6 @@
+[package]
+name = "ch12_closures_iterators_fig04"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]

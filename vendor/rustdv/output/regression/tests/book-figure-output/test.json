@@ -1,0 +1,12 @@
+{
+  "comment": "Every output block the manuscript prints for a goldened figure must be what the program prints. Covers chapters past Part I whose figures are standalone bins — ch35 today. Those figures run in the examples suite against goldens, which proves the program still prints what was blessed; nothing proved the book still quotes it. custom/book-listings compares code only, and verify-transcripts.sh matches simulator lines shaped '12.34ns INFO ...', so a hand-edited println! output block in the manuscript drifted silently between them. Mutation-checked in both directions: editing the chapter fails it, editing a golden fails it. No simulator, no cargo.",
+  "cmd": [
+    "python3",
+    "output/regression/verify-figure-output.py"
+  ],
+  "cwd": ".",
+  "expect_exit": 0,
+  "expect_in_output": [
+    "manuscript output blocks vs goldens:"
+  ]
+}

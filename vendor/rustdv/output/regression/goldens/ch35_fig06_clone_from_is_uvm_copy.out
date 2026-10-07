@@ -1,0 +1,4 @@
+before: Name: , ID: 0 Grades: []
+after:  Name: Mary, ID: 33 Grades: [97, 82]
+-- and clone() is clone(): a new one, returned --
+fresh:  Name: Mary, ID: 33 Grades: [97, 82]

@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+
+config SOC_VRETENO
+	bool
+	select SOC_FAMILY_HDLFACTORY
+	help
+	  The Vreteno RV32IMAC core with its bus, its timer and its
+	  interrupt controller.
+
+	  What the core is, rather than how it is configured, is said
+	  next door in `Kconfig`: the hardware model wants this file to
+	  name the SoC and its family and little else.
+
+config SOC
+	default "vreteno" if SOC_VRETENO

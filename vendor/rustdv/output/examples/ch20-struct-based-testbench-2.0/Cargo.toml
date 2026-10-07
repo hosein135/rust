@@ -1,0 +1,12 @@
+[package]
+name = "ch20_struct_based_testbench_2_0"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/ch20_struct_based_testbench_2_0.rs"
+
+[dependencies]
+rustdv = { path = "../../../rustdv" }
+tinyalu_utils = { path = "../tinyalu-utils" }

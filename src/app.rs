@@ -8,8 +8,9 @@ use crate::verilog_highlighter::{
     self, Settings as VerilogHighlightSettings, VerilogHighlighter,
 };
 use crate::project::{
-    collect_dir_paths, find_first_verilog, is_wave_path, load_file, locate_samples_dir, save_file,
-    FileView, IdeProject, OpenFile, TreeNode,
+    collect_dir_paths, find_first_verilog, initial_editor_files, is_rust_project, is_wave_path,
+    load_file, locate_full_adder_sample, locate_samples_dir, save_file, FileView, IdeProject,
+    OpenFile, TreeNode,
 };
 use crate::sim::{self, SimResult};
 use crate::templates::{self, counter_example};
@@ -234,7 +235,11 @@ impl VerilogIde {
             Message::FilePicked(_) => Task::none(),
             Message::CreateSample => {
                 self.menu_open = None;
-                if let Some(samples) = locate_samples_dir() {
+                if let Some(sample) = locate_full_adder_sample() {
+                    self.open_project(sample);
+                    self.log("Opened the Rust full-adder sample (adder.rs + full_adder_tb.rs).\n");
+                    editor::scroll_to_y(0.0)
+                } else if let Some(samples) = locate_samples_dir() {
                     self.open_project(samples);
                     self.log("Opened bundled sample project (samples/).\n");
                     editor::scroll_to_y(0.0)
@@ -383,7 +388,14 @@ impl VerilogIde {
             Message::ShowNewFile => {
                 self.menu_open = None;
                 self.dialog = Some(Dialog::NewFile {
-                    name: "untitled.v".into(),
+                    name: if self
+                        .project_root()
+                        .is_some_and(|root| is_rust_project(&root))
+                    {
+                        "unit.rs".into()
+                    } else {
+                        "untitled.v".into()
+                    },
                 });
                 Task::none()
             }
@@ -468,8 +480,11 @@ impl VerilogIde {
                     }
                 }
                 if !result.ok {
-                    self.problems
-                        .push("xezim simulation failed. See OUTPUT.".into());
+                    self.problems.push(if result.expect_wave {
+                        "xezim simulation failed. See OUTPUT.".into()
+                    } else {
+                        "Rust testbench failed. See OUTPUT.".into()
+                    });
                     self.status = "Simulation failed".into();
                 } else if let Some(vcd) = result.vcd {
                     self.status = format!("Wrote {}", vcd.display());
@@ -479,12 +494,14 @@ impl VerilogIde {
                         let load = self.open_path(&vcd);
                         return Task::batch([load, editor::scroll_to_y(0.0)]);
                     }
-                } else {
+                } else if result.expect_wave {
                     self.status = "Simulation finished (no VCD)".into();
                     self.problems.push(
                         "Simulation finished but no .vcd was produced. Add $dumpfile / $dumpvars to the testbench."
                             .into(),
                     );
+                } else {
+                    self.status = "Rust testbench passed".into();
                 }
                 Task::none()
             }
@@ -562,6 +579,23 @@ impl VerilogIde {
             return Task::none();
         };
         let active = self.active_path().cloned();
+        if is_rust_project(&root) && find_first_verilog(&root).is_none() {
+            match sim::prepare_rust_job(&root) {
+                Ok(job) => {
+                    self.sim_running = true;
+                    self.bottom = BottomTab::Console;
+                    self.bottom_visible = true;
+                    self.status = "Running Rust testbench…".into();
+                    self.log("Compiling the TxHDL unit and rustdv testbench, then writing a VCD…\n");
+                    self.log(&format!("{}\n", job.command_preview()));
+                    return Task::perform(sim::run_rust_job_async(job), Message::SimFinished);
+                }
+                Err(e) => {
+                    self.log_err(&e);
+                    return Task::none();
+                }
+            }
+        }
         match sim::prepare_job(&root, active.as_deref(), &self.open) {
             Ok(job) => {
                 self.sim_running = true;
@@ -629,8 +663,8 @@ impl VerilogIde {
         self.load_active_into_editor();
 
         if let Some(root) = self.project.as_ref().map(|p| p.root.clone()) {
-            if let Some(first) = find_first_verilog(&root) {
-                let _ = self.open_path(&first);
+            for path in initial_editor_files(&root) {
+                let _ = self.open_path(&path);
             }
         }
     }
@@ -849,20 +883,35 @@ impl VerilogIde {
             self.log_err("Open a folder first (File → Open Folder).");
             return;
         };
-        let path = root.join(name);
+        let dir = if templates::is_rust_filename(name)
+            && root.join("src").is_dir()
+            && !name.contains(['/', '\\'])
+        {
+            root.join("src")
+        } else {
+            root
+        };
+        let path = dir.join(name);
         if path.exists() {
             self.log_err(&format!("Already exists: {}", path.display()));
             return;
         }
-        let stem = name
-            .trim_end_matches(".sv")
-            .trim_end_matches(".v")
-            .trim_end_matches(".SV")
-            .trim_end_matches(".V");
-        let body = if templates::is_testbench_filename(name) {
-            templates::testbench_template(stem)
+        let stem = {
+            let lower = name.to_ascii_lowercase();
+            lower
+                .trim_end_matches(".rs")
+                .trim_end_matches(".sv")
+                .trim_end_matches(".v")
+                .to_string()
+        };
+        let body = if templates::is_rust_filename(name) && templates::is_testbench_filename(name) {
+            templates::rust_testbench_template(&stem)
+        } else if templates::is_rust_filename(name) {
+            templates::rust_module_template(&stem)
+        } else if templates::is_testbench_filename(name) {
+            templates::testbench_template(&stem)
         } else if is_verilog_name(name) {
-            templates::module_template(stem)
+            templates::module_template(&stem)
         } else {
             String::new()
         };
@@ -873,6 +922,15 @@ impl VerilogIde {
         self.refresh_tree();
         let _ = self.open_path(&path);
         self.log(&format!("Created file {}\n", path.display()));
+        if templates::is_rust_filename(name) {
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unit");
+            self.log(&format!(
+                "If this is a new module, add `mod {stem};` in src/lib.rs so Run compiles it. The full-adder sample already includes adder and full_adder_tb.\n"
+            ));
+        }
     }
 
     fn create_folder(&mut self, name: &str) {
@@ -1240,7 +1298,7 @@ impl VerilogIde {
             return container(
                 column![
                     text("Verilog IDE").size(32).color(FG_TEXT),
-                    text("Open a folder, then ▶ Run (F5). Click a .vcd in Waveform mode to view traces.")
+                    text("Open a folder, then ▶ Run (F5). The full-adder sample is Rust: adder.rs and full_adder_tb.rs.")
                         .size(14)
                         .color(FG_MUTED),
                     Space::new(Length::Shrink, Length::Fixed(16.0)),
@@ -1300,6 +1358,10 @@ impl VerilogIde {
                         .active_path()
                         .map(|path| verilog_highlighter::syntax_enabled_for_path(path.as_path()))
                         .unwrap_or(true),
+                    rust: self
+                        .active_path()
+                        .map(|path| verilog_highlighter::rust_syntax_for_path(path.as_path()))
+                        .unwrap_or(false),
                 },
                 verilog_highlighter::format_highlight,
             );
@@ -1542,8 +1604,9 @@ impl VerilogIde {
         } else {
             column![
                 text("About Verilog IDE").size(14),
-                text("Desktop IDE for Verilog HDL and testbenches."),
-                text("Run ▶ uses the bundled xezim simulator to write a .vcd waveform."),
+                text("Desktop IDE for Verilog and Rust HDL, with testbenches in either language."),
+                text("Run on a Verilog folder uses xezim and writes a .vcd. Run on the Rust full-adder sample compiles the TxHDL unit and the rustdv testbench, writes full_adder.vcd, and opens it."),
+                text("New File: use a .rs name for a TxHDL unit, or *_tb.rs for a rustdv testbench. .v / .sv stay Verilog."),
                 text("View → Waveform opens .vcd files with wellen (Surfer). View → Text Editor shows the dump as text."),
                 button("Close").on_press(Message::DialogCancel),
             ]
@@ -1876,7 +1939,7 @@ async fn pick_file(title: &str) -> Result<Option<PathBuf>, DialogError> {
 
     let picked = rfd::AsyncFileDialog::new()
         .set_title(&title)
-        .add_filter("Verilog / text", &["v", "sv", "vh", "svh", "txt", "md"])
+        .add_filter("HDL / text", &["rs", "v", "sv", "vh", "svh", "txt", "md"])
         .add_filter("Waveform", &["vcd", "fst", "ghw"])
         .pick_file()
         .await
@@ -1926,7 +1989,7 @@ fn pick_file_zenity(title: &str) -> Result<Option<PathBuf>, DialogError> {
             "--title",
             title,
             "--file-filter",
-            "Verilog | *.v *.sv *.vh *.svh",
+            "HDL | *.rs *.v *.sv *.vh *.svh",
             "--file-filter",
             "Waveform | *.vcd *.fst *.ghw",
             "--file-filter",

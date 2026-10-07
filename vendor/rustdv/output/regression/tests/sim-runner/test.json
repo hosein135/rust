@@ -1,0 +1,8 @@
+{
+  "comment": "Targeted simulator test (test-plan §3.2): the harness itself — timeouts, expect_error, per-test freshness of the ConfigDb and of the logging config — plus a check of the xUnit XML the runner writes, which nothing inside the run can read. The wrapper sets RUSTDV_TESTCASE itself. Skips without iverilog.",
+  "cmd": ["bash", "rustdv/framework-tests/check_xunit.sh"],
+  "cwd": ".",
+  "skip_if_missing": "iverilog",
+  "expect_exit": 0,
+  "expect_in_output": ["REGRESSION: PASS", "XUNIT: PASS"]
+}

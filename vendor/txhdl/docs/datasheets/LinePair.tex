@@ -1,0 +1,132 @@
+% SPDX-License-Identifier: Apache-2.0
+% covers: LinePair
+\datasheet{LinePair}{The pixel-clock end of a scanout from memory: two
+lines, one shown while the other fills, each asked for a line ahead.}
+
+\dsfacts{\code{lib/parts/src/scanout.rs}}%
+{\code{txhdl\_parts::scanout::LinePair<LEN, AW, ROWS, TOTAL, STRIDE, C>}}%
+{\code{//docs:examples}}
+
+\subsection*{Function}
+
+A video peripheral that shows a frame from memory cannot wait for
+memory pixel by pixel: the beam does not stop. \code{LinePair} sits on
+the pixel clock beside the raster and holds two lines. The beam reads
+one while the other fills, and they change places at the start of each
+line. At that start it asks for the line after the one about to be
+shown, so each line has the entire duration of the preceding line to
+arrive. It asks for nothing until \code{show} is high, and then it asks for a
+frame's first line, from the base, before any other. Out of a reset
+the next line's address is zero, and the line there is the boot
+memory's, whose one-beat answer to a burst hung the fetch for good on
+the board (issue 1178). So the picture starts with the first frame
+whose last row begins after \code{show} rises.
+The bus side of the same scanout is \code{ScanFetch}, and between the
+two the request and the words cross clocks through \code{ChanCdc}
+(issue 151).
+
+The frame's base address is a register taken at the vertical sync, so
+a host that draws into one buffer and shows another flips them with
+one write. A column the beam shows before its word has arrived sets
+\code{starved}, a sticky bit that \code{clear} resets, so a run can
+show that no line starved. The pair keeps the addresses of the lines
+it has asked for and not had whole, at most four. A line that gets no
+word for two line times in a row sets \code{stuck}, sticky too, and
+puts its address on \code{stuck\_at}, so a fetch that hangs says so
+rather than leaving a black screen and a clear \code{starved}
+(issue 1197).
+
+\subsection*{Parameters}
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}lp{0.68\textwidth}@{}}
+\toprule
+Parameter & Meaning \\
+\midrule
+\code{LEN} & The words in a visible line, at most \code{1 << AW}. \\
+\code{AW} & The width of a column. \\
+\code{ROWS} & The visible rows of a frame. \\
+\code{TOTAL} & The rows of a frame, blanking included. \\
+\code{STRIDE} & The bytes from one line's start in memory to the next's. \\
+\code{C} & The pixel clock. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The tables below use \code{LinePair<8, 3, 4, 6, 32, ClkPix>}, the pair
+of \code{ex\_scanpair}: lines of eight words, four visible rows of
+six.
+
+\dstables{LinePair}
+
+\subsection*{Behaviour}
+
+\begin{itemize}
+\item A word is taken whenever one is offered, into the line filling
+at the next column. The pair is what the fetch is backpressured by,
+and a line longer than \code{LEN} loses its tail rather than stalling.
+\item At a line's start (\code{line} high) the two lines change
+places, and the line filling's count starts again. A word taken in
+that same cycle counts in the line just filled.
+\item At a line's start a request goes out on \code{req}, if it has
+room: the address of the line after the one about to be shown. On the
+frame's last row it is the frame's first line, at the base taken at
+the last vertical sync.
+\item While \code{show} is low nothing is asked for. The frame's first
+line is asked for at the start of the frame's last row with
+\code{show} high, and the lines after it only once it has been, so the
+first request after a reset or a hide is always the base's line.
+With \code{show} low the pair disarms: it asks for nothing more, and
+does not set \code{starved}. Shown again, it starts from the base's
+line as out of a reset.
+\item \code{pix} is the word at \code{col} in the line not filling, a
+cycle after \code{col} names it, or \code{LATE}, magenta
+(\code{0x00ff00ff}), if that word has not arrived (issue 1209). No
+picture is drawn in magenta, so a late column shows as itself rather
+than as the word the line before left there.
+\item A word belongs to the line it was asked for, which the lines owed
+say (issue 1233). A line that starts before it has come whole is
+\code{late}, and the rest of its words go into the half the beam
+reads, so its columns fill in as they come. Lines owed whose time has
+passed are counted in \code{behind}, and the rest of their words are
+dropped. Neither lands in the half filling, where the next row would
+show it as its own.
+\item Once the frame's first line has been asked for, a visible column
+at or past the words that line had when it was swapped in sets
+\code{starved}, until \code{clear}.
+\item A line asked for goes after the lines still owed, and no line is
+asked for while four are. A word counts against the oldest owed, and
+that line's last word takes it off.
+\item Two line starts in a row with lines owed and no word come set
+\code{stuck}, and \code{stuck\_at} is the oldest owed line's address
+then; while \code{stuck} is set it does not change. \code{clear}
+clears \code{stuck} and leaves \code{stuck\_at}. The pair goes on
+asking.
+\end{itemize}
+
+\subsection*{Verification}
+
+\begin{itemize}
+\item \code{ex\_scanpair} runs \code{LinePair} on a pixel clock
+unrelated to the bus clock, with \code{ScanFetch}, \code{LineFetch},
+\code{AxiHost}, \code{AxiPer}, a memory and \code{ChanCdc} both ways.
+The memory stalls its beats, standing in for a refresh. Three frames
+with a short stall in every line show every pixel as the word at its
+place and never set \code{starved}; a fourth with one stall longer than
+a line sets it, and it stays set until it is cleared.
+\item \code{//docs:scanpair\_sim\_linepair\_linepair\_tb\_test} and
+\code{//docs:scanpair\_vsim\_linepair\_test} simulate the netlist
+against that run under nvc and Verilator.
+\end{itemize}
+
+\subsection*{Used by}
+
+The example \code{ex\_scanpair}, and \code{ScanVideo}, which the
+flagship holds in its video slot (issue 151).
+
+\subsection*{Limits}
+
+One line a request, and a line is \code{LEN} words; there is no
+horizontal offset or scaling. A column of a line that arrives late
+shows \code{LATE} until its word comes, and \code{starved} says that
+it happened; a line that never comes sets \code{stuck}. It runs on one clock, \code{C}.

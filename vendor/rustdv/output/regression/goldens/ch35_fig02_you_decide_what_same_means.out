@@ -1,0 +1,5 @@
+-- derived: every field must match --
+batman == bruce_wayne? false
+-- written by hand: only the ID counts --
+batman == bruce_wayne? true
+Batman is really Bruce Wayne!

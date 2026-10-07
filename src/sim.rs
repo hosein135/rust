@@ -1,7 +1,7 @@
 //! Simulate Verilog + testbench with the vendored [xezim](https://github.com/aionhw/xezim)
 //! library (`vendor/xezim`) and collect the resulting VCD waveform.
 
-use crate::project::{collect_hdl_sources, OpenFile};
+use crate::project::{collect_hdl_sources, is_rust_project, OpenFile};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -23,6 +23,9 @@ pub struct SimResult {
     pub ok: bool,
     pub log: String,
     pub vcd: Option<PathBuf>,
+    /// Verilog runs are expected to write a VCD. A Rust testbench reports
+    /// pass or fail in the log instead.
+    pub expect_wave: bool,
 }
 
 impl SimJob {
@@ -105,6 +108,7 @@ pub async fn run_job_async(job: SimJob) -> SimResult {
             ok: false,
             log: format!("Simulation task failed: {e}\n"),
             vcd: None,
+            expect_wave: true,
         })
 }
 
@@ -162,6 +166,7 @@ fn run_job(job: &SimJob) -> SimResult {
                 ok: true,
                 log,
                 vcd,
+                expect_wave: true,
             }
         }
         Err(e) => {
@@ -173,9 +178,171 @@ fn run_job(job: &SimJob) -> SimResult {
                 ok: false,
                 log,
                 vcd: None,
+                expect_wave: true,
             }
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct RustJob {
+    pub root: PathBuf,
+    pub manifest: PathBuf,
+}
+
+impl RustJob {
+    pub fn command_preview(&self) -> String {
+        format!(
+            "cargo test --manifest-path {} -- --nocapture",
+            self.manifest.display()
+        )
+    }
+}
+
+/// A Rust HDL + rustdv testbench package (Cargo.toml and a `*_tb.rs`).
+pub fn prepare_rust_job(root: &Path) -> Result<RustJob, String> {
+    if !is_rust_project(root) {
+        return Err(
+            "No Rust testbench. Add a *_tb.rs next to the TxHDL unit, inside a Cargo package."
+                .into(),
+        );
+    }
+    Ok(RustJob {
+        root: root.to_path_buf(),
+        manifest: root.join("Cargo.toml"),
+    })
+}
+
+pub async fn run_rust_job_async(job: RustJob) -> SimResult {
+    tokio::task::spawn_blocking(move || run_rust_job(&job))
+        .await
+        .unwrap_or_else(|e| SimResult {
+            ok: false,
+            log: format!("Rust testbench task failed: {e}\n"),
+            vcd: None,
+            expect_wave: false,
+        })
+}
+
+fn run_rust_job(job: &RustJob) -> SimResult {
+    let mut log = String::new();
+    log.push_str(&format!("cwd: {}\n", job.root.display()));
+    log.push_str(&format!("{}\n", job.command_preview()));
+
+    let Some(cargo) = cargo_program() else {
+        log.push_str("cargo was not found. Install Rust from https://rustup.rs and reopen the IDE.\n");
+        return SimResult {
+            ok: false,
+            log,
+            vcd: None,
+            expect_wave: false,
+        };
+    };
+
+    let vcd_path = job.root.join("full_adder.vcd");
+    let mut cmd = std::process::Command::new(&cargo);
+    cmd.arg("test")
+        .arg("--manifest-path")
+        .arg(&job.manifest)
+        .arg("--")
+        .arg("--nocapture")
+        .current_dir(&job.root)
+        .env("TXHDL_VCD", &vcd_path)
+        .env("PATH", cargo_path_with_bin(std::env::var_os("PATH")));
+    if let Some(toolchain) = windows_gnu_toolchain() {
+        cmd.env("RUSTUP_TOOLCHAIN", toolchain);
+    }
+
+    match cmd.output() {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stdout.is_empty() {
+                log.push_str(&stdout);
+                if !stdout.ends_with('\n') {
+                    log.push('\n');
+                }
+            }
+            if !stderr.is_empty() {
+                log.push_str(&stderr);
+                if !stderr.ends_with('\n') {
+                    log.push('\n');
+                }
+            }
+            let vcd = vcd_path.is_file().then_some(vcd_path);
+            if output.status.success() {
+                match &vcd {
+                    Some(path) => log.push_str(&format!("VCD written: {}\n", path.display())),
+                    None => log.push_str("Rust testbench passed but no .vcd was written.\n"),
+                }
+                log.push_str("Rust testbench: PASS\n");
+            } else {
+                log.push_str("Rust testbench: FAIL\n");
+            }
+            SimResult {
+                ok: output.status.success(),
+                log,
+                vcd,
+                expect_wave: true,
+            }
+        }
+        Err(e) => {
+            log.push_str(&format!("Failed to start cargo: {e}\n"));
+            SimResult {
+                ok: false,
+                log,
+                vcd: None,
+                expect_wave: false,
+            }
+        }
+    }
+}
+
+fn cargo_program() -> Option<PathBuf> {
+    let name = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let exe = dir.join(name);
+            if exe.is_file() {
+                return Some(exe);
+            }
+        }
+    }
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+    let exe = PathBuf::from(home).join(".cargo").join("bin").join(name);
+    exe.is_file().then_some(exe)
+}
+
+fn cargo_path_with_bin(existing: Option<std::ffi::OsString>) -> std::ffi::OsString {
+    let mut paths = Vec::new();
+    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+        paths.push(PathBuf::from(home).join(".cargo").join("bin"));
+    }
+    if let Some(existing) = existing {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    std::env::join_paths(paths).unwrap_or_else(|_| std::ffi::OsString::from(""))
+}
+
+/// This machine's MSVC linker is optional. When it is missing and the GNU
+/// toolchain is installed, use that so `cargo test` can link.
+fn windows_gnu_toolchain() -> Option<String> {
+    if !cfg!(windows) || linker_on_path() {
+        return None;
+    }
+    let home = std::env::var_os("USERPROFILE")?;
+    let gnu = PathBuf::from(home)
+        .join(".rustup")
+        .join("toolchains")
+        .join("1.92.0-x86_64-pc-windows-gnu");
+    gnu.is_dir().then(|| "1.92.0-x86_64-pc-windows-gnu".to_string())
+}
+
+fn linker_on_path() -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| dir.join("link.exe").is_file())
 }
 
 fn pick_testbench(

@@ -1,0 +1,262 @@
+% SPDX-License-Identifier: Apache-2.0
+%
+% Formal verification in TxHDL: the tutorial on proving what a unit
+% states about itself. Built by //docs:prove. Every listing is included
+% from the tree and every printout, log and figure is what the build
+% made by running the example and the proofs.
+\documentclass[journal,9pt]{IEEEtran}
+
+\newcommand{\listingsize}{\fontsize{6}{7}\selectfont}
+\input{housestyle}
+
+\InputIfFileExists{buildstamp.tex}{}{}
+\providecommand{\buildstamp}{Draft build (outside the Bazel flow).}
+
+\title{Formal Verification in TxHDL}
+
+\author{Filip Filmar and Dragiša Janković%
+\thanks{Both authors are independent. Filip Filmar is the
+corresponding author, at f@hdlfactory.com; Dragiša Janković is
+reached at linkedin.com/in/dragisa-jankovic.}%
+\thanks{This tutorial demonstrates formal property verification for developers
+who have completed the introductory tutorial~\cite{tutorial} and require
+properties to hold across all reachable states rather than single execution
+traces. Listings are extracted directly from the repository \code{HDL/txhdl}
+during compilation; logs and waveforms reflect live verification output. The
+reference design appears in~\cite{examples}, and the project index~\cite{cover}
+catalogues all companion documents.}%
+\thanks{The authors used a large language model, Claude, as an
+assistant in exploring concepts and in drafting and constructing
+the documents and implementations; every repository commit documents
+this collaboration and includes the prompt sequence verbatim.}%
+\thanks{\buildstamp}}
+
+\markboth{Formal Verification in TxHDL}{Filmar and Janković: Formal Verification in TxHDL}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Hardware modules in TxHDL declare safety invariants, input environment
+constraints, and reachability targets directly in source code using
+\code{check!}, \code{assume!}, and \code{cover!}. Native simulation exercises
+these assertions along tested execution paths, while dual-simulator
+co-simulation validates lowered netlists against simulation traces. This report
+demonstrates formal property verification: SymbiYosys, driven by pinned Yosys
+toolchains, proves decimal counter safety across all reachable states using the
+built-in PDR engine in yosys-abc without external SMT solvers. Bounded model
+checking with Z3 isolates and renders cycle-accurate counterexamples for
+failing checks, while cover runs synthesize witness traces to reachability
+goals. The proof executes as a hermetic Bazel test in approximately one second;
+deliberately mutated designs fail as expected, confirming verification rigor.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Formal verification, bounded model checking, Property Directed Reachability,
+SymbiYosys, Yosys, Z3, TxHDL.
+\end{IEEEkeywords}
+
+\section{Three Ways of Being Right}
+\label{sec:p-three}
+
+Regression testing in the repository relies primarily on execution comparison.
+Bazel runs an example, captures signal traces across all nets, lowers the module
+to VHDL and Verilog, and re-executes the trace under \code{nvc} and Verilator:
+the emitted netlist must match the reference trace cycle by cycle. This workflow
+flags discrepancies introduced during lowering. It cannot identify errors
+present in both the Rust model and the netlist, nor can it evaluate inputs
+unstimulated by the testbench.
+
+A second methodology embeds declarative invariants into module sources. Macro
+\code{check!(c, "why")} asserts that condition \code{c} holds whenever
+evaluated; macro \code{assume!(c, "why")} formalizes operational constraints on
+module inputs; macro \code{cover!(c, "why")} specifies reachability goals.
+Native simulation panics when a check or assumption fails, and records visits
+to cover targets. Lowered netlists incorporate these statements as immediate
+assertions within clocked blocks, subjecting them to continuous verification
+during co-simulation~\cite{tutorial, examples}.
+
+The third approach applies formal verification. Netlist assertions describe
+properties of a finite state machine. A formal engine proves or refutes these
+properties across all possible inputs and reachable states, eliminating
+reliance on input selection. The following sections demonstrate this flow on a
+single module: verifying invariants, inspecting a counterexample, and reaching a
+cover target.
+
+\section{The Unit}
+\label{sec:p-unit}
+
+Module \code{ex\_formal} implements a decimal counter that advances by an
+arbitrary step input: 0, 1, or 2, wrapping past 9. The module formalizes four
+specifications. First, the registered value remains within valid decimal range
+(0 to 9). Second, whenever wrap-around occurs, the subsequent state is 0 or 1.
+Third, input steps never equal 3, an unhandled mode declared via \code{assume!}.
+Fourth, the count reaches value 9, declared as a \code{cover!} target.
+Listing~\ref{lst:p-unit} shows the complete implementation.
+
+\lstinputlisting[rangebeginprefix=//\ begin\{,rangebeginsuffix=\},rangeendprefix=//\ end\{,rangeendsuffix=\},includerangemarker=false,linerange=unit-unit,caption={From \code{lib/examples/ex\_formal.rs}: the digit and its four statements.},label={lst:p-unit}]{lib/examples/ex_formal.rs}
+
+The reference testbench steps the counter through 16 cycles with varying step
+inputs, printing count values and recording cover events. Every assertion holds
+across all evaluated edges. The lowering engine emits SystemVerilog assertions
+enclosed within \code{`ifdef FORMAL} blocks under the reset guard
+(Listing~\ref{lst:p-out}). Figure~\ref{fig:p-run} illustrates the resulting
+simulation trace.
+
+\lstinputlisting[style=ascii,caption={What \code{ex\_formal} printed when the build ran it: the run, the cover count, and the netlist the proof reads.},label={lst:p-out}]{out_formal.txt}
+
+\begin{figure*}[t]
+\centering
+\input{formal_timing.tex}
+\caption{The run: the digit counting by its step and wrapping past
+nine. One run, sixteen edges, and the statements held on each of
+them.}
+\label{fig:p-run}
+\end{figure*}
+
+\section{The Proof}
+\label{sec:p-proof}
+
+Formal verification consumes the Verilog netlist with macro \code{FORMAL}
+defined. SymbiYosys orchestrates the preparation pipeline: command
+\code{read -formal} ingests assertions as formal cells, \code{prep} elaborates
+the hierarchical model, and internal transformations synthesize clocked
+immediate assertions into temporal state-machine properties.
+
+Unbounded verification uses \code{abc pdr} (Property Directed Reachability),
+integrated natively within yosys-abc from the pinned ASIC toolchain~\cite{cover}.
+The engine operates without external SMT solvers. It synthesizes an inductive
+invariant: a state set that contains the initial state, remains closed under all
+valid transitions permitted by assumptions, and satisfies all safety checks.
+When an invariant is found, safety holds indefinitely. For this decimal counter,
+PDR establishes inductive closure at depth three (Listing~\ref{lst:p-proof}).
+Engine outputs correspond directly to the two verified safety checks.
+
+\lstinputlisting[style=ascii,caption={The proof's log, as the build wrote it: both checks proved in frame three, and no trace, since nothing failed.},label={lst:p-proof}]{formal_proof.log}
+
+\section{A Broken Unit}
+\label{sec:p-broken}
+
+Verification tools must be validated against known failures. The test suite
+constructs two mutated netlists expected to fail. The first mutation removes the
+input assumption, allowing step values of 3: wrapping from 9 yields 2, violating
+the post-wrap assertion. The second mutation tightens the digit bound from
+\code{count <= 4'h9} to \code{count <= 4'h8}. Listing~\ref{lst:p-tight} displays
+the failure report generated by \code{abc pdr}.
+
+\lstinputlisting[style=ascii,caption={The tightened check under \code{abc pdr}: a failure, with no trace, since the engine is asked for a verdict and not a path.},label={lst:p-tight}]{formal_tight_proof.log}
+
+While automated test suites require a boolean verdict, diagnosing errors
+requires an explicit trace. Bounded Model Checking (BMC) with Z3 evaluates
+reachability across 20 cycles, identifying the minimal execution sequence
+violating the property (Listing~\ref{lst:p-search}).
+
+\lstinputlisting[style=ascii,caption={The bounded search on the tightened check: assumptions and assertions checked step by step, the failure in step six, and the trace written.},label={lst:p-search}]{formal_tight_search.log}
+
+The solver outputs a standard VCD waveform. Figure~\ref{fig:p-cex} visualizes
+the counterexample: successive step inputs of 2, 2, 1, 2, and 2 advance the
+counter from 0 to 9 in five cycles. On the sixth edge, the mutated assertion
+detects 9 and fails. The solver generated this stimulus sequence autonomously.
+
+\begin{figure}[htbp]
+\centering
+\input{formal_cex_timing.tex}
+\caption{The counterexample the bounded search found: the steps that
+take the count to nine, where a check of \code{count <= 8} fails.}
+\label{fig:p-cex}
+\end{figure}
+
+\section{The Cover Point}
+\label{sec:p-cover}
+
+A cover run determines reachability: it seeks an input sequence driving the
+module from reset into a state satisfying the cover predicate. The bounded
+engine searches state space and produces an execution path upon satisfaction
+(Listing~\ref{lst:p-cover}). Figure~\ref{fig:p-reach} illustrates the witness
+trace: four steps of 2 followed by one step of 1 reach terminal count 9 in six
+cycles.
+
+\lstinputlisting[style=ascii,caption={The cover run: the count reaching nine in step six, and the trace to it.},label={lst:p-cover}]{formal_covered.log}
+
+\begin{figure}[htbp]
+\centering
+\input{formal_reach_timing.tex}
+\caption{The path to the cover point: four steps of two, one of one,
+and the count is nine.}
+\label{fig:p-reach}
+\end{figure}
+
+\section{The Rule and the Tests}
+\label{sec:p-rule}
+
+A portable shell script and two Bazel rules in \code{tools/formal} manage the
+entire formal workflow. Rule \code{formal\_test} executes SymbiYosys against
+netlists emitted by \code{waveform()} targets. Tests require exact exit code
+matches: 0 for passing proofs, 2 for expected assertion failures. Inductive
+uncertainty (\code{UNKNOWN}, exit code 4) is treated as a test failure, ensuring
+unresolved properties fail CI. Rule \code{formal\_run} captures logs and
+waveforms for documentation, while \code{formal\_trace} renders TikZ timing
+diagrams (Listing~\ref{lst:p-build}).
+
+\lstinputlisting[rangebeginprefix=\#\ begin\{,rangebeginsuffix=\},rangeendprefix=\#\ end\{,rangeendsuffix=\},includerangemarker=false,linerange=formal-formal,caption={From \code{docs/BUILD.bazel}: the two broken copies, the seven tests, the four runs and the two drawings.},label={lst:p-build}]{BUILD.bazel}
+
+Script \code{tools/formal/formal.sh} coordinates toolchain paths hermetically
+(Listing~\ref{lst:p-script}). It resolves unpacked Debian trees for Yosys and
+Z3, wraps auxiliary Python scripts with appropriate \code{PYTHONPATH}
+environments, synthesizes \code{.sby} configuration files dynamically, and
+verifies exit statuses.
+
+\lstinputlisting[style=ascii,caption={\code{tools/formal/formal.sh}, which every proof in the tree runs through.},label={lst:p-script}]{tools/formal/formal.sh}
+
+All dependencies remain fully hermetic. SymbiYosys is fetched from upstream
+release archives by cryptographic checksum and installed into
+\code{//third\_party/sby}. The Python \code{click} library is provisioned via
+locked wheel rules on the hermetic Python 3.12 toolchain. Z3 is packaged as a
+pinned archive in \code{//third\_party/z3}. Unbounded PDR proofs execute
+entirely within yosys-abc without external solvers. The seven formal tests
+execute in approximately one second each during standard \code{bazel test //...}
+runs.
+
+\section{What Is Not Here}
+\label{sec:p-not}
+
+Formal properties hold subject to stated environmental assumptions. Overly
+restrictive assumptions risk proving properties vacuously; the assumption-free
+mutation in the test suite verifies that input constraints are necessary and
+operative.
+
+Synthesized netlists evaluate assertions strictly outside reset assertion.
+Module \code{ex\_rstcheck} demonstrates why: a counter with asynchronous reset
+suppresses its output during reset and asserts that valid digits appear. The
+verified netlist passes (\code{//docs:rstcheck\_prove\_test}), whereas an
+un-gated variant fails immediately during reset assertion. Native simulation
+adopts the same discipline: while \code{set\_reset} holds, assertions and
+coverage checks remain inactive.
+
+Ongoing formal initiatives target protocol compliance for AXI-Lite peripherals
+and processor correctness for Vreteno via the formal RISC-V interface (RVFI).
+Both target the identical verification infrastructure demonstrated here on
+larger hardware designs.
+
+\begin{thebibliography}{9}
+
+\bibitem{tutorial}
+F.~Filmar and D.~Janković, ``TxHDL, step by step,'' project
+repository \code{HDL/txhdl}, \code{//docs:tutorial}, 2026.
+
+\bibitem{examples}
+F.~Filmar and D.~Janković, ``TxHDL by example,'' project repository
+\code{HDL/txhdl}, \code{//docs:examples}, 2026.
+
+\bibitem{cover}
+F.~Filmar and D.~Janković, ``TxHDL documents,'' project repository
+\code{HDL/txhdl}, \code{//docs:cover}, 2026.
+
+\bibitem{sby}
+YosysHQ, ``SymbiYosys (sby), front-end for Yosys-based formal
+verification flows,'' \code{github.com/YosysHQ/sby}, release
+\code{v0.52}, 2025.
+
+\end{thebibliography}
+
+\end{document}

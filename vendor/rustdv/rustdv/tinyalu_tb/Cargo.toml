@@ -1,0 +1,19 @@
+[package]
+name = "tinyalu_tb"
+version = "0.1.0"
+edition = "2024"
+description = "The worked example (design-doc §7): full rustdv testbench for the book's TinyALU."
+license = "MIT OR Apache-2.0"
+
+[lib]
+# Crate root named after the crate, not lib.rs (D29).
+path = "src/tinyalu_tb.rs"
+# cdylib: loaded by the simulator as a VPI module.
+# rlib: lets `cargo test` run the pure-Rust unit tests (§7.3 convention 5).
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rustdv = { path = ".." }
+
+[dev-dependencies]
+rustdv-vpi-stubs = { path = "../rustdv-vpi-stubs" }

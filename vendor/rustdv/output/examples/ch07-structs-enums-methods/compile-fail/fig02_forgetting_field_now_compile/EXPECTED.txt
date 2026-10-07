@@ -1,0 +1,5 @@
+error[E0063]: missing field `kg` in initializer of `Animal`
+ --> src/main.rs:6:18
+  |
+6 |     let yorkie = Animal {};
+  |                  ^^^^^^ missing `kg`

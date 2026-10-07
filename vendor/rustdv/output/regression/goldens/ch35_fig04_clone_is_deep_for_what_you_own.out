@@ -1,0 +1,5 @@
+mary:      Name: Mary, ID: 33 Grades: [97, 82]
+mary_copy: Name: Mary, ID: 33 Grades: [97, 82]
+-- add a grade to the copy --
+mary:      Name: Mary, ID: 33 Grades: [97, 82]
+mary_copy: Name: Mary, ID: 33 Grades: [97, 82, 100]

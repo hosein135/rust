@@ -1,0 +1,12 @@
+[package]
+name = "ch31_component_communications"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+# Crate root named after the crate, not lib.rs (D29).
+path = "src/ch31_component_communications.rs"
+
+[dependencies]
+rustdv = { path = "../../../rustdv" }

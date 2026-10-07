@@ -1,0 +1,6 @@
+% cargo run
+error[E0277]: cannot add a `f64` to `i32`
+ --> src/main.rs:4:17
+  |
+4 |     let ss = ii + ff;
+  |                 ^ no implementation for `i32 + f64`

@@ -1,0 +1,13 @@
+[package]
+name = "cf_misspelled_port_name"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/cf_misspelled_port_name.rs"
+
+[dependencies]
+rustdv = { path = "../../.." }
+
+[workspace]

@@ -1,0 +1,5 @@
+error[E0308]: mismatched types
+ --> src/main.rs:3:8
+  |
+3 |     if nn {
+  |        ^^ expected `bool`, found integer

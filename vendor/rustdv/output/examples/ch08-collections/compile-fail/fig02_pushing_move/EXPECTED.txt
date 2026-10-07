@@ -1,0 +1,15 @@
+error[E0382]: borrow of moved value: `cmd`
+  --> src/main.rs:12:28
+   |
+10 |     let cmd = AluCommand { a: 5, b: 3, op: Ops::Add };
+   |         --- move occurs because `cmd` has type `AluCommand`,
+   |             which does not implement the `Copy` trait
+11 |     log.push(cmd);
+   |              --- value moved here
+12 |     println!("sent: {:?}", cmd);
+   |                            ^^^ value borrowed here after move
+   |
+help: consider cloning the value if the performance cost is acceptable
+   |
+11 |     log.push(cmd.clone());
+   |                 ++++++++

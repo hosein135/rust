@@ -1,0 +1,112 @@
+% SPDX-License-Identifier: Apache-2.0
+% covers: Remote, Ask, Answer
+\datasheet{Remote}{A memory-mapped bridge forwarding bus transactions over channels to an external software endpoint.}
+
+\dsfacts{\code{lib/parts/src/remote.rs}}{\code{txhdl\_parts::remote::Remote}}%
+{\code{//docs:examples}}
+
+\subsection*{Function}
+
+\code{Remote} connects to an AXI-Lite interconnect as a memory-mapped target
+without decoding register state internally. Every transaction accepted by the
+core is forwarded on \code{out} as an \code{Ask} message, and the corresponding
+response returns on \code{back} as an \code{Answer}. The remote endpoint is
+decoupled from the peripheral logic: in simulation, it connects to a software
+model within the test process; on physical hardware, it connects via packet
+frames to software running on a remote host.
+
+This architecture enables hardware-software co-development. A target peripheral
+can be developed and verified as software against the actual system bus. Once
+the software implementation is proven, a dedicated hardware module replaces it
+without modifying host bus transactions. Issue 297 documents this workflow.
+
+The bus interface presents a multi-cycle peripheral latency: exactly one
+transaction remains outstanding at a time, and the transaction channel is held
+until the response arrives. This adheres to AXI-Lite protocol semantics and
+accommodates network transit times.
+
+\subsection*{Parameters}
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}lp{0.7\textwidth}@{}}
+\toprule
+Parameter & Meaning \\
+\midrule
+\code{T} & The timeout limit in clock cycles before the peripheral responds
+with \code{SLVERR}. This prevents an unresponsive remote endpoint from
+permanently hanging the system bus. The datasheet tables use 40.
+\code{ex\_remote} uses 1000 cycles, covering round-trip latency through two MACs.
+\code{Board} sets this to 100,000,000 cycles (one second at 100~MHz), providing
+sufficient margin for network round trips to a host workstation. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection*{Register map}
+
+None. Every address within the peripheral's allocated aperture is interpreted
+by the target program, and the target address is forwarded verbatim in the
+\code{Ask} payload.
+
+\dstables{Remote}
+
+\subsection*{Behaviour}
+
+\begin{itemize}
+\item Exactly one transaction is outstanding at a time; \code{busy} indicates
+active transfer, while \code{writing} indicates transaction direction.
+\item Write transactions take priority over read transactions. Because writes
+and reads arrive on separate channels, prioritizing writes prevents read streams
+from starving pending store operations.
+\item Each transaction includes a \code{tag} that increments with each dispatched
+request. Responses arriving on \code{back} are accepted only when their tag matches
+the currently outstanding transaction.
+\item Tag validation guarantees safe timeout handling. When a transaction times
+out after \code{T} cycles, the peripheral returns \code{SLVERR} to the bus and
+retires the transaction. If a delayed response arrives later, its tag no longer
+matches the active transaction, and the core discards it rather than misattributing
+it to subsequent bus traffic.
+\item The transaction tag advances when a transaction completes rather than when
+it is issued, cleanly separating late responses from the subsequent request.
+\item Read transactions complete on \code{bus\_r} with the returned data word,
+and write transactions complete on \code{bus\_b}; either response returns
+\code{SLVERR} if the remote target indicates failure or if the cycle timer expires.
+\end{itemize}
+
+\subsection*{Verification}
+
+\begin{itemize}
+\item Four unit tests in \code{lib/parts/src/remote.rs} (\code{//lib/parts:parts\_test}):
+\begin{itemize}
+\item \code{a\_word\_written\_to\_the\_program\_is\_read\_back\_from\_it}
+verifies standard loopback;
+\item \code{the\_program\_says\_which\_transactions\_fail} validates
+remote error signaling;
+\item \code{a\_slow\_program\_is\_waited\_for} tests latency tolerance;
+\item \code{a\_program\_that\_never\_answers\_does\_not\_stop\_the\_bus}
+confirms timeout recovery.
+\end{itemize}
+\item \code{//lib/examples:ex\_remote} executes the complete pipeline comprising
+\code{RemoteLink} and dual Ethernet MACs. Netlists synthesized from this design
+are simulated under both nvc and Verilator via
+\code{//docs:remote\_sim\_remote\_remote\_tb\_test} and
+\code{//docs:remote\_vsim\_remote\_test}.
+\item \code{//cpu/vreteno:board\_test} executes the RISC-V core against the board
+design: software writes a data word to \code{0x3300} and reads it back, with the
+testbench harness serving response frames.
+\end{itemize}
+
+\subsection*{Used by}
+
+\code{ex\_remote}, and \code{Board} at address \code{0x3300}, where a
+\code{RemoteLink<1>} connects it to the board's Ethernet MAC for hardware-software
+co-development over the network.
+
+\subsection*{Limits}
+
+The block supports AXI-Lite only with a single outstanding transaction, causing
+bus accesses to block for the full remote round-trip latency. It implements no
+transport layer directly: transmitting \code{Ask} requests to an external machine
+requires \code{RemoteLink} and an Ethernet MAC, or equivalent channel adapters.
+The timeout counter measures clock cycles rather than absolute wall-clock time;
+operating at lower clock frequencies increases the elapsed timeout duration proportionally.

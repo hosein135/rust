@@ -1,0 +1,15 @@
+{
+  "comment": "Book chapter sim figures: ch27_configuration on Icarus. Skips without iverilog.",
+  "cmd": [
+    "bash",
+    "sim-common/run_sim.sh",
+    "ch27_configuration",
+    "playground"
+  ],
+  "cwd": "output/examples",
+  "skip_if_missing": "iverilog",
+  "expect_exit": 0,
+  "expect_in_output": [
+    "REGRESSION: PASS"
+  ]
+}

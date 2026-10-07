@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "rustdv",
+    "rustdv/rustdv-gpi-sys",
+    "rustdv/rustdv-gpi",
+    "rustdv/rustdv-sim",
+    "rustdv/rustdv-methodology",
+    "rustdv/rustdv-macros",
+    "rustdv/rustdv-vpi-stubs",
+    "rustdv/rustdv-runner",
+    "rustdv/tinyalu_tb",
+    "rustdv/framework-tests",
+]
+# Preserve the previous behavior of running an unqualified Cargo command from
+# the workspace root against the rustdv facade crate. Use `--workspace` to
+# select every member.
+default-members = ["rustdv"]
+
+# Crates that must NOT compile. Each is built on its own by
+# rustdv/framework-tests/compile-fail/run.sh, which requires the failure and
+# checks the error code; a workspace member would break `cargo build`.
+#
+# The generated book examples remain their own independent workspace.
+exclude = [
+    "rustdv/framework-tests/compile-fail/export_interface_mismatch",
+    "rustdv/framework-tests/compile-fail/misspelled_port_name",
+    "rustdv/framework-tests/compile-fail/use_after_finish_item",
+    "rustdv/framework-tests/compile-fail/eq_on_a_float",
+    "rustdv/framework-tests/compile-fail/port_attr_on_non_port",
+    "output/examples",
+]
+
+[profile.release]
+panic = "unwind"   # panics must be catchable at the task boundary (§0.6)
+
+[profile.dev]
+panic = "unwind"

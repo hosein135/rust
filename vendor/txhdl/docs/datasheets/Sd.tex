@@ -1,0 +1,180 @@
+% SPDX-License-Identifier: Apache-2.0
+% covers: Sd
+\datasheet{Sd}{A native-mode SD card host on AXI-Lite: one command and
+at most one block at a time, the block through a buffer of 128 words.}
+
+\dsfacts{\code{lib/parts/src/sd.rs}}{\code{txhdl\_parts::sd::Sd}}%
+{\code{//docs:examples}}
+
+\subsection*{Function}
+
+Operating an SD card in SPI mode limits throughput to several hundred
+kilobytes per second over a single data line. In contrast, SD native
+mode uses a bidirectional protocol over dedicated physical lines: a command
+line, \code{CMD}, conveys 48-bit commands and returns 48-bit or 136-bit
+responses. Data transfers use one or four data lines (\code{DAT}) to
+transfer 512-byte blocks, protected by per-line CRC-16 checksums. Outgoing
+commands include a CRC-7 checksum, as do all responses with the exception
+of \code{ACMD41}, whose CRC field is defined as all ones.
+
+\code{Sd} implements this native host controller behind an AXI-Lite port,
+\code{bus}. Software configures the command argument and writes the command
+control word. The command word selects the transfer parameters: response
+type (none, short, or long), data transfer direction (read block or write
+block), busy line monitoring, and CRC checking. The controller dispatches
+the command, samples the response, transfers block data through its internal
+buffer via the \code{data} register, and updates execution state in \code{status}.
+
+Multi-block transfers issue an initial command (\code{CMD18} or \code{CMD25}),
+stream data blocks across subsequent cycles, and terminate with \code{CMD12}.
+Because streaming reads at 25~MHz overloads register polling loops, the host
+integrates dedicated DMA paths to system memory (issue 912). Two DMA engines
+from issue 151 interface with the controller: a \code{LineStore} instance
+for reads and a \code{LineFetch} instance for writes. Setting a non-zero count
+in \code{blocks} initiates automated multi-block DMA: the internal buffer
+acts as a ring buffer between physical SD lines and the DMA engine. Read data
+streams to the store engine as the card presents bytes; write data streams
+from the fetch engine, dispatching each block once fully buffered. The transfer
+completes only after the DMA engine retires. Commands perform either reads or
+writes, never both simultaneously, ensuring mutual exclusion between the DMA
+engines.
+
+The card's side is eight wires: \code{sclk}, the command line in, out
+and its output enable, the four data lines in, out and their output
+enable, and \code{irq}. The engines' side is nine more:
+\code{dma\_in} and \code{dma\_out}, the words from the fetch engine
+and to the store engine; \code{dma\_at}, \code{dma\_bytes} and
+\code{dma\_words}, where in memory and how much; \code{store\_go}
+and \code{fetch\_go}, the starts; and \code{store\_busy} and
+\code{fetch\_busy}, the engines' busy lines.
+
+\subsection*{Parameters}
+
+None.
+
+\subsection*{Register map}
+
+The word is address bits 5 to 2. A word the map does not name reads as
+zero.
+
+\dsregs{Sd}
+
+\code{cmd}'s \code{resp} is 0 for none, 1 for short and 2 for long.
+Writing \code{cmd} starts the command. Writing a one to
+\code{status}'s \code{done} clears it and the four faults with it.
+\code{dma} is where in memory the next command's blocks start, and
+\code{blocks}' \code{count} how many it moves, zero for the buffer as
+before; \code{left} counts the blocks still to move and \code{run}
+says an engine is still moving words.
+
+A half of a card clock takes \code{div + 1} cycles, so the card's
+clock is the system's over \code{2 * (div + 1)}: at 100~MHz, 124 is
+the 400~kHz a card starts at, 1 is 25~MHz, the fastest this host
+runs, and 0 runs as 1 (issue 929).
+
+\dstables{Sd}
+
+\subsection*{Behaviour}
+
+\begin{itemize}
+\item \textbf{A write to \code{cmd} while a command runs is ignored.}
+A program reads \code{status} first.
+\item The host drives its lines on the falling edge of the clock it
+makes and samples the card's on the rising edge. The clock runs only
+while a command runs, and is low otherwise.
+\item A response that has not started 64 card clocks after the command
+ends is a timeout. A block, the CRC status token after a written
+block, and the end of the card's busy are each given $2^{24} - 1$ card
+clocks.
+\item A CRC is checked the way a shift register checks one: the
+received CRC goes into the same register after the data, and what is
+left is zero when the two agree. For a long response the CRC covers
+the 120 bits after the header. With four lines each line has its own
+CRC-16, and any of the four being wrong sets bit 5.
+\item A written block is accepted only when the card's CRC status
+token is \code{010}; anything else sets bit 5. A command whose
+response CRC is wrong goes no further: its block does not move.
+\item Starting a read sets the write pointer to zero, and starting a
+write sets the read pointer to zero, so a block fills or empties the
+buffer from its start. A read of \code{data} moves the read pointer
+and a write moves the write pointer, each modulo 128.
+\item \code{irq} is done and the interrupt enable together, so it
+stays high until the program clears done.
+\item Every AXI-Lite access is answered \code{OKAY}.
+\end{itemize}
+
+\subsection*{Verification}
+
+\begin{itemize}
+\item \code{ex\_sd} does what a driver does, through an AXI4 host and
+\code{LiteBridge<1, ..>}, against \code{SdCard}, the model of a card in \code{sd.rs},
+stepped on the wires every cycle. It brings the card up with
+\code{CMD0}, \code{CMD8}, \code{ACMD41}, \code{CMD2}, \code{CMD3},
+\code{CMD7} and \code{ACMD6}, reads block 3 on one line, then writes
+block 5 on four and reads it back, and checks both blocks.
+\item The netlist is checked against that run under nvc and
+Verilator: \code{//docs:sd\_sim\_sd\_tb\_test} and
+\code{//docs:sd\_vsim\_test}.
+\item \code{ex\_sddma} moves blocks through memory with real
+\code{LineStore<32, 1, 16, 16>} and \code{LineFetch<32, 1, 16, 16>}
+engines behind an \code{Arbiter2}, the card sending its blocks back to
+back, and its netlist is checked against that run:
+\code{//docs:sddma\_sim\_sd\_dma\_tb\_test} and
+\code{//docs:sddma\_vsim\_test}.
+\item \code{//lib/parts:parts\_test} holds eleven tests of it:
+\begin{itemize}
+\item the card comes up and gives its CID;
+\item a block is read on one line;
+\item a block is written and read back on four lines, the card's CRC
+status accepting it;
+\item a card slow to drive is read and written at 25~MHz;
+\item a divider of zero runs as one;
+\item several blocks each way, as a command, data-only transfers and
+\code{CMD12};
+\item a spoiled response CRC sets bit 3 and the next command is
+clean; a command the card does not answer sets bit 2; a spoiled block
+sets bit 5;
+\item a card wants its clocks before its first command;
+\item the CRC-7 of \code{CMD0} with a zero argument is \code{0x4a} and
+the CRC-16 of 512 bytes of \code{0xff} is \code{0x7fa1}, the
+specification's own examples;
+\item blocks read back to back go to memory through the store engine;
+\item blocks written from memory through the fetch engine reach the
+card.
+\end{itemize}
+\end{itemize}
+
+\subsection*{Used by}
+
+The example \code{ex\_sd}, and the board: the Vreteno board holds it
+in the peripheral page's ninth slot, at \code{0x3800}, with the card
+slot's pins in bank 16 (E13 the clock, E14 the command line, D15,
+D14, F14 and F13 the data lines) on every top that holds the board.
+Its engines are the board's \code{sdstore} and \code{sdfetch}, sharing
+one host, \code{sdshost}, through \code{sdarb}, an
+\code{Arbiter2<32, 32, 4, 1, 2, 0>}, on the main arbiter's sixth port.
+\code{cpu/vreteno/rust/sdprobe.rs} brings a card up and prints its CID
+and block 0, then reads blocks 0 to 3 with one \code{CMD18} straight
+into the DDR3 and compares them with the same blocks read one at a time
+through the buffer; \code{//cpu/vreteno:board\_test} runs it against
+\code{SdCard} and expects \code{dma same}, and
+\code{docs/board-checks.md} says how to run it on the board.
+
+\subsection*{Limits}
+
+Only reading has met a real card: on 2026-10-03 the board read a
+32~GB card's CID and block 0, its partition table, twice (issue 153),
+and on 2026-10-04 read them again at 25~MHz, line for line the same
+(issue 929).
+No write has been sent to a card on the board, and \code{sdprobe}
+sends none.
+
+One command at a time. Without a count in \code{blocks} a command
+moves at most one block, through a register; with one, its blocks go
+through memory by the engines, which only a read or a write uses at a
+time.
+
+\code{SdCard}, the model, is not a component: nothing lowers it, and
+it is only as right as the tests that check the host against it.
+
+It runs on one clock, \code{DefaultClock}.

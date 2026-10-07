@@ -1,0 +1,17 @@
+{
+  "comment": "Book chapter sim figures: ch20_struct_based_testbench_2_0 on Icarus. Skips without iverilog.",
+  "cmd": [
+    "bash",
+    "sim-common/run_sim.sh",
+    "ch20_struct_based_testbench_2_0",
+    "tinyalu",
+    "sim-common/hdl/timescale.v",
+    "sim-common/hdl/tinyalu.sv"
+  ],
+  "cwd": "output/examples",
+  "skip_if_missing": "iverilog",
+  "expect_exit": 0,
+  "expect_in_output": [
+    "REGRESSION: PASS"
+  ]
+}

@@ -1,0 +1,324 @@
+% SPDX-License-Identifier: Apache-2.0
+% covers: Vreteno
+\datasheet{Vreteno}{A three-stage RV32IMAC core with machine, supervisor and user modes and an AXI host port.}
+
+\dsfacts{\code{cpu/vreteno/src/core.rs}}{\code{vreteno32::core::Vreteno}}%
+{\code{//docs:vreteno}, \code{//docs:noc}, \code{//docs:tapeout}}
+
+\subsection*{Function}
+
+\code{Vreteno} is a RISC-V core for the RV32I base set, the M
+extension and the C extension's compressed instructions. It is one
+process with three stages. The fetch stage reads the instruction at
+the program counter into the instruction register, expanding a
+compressed one into the thirty-two bit instruction it stands for. The
+execute stage decodes that word, computes, and issues
+loads and stores on the bus. The writeback stage extends a loaded
+word, writes the register file and retires the instruction.
+
+The core holds three memories: the register file, 32 words; the
+instruction memory, \code{IMEM\_WORDS} or 1024 words; and a data RAM
+of 64~KiB at \code{DRAM\_BASE}, \code{0x1\_0000}, the window a program
+keeps its stack in (issue 1275). \code{Vreteno::with} loads a program
+into the instruction memory. The data memory and every device are on
+the bus, outside the core. Above
+the instruction memory the fetch reads from the bus, into a buffer of
+two words, and the words of the data memory and of DDR3 through an
+instruction cache (issue 1021): sixteen kilobytes, 1024 lines of
+four words, one way, looked up after translation and so indexed and
+tagged by the physical address (issue 1290), in \code{ic\_data} and
+\code{ic\_tag}. A hit fills both words of the buffer when the line
+holds the next one, and the buffer shifts its second word into the
+first at the clock edge, as the program counter moves into it
+(issues 1187 and 1279).
+
+The data RAM is on the core's own port and not on the bus: four lanes
+of a byte, \code{dl0} to \code{dl3}, each written at one address and
+read at another, as a block RAM is. A load in its window reads the
+lanes into \code{dl\_word} at the edge and takes the word from there in
+writeback, the cycle after it ran; a store writes the lanes under its
+strobes in the cycle it runs. Whether an access is in the window comes
+from the upper half of \code{rs1} and the carry out of the lower
+halves' sum, without the full add.
+
+The bus side is an AXI host written as hardware. The core issues a
+burst on \code{issue}, sends a store's beat on \code{wbeat}, and hands
+identifiers back on \code{release}. It receives \code{grant},
+\code{done} and \code{rdata} from its tracker, an \code{AxiHost}. The
+other inputs are \code{rst}, the external interrupt \code{irq}, the
+timer's line \code{tirq} and the software interrupt \code{sirq}, which
+the controller raises from \code{msip}; and the debug module's, the
+halt and resume requests \code{haltreq} and \code{resumereq} and its
+register access, \code{dbg\_regno}, \code{dbg\_wdata} and
+\code{dbg\_we}, honoured in debug mode (issue 154). The outputs are
+\code{halt}, \code{instr}, the word retiring, \code{wb}, a
+\code{Writeback} of \code{done}, \code{rd} and \code{val}, \code{dbg},
+debug mode, and \code{dbg\_rdata}, the register the module asked for.
+
+Two additional inputs supply the machine timer count, \code{time}
+(accessed by \code{rdtime}), and \code{seirq}, the supervisor external
+interrupt line registered alongside MEIP as \code{mip.SEIP} (issue 1094).
+
+Eleven ports join the core to its memory management unit, an
+\code{Mmu8}, inside a \code{Hart} (issue 1014). The core tells the
+unit \code{mmu\_satp}; \code{mmu\_prv}, the mode a data access is
+checked as, which is \code{MPP} under \code{MPRV} (issue 1105);
+\code{mmu\_sum} and \code{mmu\_mxr} from \code{mstatus};
+\code{mmu\_flush}, raised for a write of
+\code{satp} or an \code{sfence.vma}; and its two requests,
+\code{ireq} for a fetch and \code{dreq} for a load or a store. The
+unit answers on \code{ires} and \code{dres}, each a \code{Res} of a
+physical address, a page fault or an access fault, a cycle after the
+request. Its walker's reads come in on \code{ptw} as addresses, go out
+on the core's own \code{issue}, and their words go back to the unit on
+\code{pte}, so the hart needs no bus port of its own for the page
+tables. The core believes an answer only at the second cycle of a
+request, which is right both in simulation, where the unit sees a
+request a step late, and in hardware.
+
+\subsection*{Parameters}
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}lp{0.7\textwidth}@{}}
+\toprule
+Parameter & Meaning \\
+\midrule
+\code{IW} & The width of the AXI identifier on \code{rdata}, \code{done},
+\code{grant} and \code{release}, in bits. The tables use 2, as the
+board and the runs do. \\
+\code{DW} & The data RAM's words a lane, a power of two, 16384 by
+default, which is 64~KiB. The netlist the documents simulate and the
+layout maps uses 4, where the window's addresses wrap, since the cell
+library has no RAM. The tables use the default. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection*{Register map}
+
+The control registers, by CSR number. Software reaches them through
+the six CSR instructions. They are not on the bus.
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}llp{0.6\textwidth}@{}}
+\toprule
+Number & Register & What the core keeps \\
+\midrule
+\code{0x300} & \code{mstatus} & Bits 3 and 7 only; a write is masked
+with \code{0x88}. \\
+\code{0x304} & \code{mie} & Bits 11 and 7 only, the external and the
+timer enable. \\
+\code{0x305} & \code{mtvec} & The handler's address; a write clears
+bits 1 and 0. \\
+\code{0x340} & \code{mscratch} & Entire 32-bit register. \\
+\code{0x341} & \code{mepc} & The trap's address; a write clears
+bit 0. \\
+\code{0x342} & \code{mcause} & Entire 32-bit register. \\
+\code{0x343} & \code{mtval} & Entire 32-bit register. \\
+\code{0x344} & \code{mip} & Bit 11 is stored: \code{irq} sets it and
+a write keeps only that bit. Bit 7 reads as \code{tirq}. \\
+\code{0x7c0} & \code{mhalt} & Nothing: it reads as zero. A write of an
+odd value stops the core when that instruction retires. \\
+\code{0x301} & \code{misa} & Nothing: it reads
+\code{0x4000\_1104}, which is \code{MXL} of 1 and the letters
+\code{C}, \code{I} and \code{M}. Writable and ignored, as the
+specification allows. \\
+\code{0xf11} & \code{mvendorid} & Nothing: zero, which means
+unimplemented. Read only. \\
+\code{0xf12} & \code{marchid} & Nothing: zero. Read only. \\
+\code{0xf13} & \code{mimpid} & Nothing: zero. Read only. \\
+\code{0xf14} & \code{mhartid} & Nothing: zero, this machine's one
+hart. Read only. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A CSR instruction that names any other number is an illegal word and
+traps.
+
+\dstables{Vreteno}
+
+\subsection*{Behaviour}
+
+\begin{itemize}
+\item With \code{rst} high, the fetch counter goes to zero, the
+instruction register is emptied, and the load wait and the sequencer
+are cleared.
+\item The fetch reads the instruction memory at bits 11 to 2 of the
+program counter and at the word after. The halfword at the counter is
+the upper half of its word when bit 1 is set. If its low two bits are
+not both set it is a compressed instruction, expanded in the fetch;
+otherwise the halfword after it is the instruction's upper half. The
+counter moves on by two or four.
+\item A fetch above the instruction memory goes to the bus when its
+physical page is a device's, and to the cache when it is the data
+memory's or DDR3's. The cache reads the line's tag and the word the
+cycle after, at the address the fetch registered in \code{ic\_pa}. A
+hit puts the word in the fetch buffer. A miss reads the line as one
+burst of four beats, \code{len} 3, once nothing else of the core's is
+on the bus, writes each beat into the line, makes the line valid on the
+last, and looks the word up again. A refused beat ends the fetch with
+the word's access fault, and leaves the line invalid.
+\item \code{fence.i} and \code{rst} clear the cache's tags, one line a
+cycle, and a lookup waits until they are clear. A store does not reach
+the cache, so code written by stores runs after a \code{fence.i}.
+\item \code{ir\_c} says the instruction in execute was compressed.
+\code{jal} and \code{jalr} link the address two bytes on for a
+compressed one and four for the rest.
+\item An instruction in execute that reads the register the writeback
+stage is about to write gets that value directly. When that value is a
+load's, the instruction waits one cycle and reads the register file
+instead.
+\item A taken branch, \code{jal}, \code{jalr}, a trap and \code{mret}
+redirect the fetch. The word fetched in that cycle is squashed, which
+costs one bubble.
+\item A load or store in the data RAM's window does not go to the bus.
+A load's word comes from \code{dl\_word} the cycle after it ran, and
+never sets \code{dev\_wait}; a store writes the lanes in the cycle it
+runs and is not counted in \code{stores\_out}; \code{lr.w} and
+\code{sc.w} act there as on the bus, and an AMO takes its word into
+\code{wb\_dev} in its first cycle in writeback and stores to the lanes.
+A load there clears \code{wb\_err}, since nothing refuses it.
+\item Any other load or store whose address has any bit set above bit
+11 goes on the bus as a burst of one beat, size 2, \code{INCR}. A store's beat
+has the lanes it covers as its strobe.
+\item A load or store waits for room on both \code{issue} and
+\code{wbeat}, whatever its address.
+\item A store is posted and the core runs on. A load sets
+\code{dev\_wait} and sits in writeback, holding the pipeline, until
+its answer lands in \code{wb\_dev}.
+\item When a write response and a read beat arrive together, the
+write's identifier goes back first and the read's waits a cycle. A
+read's identifier goes back on its last beat, so once for a cache
+fill's four. The core drops what it receives on \code{grant}.
+\item \code{ecall} traps with cause 11 and \code{ebreak} with cause 3,
+which takes its own address as \code{mtval}. A word the core does not
+know traps with cause 2, and \code{mtval} takes the word. A halfword
+that is no RV32C instruction expands to itself, which no thirty-two bit
+instruction is, so it traps with cause 2 and \code{mtval} takes the
+halfword. An unaligned load traps with cause 4 and an unaligned store
+with cause 6, and \code{mtval} takes the address that was asked for.
+Every other trap writes zero to \code{mtval}.
+\item On a trap, \code{mepc} takes the instruction's address, bit 7 of
+\code{mstatus} takes bit 3, bit 3 is cleared, and the fetch goes to
+\code{mtvec}. \code{mret} sets bit 3 from bit 7, sets bit 7, and goes
+to \code{mepc}.
+\item The external interrupt is ready when bit 11 is set in both
+\code{mie} and \code{mip}. The software interrupt is ready when bit 3
+of \code{mie} is set and \code{sirq} is high, and the timer's when bit
+7 of \code{mie} is set and \code{tirq} is high. Any of the three is
+taken when bit 3 of \code{mstatus} is set, in place of the instruction
+in execute. The external interrupt, cause \code{0x8000\_000b}, wins
+over the software interrupt, cause \code{0x8000\_0003}, which wins over
+the timer's, cause \code{0x8000\_0007}.
+\item A multiply or divide starts the sequencer and stalls in execute.
+A multiply is one step and a division thirty-two. \code{//docs:vreteno}
+states that a multiply takes three cycles and a division thirty-three.
+An interrupt cancels the sequencer, and the instruction starts it
+again after the handler returns.
+\item The sequencer does not start while a device load in writeback is
+still waiting for its answer.
+\item A write of an odd value to \code{mhalt} stops the fetch and
+parks the program counter one word past that instruction, which
+retires first. \code{halt} rises as it retires, and stays high.
+\item \code{stall}, \code{int\_take} and \code{redirect} are wires kept
+as fields, so the trace and the netlist show them.
+\end{itemize}
+
+\subsection*{Verification}
+
+\begin{itemize}
+\item \code{//cpu/vreteno:lockstep\_test} runs the core with the router, the
+data memory, the timer and the serial port against the reference model
+in \code{model.rs}. After every cycle the program counter, registers
+1 to 31, the eight control registers that hold something and the halt
+must agree. At the
+halt the data memory, the timer's compare and the serial port's bytes
+must agree. Its tests are \code{demo\_program},
+\code{a\_multiply\_right\_after\_a\_load},
+\code{compressed\_instructions}, \code{an\_unaligned\_access\_traps},
+\code{the\_data\_ram\_on\_the\_cores\_own\_port}, a store and a load of
+one word at once, a load through a pointer just loaded, bytes and
+halves, both arms of the window's compare, \code{lr}/\code{sc} and an
+AMO there, and \code{random\_programs}, which
+runs 64 seeds of 200 instructions each with both lengths mixed and
+counts that the mix is there.
+\item \code{//cpu/vreteno:isa\_test} compares the core's expander with
+the decoder's on every compressed halfword, and
+\code{//cpu/vreteno:compressed\_test} checks the decoder against the
+GNU disassembler on all 49\,152 of them.
+\item \code{//cpu/vreteno:hello\_test} (\code{rust\_runs\_on\_vreteno})
+and \code{//cpu/vreteno:hello\_cc\_test}
+(\code{cpp\_runs\_on\_vreteno}) run compiled programs on the machine
+of \code{run.rs} and check what the serial line says and that the core
+halted.
+\item \code{//cpu/vreteno:board\_test} and \code{//soc:demo\_test} run
+the core inside \code{Board} and on the lattice.
+\item \code{//cpu/vreteno:icache\_test} runs issue 1009's loop of three
+instructions from the instruction memory and from the data memory,
+through the cache, at 1.334 and 3.349 cycles an instruction counted
+from the reset. The second includes the 1024 cycles in which the cache
+clears its tags, which the loop waits for, since the cache is sixteen
+kilobytes (issue 1290); it was 3.093 at four kilobytes, 4.093 before
+one cache hit filled both words of the buffer and the shift moved to
+the edge (issues 1187 and 1279), and 14.655 from the data memory
+before the cache. It also runs the same loop across two lines, and a
+routine rewritten by a store and called again after
+\code{fence.i}, which runs the word stored.
+\item The build simulates the netlist of \code{Hart<2>}, the core and its
+unit, under the entity name \code{vreteno}, with the demonstration
+program in the core's instruction memory, against the trace of
+\code{//cpu/vreteno:vreteno} under nvc and Verilator:
+\code{//docs:vreteno\_sim\_vreteno}\allowbreak\code{\_vreteno\_tb\_test} and
+\code{//docs:vreteno\_vsim\_vreteno\_test}.
+\item \code{//cpu/vreteno:vreteno\_synth} and
+\code{//cpu/vreteno:vreteno\_pnr} synthesise and place the core on an
+\code{xc7a200tfbg484-2}; both are manual. \code{//docs:vreteno}
+reports 2151 LUTs as logic, 48 LUTs as distributed RAM, 489
+flip-flops, two block RAM tiles and four DSP blocks after synthesis. It
+reports that the routed core meets a 10~ns clock with 0.296~ns of
+setup slack.
+\item \code{//cpu/vreteno/asic:vreteno\_cells} maps the core onto the
+Nangate45 cells and builds with everything.
+\code{//cpu/vreteno/asic:}\allowbreak\code{vreteno\_pnr} places and routes it, and is
+manual.
+\end{itemize}
+
+\subsection*{Used by}
+
+\code{Board}, as \code{cpu}. The demonstration
+\code{//cpu/vreteno:vreteno}, the lockstep test, and \code{run.rs},
+which the \code{hello} and \code{hello\_cc} runs call. The system in
+\code{soc}, where the core is the host at corner 0,0 of the lattice.
+
+\subsection*{Limits}
+
+The boot memory is 1024 words, 4096 bytes, and nothing loads it at
+run time: a netlist gets its contents through \code{init}. A program
+counter at or above \code{IMEM\_BYTES}, the boot memory's end, is
+fetched from the bus instead (issue 134), so a program larger than the
+boot memory runs from wherever it was loaded, the DDR3 memory on the
+board.
+
+Every load and store goes to the bus, the boot memory included, which
+answers reads and refuses writes (issue 268), except those in the data
+RAM's window. Nothing but the core reaches the data RAM: not the debug
+module's system bus access, Razboj or a DMA engine, so a debugger
+reads it through the core. A fetch from the window is refused.
+
+A trap handler must start at a whole word: \code{mtvec} keeps no
+bits 1 and 0. The core has machine mode only and the fourteen control
+registers above, in three kinds: eight it keeps, \code{mhalt}, which
+is its own, and five that say what the machine is and hold nothing. A
+write to one of the four whose number begins \code{0xf} is an illegal
+instruction, which is what read only means in the specification;
+\code{misa} is writable and ignores what is written. The two counters answer as well:
+\code{mcycle} at \code{0xb00} with its high half at \code{0xb80},
+and \code{minstret} at \code{0xb02} with \code{0xb82}, each 64 bits
+and each writable. \code{mcycle} counts while the core runs and stops
+when the halt stops it; \code{minstret} counts what retires. They are
+the one part of the core the lockstep test leaves alone, for the
+reason \code{//docs:vreteno} gives, and
+\code{//cpu/vreteno:counters\_test} checks them instead. It has one load in
+flight at a time. On the board, \code{irq} is the interrupt
+controller's line.

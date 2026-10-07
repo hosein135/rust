@@ -1,0 +1,12 @@
+[package]
+name = "ch37_out_of_order_transaction_testbench_7_1"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/ch37_out_of_order_transaction_testbench_7_1.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+rustdv = { path = "../../../rustdv" }
+tinyalu_utils = { path = "../tinyalu-utils" }

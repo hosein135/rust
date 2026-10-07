@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Draws drawtiming text as a TikZ picture. The text is what
+# sqlite2drawtiming writes from a signals database; drawtiming itself
+# needs ImageMagick, and the documents already load TikZ.
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_binary(
+    name = "dt2tikz",
+    srcs = ["main.rs"],
+    edition = "2021",
+)
+
+# A bus value's text is written only where it fits, on a synthetic
+# trace whose slivers would otherwise carry text onto their neighbours
+# (issue 865).
+sh_test(
+    name = "sliver_test",
+    srcs = ["sliver_test.sh"],
+    args = ["$(rootpath :dt2tikz)"],
+    data = [":dt2tikz"],
+)
+
+# A value is drawn at the tick its timestamp names, not a tick later
+# (issue 880).
+sh_test(
+    name = "timestamp_test",
+    srcs = ["timestamp_test.sh"],
+    args = ["$(rootpath :dt2tikz)"],
+    data = [":dt2tikz"],
+)

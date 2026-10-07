@@ -1,0 +1,102 @@
+// SPDX-License-Identifier: Apache-2.0
+//! The two machine counters, checked by a program that measures
+//! itself.
+//!
+//! This is not a lockstep test, and it cannot be one. The model steps
+//! when the core retires, so it knows how many instructions have gone
+//! by and has no idea how many cycles the pipeline spent; a program
+//! that read `mcycle` into a register would get a number from the core
+//! that no model could produce without knowing the microarchitecture,
+//! which is the thing the model exists not to know. So the counters
+//! are checked here, against the core alone, on the properties a
+//! program can rely on.
+use vreteno32::program::{back_to_back, measure};
+use vreteno32::run::run;
+
+#[test]
+fn a_program_measures_itself_with_the_counters() {
+    let ran = run(&measure(), &[], 4000);
+    assert!(ran.halted_at.is_some(), "the program did not halt");
+    let (cycles, retired, quotient) = (ran.mem[0], ran.mem[1], ran.mem[2]);
+
+    // The division is the point of the program: it retires one
+    // instruction and takes about thirty-three cycles, so the two
+    // counters cannot agree.
+    assert_eq!(quotient, 1000 / 7, "the division, so the work happened");
+    // Six: the first read of `minstret` itself, the five instructions
+    // after it, and none of the second read, which counts what came
+    // before it. This said five while a read wrote the count it had
+    // read back over its own retirement (#807).
+    assert_eq!(retired, 6, "instructions between the reads");
+    assert!(
+        cycles > retired + 20,
+        "cycles {cycles} against instructions {retired}: a division \
+         should leave a gap of about thirty, and a core whose `mcycle` \
+         counted retirements rather than cycles would show none"
+    );
+    // A sanity bound on the other side: the stretch is a handful of
+    // instructions and one division, not a thousand cycles.
+    assert!(cycles < 200, "cycles between the reads: {cycles}");
+}
+
+#[test]
+fn the_counters_read_rather_than_trapping() {
+    // Before issue 299 every one of these was an illegal instruction.
+    // The program above reads two of them; this says the run reached
+    // its halt at all, which it could not have done if a read had
+    // trapped into a handler that was never installed.
+    let ran = run(&measure(), &[], 4000);
+    assert!(
+        ran.halted_at.is_some(),
+        "a read of a counter trapped instead of answering"
+    );
+}
+
+#[test]
+fn a_read_of_a_counter_costs_it_nothing() {
+    // Four reads of each counter in a row. A read is a set from `x0`,
+    // which does not write; when it did, it wrote back the value it
+    // had read after the count, so each read cost `mcycle` its cycle
+    // and `minstret` its retirement (#807).
+    let ran = run(&back_to_back(), &[], 4000);
+    assert!(ran.halted_at.is_some(), "the program did not halt");
+    let cycles = &ran.mem[0..3];
+    let retired = &ran.mem[3..6];
+    assert_eq!(
+        retired,
+        &[1, 1, 1],
+        "minstret between reads in a row: each read retires one"
+    );
+    assert!(
+        cycles.iter().all(|&c| c >= 1 && c == cycles[0]),
+        "mcycle between reads in a row, one instruction each and no \
+         stall, so the same number every time and never zero: {cycles:?}"
+    );
+}
+
+/// `time` is the timer's count (issue 1012): a program reads it, loads
+/// the CLINT's `mtime` over the bus, and reads it again, and the three
+/// come in order and close together, since they are one count read
+/// three ways a few cycles apart.
+#[test]
+fn time_reads_the_timers_count() {
+    use vreteno32::isa::*;
+    let mtime = CLINT_BASE + MTIME_OFF;
+    let p = [
+        lui(2, 1), // the data memory
+        lui(6, (mtime + 0x800) >> 12),
+        csrrs(5, CSR_TIME, 0),
+        lw(7, 6, ((mtime << 20) as i32) >> 20),
+        csrrs(8, CSR_TIME, 0),
+        sw(5, 2, 0),
+        sw(7, 2, 4),
+        sw(8, 2, 8),
+        halt(),
+    ];
+    let ran = run(&p, &[], 4000);
+    assert!(ran.halted_at.is_some(), "the program did not halt");
+    let (t1, m, t2) = (ran.mem[0], ran.mem[1], ran.mem[2]);
+    assert!(t1 > 0, "the count runs: {t1}");
+    assert!(t1 <= m && m <= t2, "in order: {t1} {m} {t2}");
+    assert!(t2 - t1 < 60, "a few cycles apart: {t1} {t2}");
+}

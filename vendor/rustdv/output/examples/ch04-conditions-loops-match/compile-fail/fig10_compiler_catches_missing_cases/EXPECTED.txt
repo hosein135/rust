@@ -1,0 +1,7 @@
+error[E0004]: non-exhaustive patterns: `0_u8` and `5_u8..=u8::MAX` not covered
+ --> src/main.rs:3:22
+  |
+3 |     let name = match op_code {
+  |                      ^^^^^^^ not covered
+  |
+  = note: the matched value is of type `u8`

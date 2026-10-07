@@ -1,0 +1,89 @@
+% SPDX-License-Identifier: Apache-2.0
+\section{The Decision That Governs the Rest}
+\label{sec:e-elaboration}
+
+Two ways to turn this Rust into hardware. They are not compatible, and
+almost everything else follows from the choice.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[node distance=6mm]
+  % Positions are computed from the boxes rather than from a fixed drop.
+  % The two middle boxes have multi-line text, so a fixed `below=16mm of
+  % src` put the bottom box on top of them: the build stayed green and the
+  % figure was wrong.
+  \node[boxf,text width=62mm,align=left] (src) {%
+    \centerline{\textbf{Rust source}}\\[2pt]
+    units, buses, transactions, tags, config};
+
+  \node[boxf,text width=27mm,align=left,below=10mm of src.south west,
+        anchor=north west] (rt) {%
+    \centerline{\textbf{Runtime}}\\[2pt]
+    the program runs and builds a netlist};
+
+  \node[boxf,text width=27mm,align=left,below=10mm of src.south east,
+        anchor=north east] (pm) {%
+    \centerline{\textbf{Proc macro}}\\[2pt]
+    the macro reads the source and emits hardware};
+
+  % Below whichever of the two hangs lower.
+  \node[box,text width=62mm,align=center] (out)
+    at ($(src.south)!1!(rt.south |- pm.south) + (0,-12mm)$)
+    {\textbf{Netlist, then Verilog or VHDL}};
+
+  \draw[fl] (src.south west) ++(8mm,0) -- (rt.north);
+  \draw[fl] (src.south east) ++(-8mm,0) -- (pm.north);
+  \draw[fl] (rt.south) -- (rt.south |- out.north);
+  \draw[fl] (pm.south) -- (pm.south |- out.north);
+\end{tikzpicture}
+\caption{The two elaboration models. Only the right-hand one can
+reinterpret \code{if} on a signal, because only it sees the source.}
+\label{fig:elaboration}
+\end{figure}
+
+\textbf{Runtime elaboration.} The program runs, builds a netlist through
+side effects, and emits Verilog. Chisel~\cite{bachrach2012} works this way,
+and for the structural half of this design it would work here unchanged.
+The full expressive power of standard Rust remains available for metaprogramming
+and hardware generation without requiring procedural macros. However, native
+\code{if} on dynamic signals remains impossible, maintaining the constraints
+detailed in Section~\ref{sec:e-walls}, and generator errors surface at execution
+time rather than during compilation.
+
+\textbf{Proc macro elaboration.} An attribute on the unit parses the item's
+own source and emits hardware from it. \code{if} and \code{match} on
+signals can be reinterpreted structurally, which removes
+Section~\ref{sec:e-walls} entirely, and mistakes are compile errors. The
+cost is real and should be stated plainly: the code looks like Rust and
+does not mean Rust, and a reader who assumes Rust semantics inside a unit
+will be wrong.
+
+\begin{rulebox}[Recommendation]
+Proc macro elaboration. Control flow on a signal is the largest remaining
+cost of embedding, and this is the only approach that removes it.
+\end{rulebox}
+
+The second thesis' argument applies here unchanged. If a toolchain is
+affordable to build, it is worth building the one that buys the most, and a
+front end over Rust's syntax tree buys the type system, the module system,
+the generics, the package manager and the editor tooling along with it.
+
+\textbf{What was built.} \code{\#[lower]} is the proc macro
+elaboration, with one departure from the recommendation as stated.
+It reads \code{if} and \code{match} as Rust means them rather than
+reinterpreting them, and reads a subset that is also plain Rust,
+\code{with!}, \code{case!} and \code{select!} among registers,
+wires, memories and channel ports, and refuses the rest with a message
+of its own. So the cost above,
+code that looks like Rust and does not mean Rust, was not paid: a
+unit that lowers is the unit that simulates, one file, and the
+runtime~\cite{runtime} and examples~\cite{examples} documents state
+what the subset is and check every piece of it against a trace under
+\code{nvc}. The RISC-V core~\cite{vreteno} is written in that subset
+whole. A function under \code{\#[lower]} is the one addition since:
+combinational, a few \code{let}s and a value, plain Rust for the
+simulation and inlined at every call in a lowered unit of the same
+file. The macro reads the file for it, which
+\code{Span::local\_file} names, since a proc macro sees one item at
+a time. So a step can be short and its pieces named; the core's
+serial port is written so.

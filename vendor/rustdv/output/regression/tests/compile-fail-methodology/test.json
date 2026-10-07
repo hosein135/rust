@@ -1,0 +1,9 @@
+{
+  "comment": "Compile-fail tests for the methodology layer (test-plan §4): claims the book makes about what the compiler rejects, asserted with the expected error code. Needs cargo, not a simulator.",
+  "cmd": ["bash", "rustdv/framework-tests/compile-fail/run.sh"],
+  "cwd": ".",
+  "skip_if_missing": "cargo",
+  "expect_exit": 0,
+  "timeout": 600,
+  "expect_in_output": ["COMPILE-FAIL: PASS"]
+}

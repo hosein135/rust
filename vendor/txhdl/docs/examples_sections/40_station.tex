@@ -1,0 +1,80 @@
+% SPDX-License-Identifier: Apache-2.0
+\section{A Reservation Station}
+\label{sec:x-station}
+
+A reservation station gathers the operands of an operation that
+arrive out of order and on separate channels, and fires when all of
+them have. \code{Station2} to \code{Station10} in \code{txhdl\_parts}
+are the stations of two to ten inputs, each written out by
+\code{station!}. An input presents a tag and a value via
+\code{Tagged<TB, T>}; the station has a line per tag value, one cell
+per input in each, and an input lands in its cell of the line its
+tag names. A line whose every cell holds is sent on the output as
+one value, the tag and the values; at most one line per cycle, the
+completing input of lowest index choosing when two complete at once,
+the value that completes a line going straight through and the rest
+coming from their cells. An input's \code{ready} is its take: its
+cell is free, and taking it either completes nothing or completes
+the line being sent this cycle. The tutorial on the
+station~\cite{station} reads its rule cycle by cycle.
+
+The example is a station of two inputs, a byte and a half word, by a
+two-bit tag. The two sources offer their tags in different orders,
+one with gaps, and the sink holds the output off two cycles in four,
+so one line waits for room and a repeated tag waits for its cell.
+The netlist is checked against this run under both simulators, and
+the same station written by hand in Verilog, \code{station.v}, runs
+beside it as a foreign unit fed the same offers, the two compared
+line by line; the tutorial~\cite{station} reads the two side by
+side.
+
+\subsection*{Side by side with Verilog}
+
+The rows below set the hand-written Verilog beside the TxHDL text
+\code{station!} wrote for the same two-input station, piece by
+piece: the ports, the state, what each input offers, what completes
+a line, what is sent and taken, the drives, and the outputs. The two
+are the same hardware; the Verilog names every width and slices the
+tag and the value by hand, and writes each \code{ready} and
+\code{valid}, where the TxHDL text takes the widths from the payload
+type and the handshake from \code{recv\_if} and \code{send}. Both
+are included from the tree, and the example runs the two on the same
+offers and asserts they agree.
+
+\newcommand{\sidebyside}[2]{%
+\noindent\textbf{#2}\par\nopagebreak\vspace{2pt}%
+\noindent\begin{minipage}[t]{0.49\linewidth}
+\lstinputlisting[style=ascii,%
+  basicstyle=\ttfamily\fontsize{5.6}{6.6}\selectfont,%
+  rangebeginprefix=//\ begin\{,rangebeginsuffix=\},%
+  rangeendprefix=//\ end\{,rangeendsuffix=\},%
+  includerangemarker=false,linerange=#1-#1]{lib/examples/station.v}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.49\linewidth}
+\lstinputlisting[%
+  basicstyle=\ttfamily\fontsize{5.6}{6.6}\selectfont,%
+  rangebeginprefix=//\ begin\{,rangebeginsuffix=\},%
+  rangeendprefix=//\ end\{,rangeendsuffix=\},%
+  includerangemarker=false,linerange=#1-#1]{station2_marked.rs}
+\end{minipage}\par\vspace{6pt}}
+
+\sidebyside{ports}{The ports: Verilog, left; TxHDL, right.}
+\sidebyside{state}{The state: the cells and the masks.}
+\sidebyside{reads}{What each input offers, and whether its cell is free.}
+\sidebyside{completes}{What completes a line.}
+\sidebyside{takes}{The line sent, and what is taken.}
+\sidebyside{drives}{The drives: the cells and the masks.}
+\sidebyside{outputs}{The outputs: the line, and its handshake.}
+
+\begin{figure}[htbp]
+\centering
+\input{station_timing.tex}
+\caption{The station: the two inputs' tags, values and handshakes,
+the occupancy masks, and each line as it goes out, its tag and its
+two values.}
+\label{fig:x-station}
+\end{figure}
+
+\lstinputlisting[caption={\code{ex\_station.rs}. Run with \code{bazel run //lib/examples:ex\_station}.},label={lst:x-station}]{lib/examples/ex_station.rs}
+
+\lstinputlisting[style=ascii,caption={What \code{ex\_station} printed when the build ran it: what each input offered, the masks, and the line taken per cycle, then the lowering.},label={lst:x-station-out}]{out_station.txt}

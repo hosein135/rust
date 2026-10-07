@@ -1,0 +1,11 @@
+[package]
+name = "tinyalu_utils"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+# Crate root named after the crate, not lib.rs (D29).
+path = "src/tinyalu_utils.rs"
+
+[dependencies]
+rustdv = { path = "../../../rustdv" }

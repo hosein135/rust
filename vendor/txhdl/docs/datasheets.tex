@@ -1,0 +1,191 @@
+% SPDX-License-Identifier: Apache-2.0
+%
+% Datasheets: one per component the project has built. Built by
+% //docs:datasheets. The tables of ports, state and children come from
+% each component's own lowering, through //tools/datasheet; the prose is
+% in docs/datasheets/, one file per component, and
+% //tools/datasheet:coverage_test fails when a component has none.
+\documentclass[journal,onecolumn,9pt]{IEEEtran}
+
+\newcommand{\listingsize}{\normalsize}
+\input{housestyle}
+
+\InputIfFileExists{buildstamp.tex}{}{}
+\providecommand{\buildstamp}{Draft build (outside the Bazel flow).}
+
+% The generated tables. A sheet that asks for a table the generator
+% does not write stops the build, rather than printing nothing.
+\input{tools/datasheet/ds_tables}
+\makeatletter
+\newcommand{\dsget}[2]{%
+  \@ifundefined{ds@#1@#2}%
+    {\PackageError{datasheets}{//tools/datasheet writes no #1 for #2}%
+      {Add the component to tools/datasheet/main.rs.}}%
+    {\csname ds@#1@#2\endcsname}}
+\makeatother
+
+% A datasheet's heading: the component and what it is, on a page of
+% its own.
+\newcommand{\datasheet}[2]{\clearpage\section{#1}\label{ds:#1}%
+\noindent\textit{#2}\par\medskip}
+
+% Where a component lives: its source, its Rust path, and the document
+% that explains it.
+\newcommand{\dsfacts}[3]{%
+\begin{center}\footnotesize
+\begin{tabular}{@{}ll@{}}
+Source & #1 \\
+Rust path & #2 \\
+Explained in & #3 \\
+\end{tabular}
+\end{center}}
+
+% The generated part of a sheet: the interfaces as a diagram, how the
+% component is made and joined, and the tables. All of it is written
+% by //tools/datasheet from the component's own lowering, so a sheet
+% cannot say a port the netlist does not have (issue 173).
+% A component's register table, written by //tools/datasheet from the
+% map its peripheral declares with `regmap!` (issue 499), for a sheet
+% whose component has one. The sheet gives the heading and says how the
+% word is selected; this is the table, a row a register and a row a
+% field under it.
+\newcommand{\dsregs}[1]{\dsget{regs}{#1}}
+
+\newcommand{\dstables}[1]{%
+\subsection*{Interfaces}
+\dsget{figure}{#1}
+\subsection*{How it is instantiated}
+As lowered for \dsget{type}{#1}. The ports are named in the order the
+unit's \code{run} takes them.
+\dsget{instance}{#1}
+\subsection*{Ports, state and children}
+As lowered for \dsget{type}{#1}: \dsget{counts}{#1}.
+\dsget{ports}{#1}
+\dsget{state}{#1}
+\dsget{children}{#1}}
+
+\title{TxHDL Datasheets}
+
+\author{Filip Filmar and Dragiša Janković%
+\thanks{Both authors are independent. Filip Filmar is the
+corresponding author, at f@hdlfactory.com; Dragiša Janković is
+reached at linkedin.com/in/dragisa-jankovic.}%
+\thanks{This volume provides comprehensive datasheets for hardware components
+implemented in the \code{HDL/txhdl} project repository. Port, state, and
+submodule tables are extracted automatically during compilation directly from
+lowered netlist definitions. The project overview~\cite{cover} indexes companion
+documentation.}%
+\thanks{The authors used Claude, an AI assistant, while developing
+architectural concepts, documentation, and software. Verbatim prompts are
+preserved in repository commit logs.}%
+\thanks{\buildstamp}}
+
+\markboth{TxHDL Datasheets}{Filmar and Janković: TxHDL Datasheets}
+
+\begin{document}
+\maketitle
+
+\section*{How to Read a Datasheet}
+
+Each component is implemented within the synthesizable lowered subset,
+functioning simultaneously as cycle-accurate simulation logic and structural
+RTL. Individual datasheets define component functionality, generic parameters,
+port interface protocols, verification strategies, system instantiations, and
+architectural limitations.
+
+Interface tables are extracted systematically rather than transcribed
+manually. The build system compiles each component using canonical repository
+parameters, generating structural tables directly from the resulting netlists.
+Channel ports occupy single table rows displaying payload bit widths; within
+synthesized netlists, each channel expands to standard \code{\_data},
+\code{\_valid}, and \code{\_ready} signals. Discrete wire ports map directly to
+individual nets. Memory entries document data word widths alongside total depth.
+
+Parameterized component families instantiated across varying port configurations
+(such as routers multiplexing between two and eight peripherals) share a single
+datasheet displaying representative topology from production designs.
+
+% Channels and queues.
+\input{datasheets/Buffer}
+\input{datasheets/ChanCdc}
+\input{datasheets/Fifo}
+\input{datasheets/LineBuf}
+\input{datasheets/LineFetch}
+\input{datasheets/LinePair}
+\input{datasheets/LineStore}
+\input{datasheets/NoBeats}
+\input{datasheets/NoReads}
+\input{datasheets/ScanCtl}
+\input{datasheets/ScanFetch}
+\input{datasheets/ScanVideo}
+\input{datasheets/Station}
+% The AXI link.
+\input{datasheets/AxiHost}
+\input{datasheets/AxiPer}
+\input{datasheets/Router}
+\input{datasheets/Arbiter}
+\input{datasheets/LiteBridge}
+\input{datasheets/LiteSplit}
+\input{datasheets/AxiWb}
+\input{datasheets/AxiPins}
+\input{datasheets/AxiPerPins}
+% The network on chip.
+\input{datasheets/Switch}
+\input{datasheets/Node}
+\input{datasheets/Mesh}
+\input{datasheets/HostBridge}
+\input{datasheets/PerBridge}
+% Peripherals for the board.
+\input{datasheets/EthTx}
+\input{datasheets/EthRx}
+\input{datasheets/EthLite}
+\input{datasheets/EthSlots}
+\input{datasheets/FrameOut}
+\input{datasheets/FrameIn}
+\input{datasheets/FrameLen}
+\input{datasheets/EthShare}
+\input{datasheets/Hdmi}
+\input{datasheets/I2cInit}
+\input{datasheets/I2c}
+\input{datasheets/Mdio}
+\input{datasheets/Sd}
+% Vreteno and its devices.
+\input{datasheets/Vreteno}
+\input{datasheets/Hart}
+\input{datasheets/Mmu}
+\input{datasheets/Dmem}
+\input{datasheets/Rom}
+\input{datasheets/Timer}
+\input{datasheets/Plic}
+\input{datasheets/Dm}
+\input{datasheets/Dtm}
+\input{datasheets/DtmBridge}
+\input{datasheets/Gpio}
+\input{datasheets/CfgFlash}
+\input{datasheets/FlashWin}
+\input{datasheets/Remote}
+\input{datasheets/RemoteLink}
+\input{datasheets/Spi}
+\input{datasheets/Syscon}
+\input{datasheets/Wdog}
+\input{datasheets/Pwm}
+\input{datasheets/Tee}
+\input{datasheets/Check}
+\input{datasheets/Tracer}
+\input{datasheets/Uart}
+\input{datasheets/Ddr3Per}
+\input{datasheets/Entropy}
+\input{datasheets/Trng}
+\input{datasheets/Watch}
+\input{datasheets/Inject}
+\input{datasheets/Pair}
+\input{datasheets/Board}
+% PCIe.
+\input{datasheets/BarRegs}
+\input{datasheets/PcieBar}
+% Razboj, the GPU.
+\input{datasheets/Fb}
+\input{datasheets/Raster}
+\input{datasheets/Doorbell}
+
+\end{document}

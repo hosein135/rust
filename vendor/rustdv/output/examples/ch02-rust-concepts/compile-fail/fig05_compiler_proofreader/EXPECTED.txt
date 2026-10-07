@@ -1,0 +1,6 @@
+error[E0425]: cannot find value `resutl` in this scope
+ --> src/main.rs:3:20
+  |
+3 |     println!("{}", resutl);
+  |                    ^^^^^^ help: a local variable with a similar name
+  |                            exists: `result`

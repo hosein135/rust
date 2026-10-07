@@ -1,0 +1,229 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Building a program for Vreteno from a build for this machine.
+
+A program for the core is compiled for another machine than the one
+the build runs on, so the target that produces it has to be built
+under another platform. A transition does that: `vreteno_image` takes
+a `rust_binary`, builds it for the core, runs `//tools/elf2vreteno`
+over the ELF, and gives back the Rust source of the image. Everything
+else in the tree then depends on that source and nothing has to be
+built by hand with a flag.
+"""
+
+# The flags every crate built for the core is compiled with, the
+# programs' own and every library they link alike: the HAL's, which
+# the programs' `VRETENO_FLAGS` repeat. A library that set none was
+# built for the core unoptimised, with its debug assertions and
+# overflow checks, which cost the logo's table a copy of ten kilobytes
+# a pixel (issue 1245). The transition sets them once for all of them
+# (issue 1248), and a build for this machine, the libraries' own tests
+# included, keeps its defaults.
+CORE_RUSTC_FLAGS = [
+    "-Copt-level=z",
+    "-Cdebug-assertions=no",
+    "-Coverflow-checks=no",
+]
+
+def _to_vreteno(settings, attr):
+    _ = settings  # the incoming configuration is not read
+    return {
+        "//command_line_option:platforms": str(attr.platform),
+        "@rules_rust//rust/settings:extra_rustc_flags": CORE_RUSTC_FLAGS,
+    }
+
+_vreteno_transition = transition(
+    implementation = _to_vreteno,
+    inputs = [],
+    outputs = [
+        "//command_line_option:platforms",
+        "@rules_rust//rust/settings:extra_rustc_flags",
+    ],
+)
+
+def _vreteno_image_impl(ctx):
+    elf = ctx.executable.program
+    out = ctx.actions.declare_file(ctx.label.name + ".rs")
+    ctx.actions.run_shell(
+        inputs = [elf],
+        outputs = [out],
+        tools = [ctx.executable._tool],
+        command = "'{}' '{}' > '{}'".format(
+            ctx.executable._tool.path,
+            elf.path,
+            out.path,
+        ),
+        mnemonic = "VretenoImage",
+        progress_message = "Making a Vreteno image of %s" % elf.short_path,
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+vreteno_image = rule(
+    implementation = _vreteno_image_impl,
+    doc = "The Rust source of a Vreteno image, from a program built " +
+          "for the core.",
+    attrs = {
+        "program": attr.label(
+            doc = "The `rust_binary` to build for the core.",
+            executable = True,
+            cfg = _vreteno_transition,
+            mandatory = True,
+        ),
+        "platform": attr.label(
+            doc = "The platform the core is.",
+            mandatory = True,
+        ),
+        "_tool": attr.label(
+            default = "//tools/elf2vreteno",
+            executable = True,
+            cfg = "exec",
+        ),
+    },
+)
+
+def _vreteno_flat_impl(ctx):
+    """The flat image of a program built for the core.
+
+    A program that is loaded rather than built into the netlist goes to
+    the board as bytes, so it wants the linked ELF flattened. The
+    transition is the same one `vreteno_image` uses: without it the
+    program is built for this machine, where its inline assembly is not
+    even the right architecture.
+    """
+    elf = ctx.executable.program
+    out = ctx.actions.declare_file(ctx.label.name + ".bin")
+    ctx.actions.run(
+        inputs = [elf],
+        outputs = [out],
+        executable = ctx.executable._objcopy,
+        arguments = ["-O", "binary", elf.path, out.path],
+        mnemonic = "VretenoFlat",
+        progress_message = "Flattening %s for the board" % elf.short_path,
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+vreteno_flat = rule(
+    implementation = _vreteno_flat_impl,
+    doc = "The flat image of a program built for the core, for the " +
+          "loader to take off the serial port.",
+    attrs = {
+        "program": attr.label(
+            doc = "The `rust_binary` to build for the core.",
+            executable = True,
+            cfg = _vreteno_transition,
+            mandatory = True,
+        ),
+        "platform": attr.label(
+            doc = "The platform the core is.",
+            mandatory = True,
+        ),
+        "_objcopy": attr.label(
+            default = "@riscv_none_elf_gcc//:objcopy",
+            executable = True,
+            allow_single_file = True,
+            cfg = "exec",
+        ),
+    },
+)
+
+# Stock `fastboot` reads a boot image header's worth of a file before
+# it decides whether the file is one, and refuses a shorter file as
+# "too short": 1580 bytes, the size of `boot_img_hdr_v3`, for the
+# 35.0.2 the tree pins (issue 799). A page is past every header
+# version and is what the flagship was shown to boot.
+_FASTBOOT_MIN = 4096
+
+def _vreteno_fastboot_impl(ctx):
+    """A flat program padded with zeros for stock `fastboot boot`.
+
+    The padding lies past the program's end, so the program never reads
+    it; the server copies it to memory with the rest and jumps to the
+    start, as it would with the program alone.
+    """
+    flat = ctx.file.flat
+    out = ctx.actions.declare_file(ctx.label.name + ".bin")
+    ctx.actions.run_shell(
+        inputs = [flat],
+        outputs = [out],
+        command = "cp '{}' '{}' && chmod u+w '{}' && truncate -s '>{}' '{}'".format(
+            flat.path,
+            out.path,
+            out.path,
+            _FASTBOOT_MIN,
+            out.path,
+        ),
+        mnemonic = "VretenoFastboot",
+        progress_message = "Padding %s for fastboot" % flat.short_path,
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+vreteno_fastboot = rule(
+    implementation = _vreteno_fastboot_impl,
+    doc = "A flat program padded to at least 4096 bytes, which stock " +
+          "`fastboot boot` takes where it refuses the program alone.",
+    attrs = {
+        "flat": attr.label(
+            doc = "The flat image, a `vreteno_flat`.",
+            allow_single_file = [".bin"],
+            mandatory = True,
+        ),
+    },
+)
+
+def _vreteno_elf_impl(ctx):
+    """The linked ELF of a program built for the core.
+
+    gdb's `load` reads an ELF, its symbols with it, so a program a
+    debugger loads wants the ELF itself rather than the flat image. The
+    transition is the one `vreteno_flat` uses; the ELF is copied out
+    under this target's name, so a test can name one file.
+    """
+    elf = ctx.executable.program
+    out = ctx.actions.declare_file(ctx.label.name + ".elf")
+    ctx.actions.symlink(output = out, target_file = elf)
+    return [DefaultInfo(files = depset([out]))]
+
+vreteno_elf = rule(
+    implementation = _vreteno_elf_impl,
+    doc = "The linked ELF of a program built for the core, for a " +
+          "debugger to load.",
+    attrs = {
+        "program": attr.label(
+            doc = "The `rust_binary` to build for the core.",
+            executable = True,
+            cfg = _vreteno_transition,
+            mandatory = True,
+        ),
+        "platform": attr.label(
+            doc = "The platform the core is.",
+            mandatory = True,
+        ),
+    },
+)
+
+def _vreteno_static_impl(ctx):
+    files = [
+        f
+        for f in ctx.attr.library[0][DefaultInfo].files.to_list()
+        if f.extension == "a"
+    ]
+    if len(files) != 1:
+        fail("expected one static library from %s" % ctx.attr.library[0].label)
+    return [DefaultInfo(files = depset(files))]
+
+vreteno_static = rule(
+    implementation = _vreteno_static_impl,
+    doc = "A `rust_static_library` built for the core, as the `.a` a C " +
+          "program for it links: what a Zephyr program on Vreteno takes " +
+          "the GL library from (issue 996).",
+    attrs = {
+        "library": attr.label(
+            doc = "The `rust_static_library` to build for the core.",
+            cfg = _vreteno_transition,
+            mandatory = True,
+        ),
+        "platform": attr.label(
+            doc = "The platform the core is.",
+            mandatory = True,
+        ),
+    },
+)

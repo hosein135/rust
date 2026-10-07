@@ -1,0 +1,221 @@
+# SPDX-License-Identifier: Apache-2.0
+# Parts: units the language provides as hardware, written in the
+# language's own lowerable subset. The channel buffer is the first.
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+load("//tools/vivado:defs.bzl", "vivado_place_and_route2", "vivado_synthesis2")
+
+rust_library(
+    name = "txhdl_parts",
+    srcs = [
+        "src/buffer.rs",
+        "src/eth.rs",
+        "src/ethdma.rs",
+        "src/ethshare.rs",
+        "src/ethslots.rs",
+        "src/bus/axi.rs",
+        "src/bus/axi_lite.rs",
+        "src/bus/axi_per_pins.rs",
+        "src/bus/axi_pins.rs",
+        "src/bus/lite_split.rs",
+        "src/bus/noc.rs",
+        "src/bus/noc/bridge.rs",
+        "src/bus/noc/mesh.rs",
+        "src/bus/noc/node.rs",
+        "src/bus/noc/pkt.rs",
+        "src/bus/noc/switch.rs",
+        "src/bus/axi/fuzz.rs",
+        "src/bus/axi/sim.rs",
+        "src/bus/mod.rs",
+        "src/bus/arbiter.rs",
+        "src/bus/router.rs",
+        "src/bus/wb.rs",
+        "src/bus/wb/sim.rs",
+        "src/cdc.rs",
+        "src/derives.rs",
+        "src/dma.rs",
+        "src/dtm.rs",
+        "src/fifo.rs",
+        "src/cfgflash.rs",
+        "src/flashwin.rs",
+        "src/gpio.rs",
+        "src/hdmi.rs",
+        "src/i2c.rs",
+        "src/mdio.rs",
+        "src/mmu.rs",
+        "src/mmu/tests.rs",
+        "src/plic.rs",
+        "src/pwm.rs",
+        "src/lowering.rs",
+        "src/regmap.rs",
+        "src/redundant.rs",
+        "src/remote.rs",
+        "src/scanout.rs",
+        "src/sd.rs",
+        "src/remote/eth.rs",
+        "src/spi.rs",
+        "src/station.rs",
+        "src/tracer.rs",
+        "src/trng.rs",
+        "src/syscon.rs",
+        "src/wdog.rs",
+        "src/lib.rs",
+    ],
+    crate_name = "txhdl_parts",
+    edition = "2021",
+    visibility = ["//visibility:public"],
+    deps = ["//lib:txhdl"],
+    proc_macro_deps = ["//lib:txhdl_macros"],
+)
+
+# The crate's own tests: a unit in a plain #[test].
+rust_test(
+    name = "parts_test",
+    crate = ":txhdl_parts",
+    edition = "2021",
+)
+
+# The AXI link's fuzzing alone, over many more seeds than the 24 that
+# `parts_test` runs: what the nightly fuzz workflow, fuzz.yml, runs over
+# 1024 seeds. Manual, since it is a long run.
+#
+#   bazel test //lib/parts:axi_fuzz_test --test_env=AXI_FUZZ_SEEDS=1024
+rust_test(
+    name = "axi_fuzz_test",
+    args = ["bus::axi::fuzz::"],
+    crate = ":txhdl_parts",
+    edition = "2021",
+    tags = ["manual"],
+)
+
+# The sources by name, for the documents' API extraction.
+exports_files(glob(["src/*.rs", "src/bus/*.rs", "src/bus/axi/*.rs", "src/bus/noc/*.rs", "src/bus/wb/*.rs"]))
+
+# The hand-written Verilog the netlists instantiate and do not
+# write: the ring oscillators of the entropy source, the
+# configuration flash's startup block (issue 312), and the constraints
+# that keep the timer off the rings' loops.
+filegroup(
+    name = "hdl",
+    srcs = [
+        "hdl/ring_osc.v",
+        "hdl/startup.v",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# The configuration flash's startup block (issue 312): the primitive
+# when synthesised, a model when simulated, and the model again as an
+# entity for the VHDL netlists.
+exports_files([
+    "hdl/startup.v",
+    "hdl/startup.vhd",
+])
+
+filegroup(
+    name = "hdl_xdc",
+    srcs = ["hdl/ring_osc.xdc"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "sources",
+    srcs = glob(["src/*.rs", "src/bus/*.rs", "src/bus/axi/*.rs", "src/bus/noc/*.rs", "src/bus/wb/*.rs"]),
+    visibility = ["//visibility:public"],
+)
+
+# The Verilog of one node, and of one switch inside it, for a synthesis
+# run that says how fast a node can go and what it costs (issue 99).
+#
+#   bazel run //lib/parts:noc_netlist -- switch
+rust_binary(
+    name = "noc_netlist",
+    srcs = ["src/bin/noc_netlist.rs"],
+    edition = "2021",
+    deps = [":txhdl_parts"],
+)
+
+genrule(
+    name = "node_v",
+    outs = ["node.v"],
+    cmd = "$(location :noc_netlist) node > $@",
+    tools = [":noc_netlist"],
+)
+
+genrule(
+    name = "switch_v",
+    outs = ["switch.v"],
+    cmd = "$(location :noc_netlist) switch > $@",
+    tools = [":noc_netlist"],
+)
+
+filegroup(
+    name = "noc_xdc",
+    srcs = ["noc.xdc"],
+)
+
+# One node and one switch through Vivado, for the timing and the
+# utilisation issue 99 asks for. Manual, as every Vivado target here
+# is.
+#
+#   bazel build //lib/parts:node_synth
+vivado_synthesis2(
+    name = "node_synth",
+    srcs = [":node.v"],
+    part = "xc7a200tfbg484-2",
+    tags = ["manual"],
+    top = "node",
+    xdcs = [":noc_xdc"],
+)
+
+vivado_synthesis2(
+    name = "switch_synth",
+    srcs = [":switch.v"],
+    part = "xc7a200tfbg484-2",
+    tags = ["manual"],
+    top = "switch",
+    xdcs = [":noc_xdc"],
+)
+
+# The Sv32 unit, Mmu8, alone and out of context against the core's ten
+# nanosecond clock (issue 1014): whether its registers meet the clock,
+# and how long the answer takes from the virtual address the core holds
+# in a register to the physical address it sends. Manual, as every
+# Vivado target here is.
+#
+#   bazel build //lib/parts:mmu_pnr
+filegroup(
+    name = "mmu_xdc",
+    srcs = ["mmu.xdc"],
+)
+
+vivado_synthesis2(
+    name = "mmu_synth",
+    srcs = ["//docs:mmu.v"],
+    part = "xc7a200tfbg484-2",
+    synth_design_options = "-mode out_of_context",
+    tags = ["manual"],
+    top = "mmu8",
+    xdcs = [":mmu_xdc"],
+)
+
+vivado_place_and_route2(
+    name = "mmu_pnr",
+    # The paths the core will put the unit on: from each port's address
+    # into its answer's registers, from those registers to the ports,
+    # and the worst from register to register.
+    post_route_design = [
+        'puts "TXHDL-PROBE ipa"',
+        'puts [report_timing -from [get_ports -filter {NAME =~ "ireq*"}] -to [get_cells -filter {NAME =~ "ipa_reg*" || NAME =~ "iok_reg*" || NAME =~ "ipf_reg*"}] -max_paths 1 -return_string]',
+        'puts "TXHDL-PROBE dpa"',
+        'puts [report_timing -from [get_ports -filter {NAME =~ "dreq*"}] -to [get_cells -filter {NAME =~ "dpa_reg*" || NAME =~ "dok_reg*" || NAME =~ "dpf_reg*"}] -max_paths 1 -return_string]',
+        'puts "TXHDL-PROBE out"',
+        'puts [report_timing -to [get_ports -filter {NAME =~ "ires*" || NAME =~ "dres*"}] -max_paths 1 -return_string]',
+        'puts "TXHDL-PROBE regs"',
+        'puts [report_timing -max_paths 1 -return_string]',
+        'puts "TXHDL-PROBE end"',
+    ],
+    placeholder_bitstream = True,
+    synthesis = ":mmu_synth",
+    tags = ["manual"],
+    xdcs = [":mmu_xdc"],
+)

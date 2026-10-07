@@ -1,0 +1,184 @@
+% SPDX-License-Identifier: Apache-2.0
+% covers: LineFetch
+\datasheet{LineFetch}{A host on the bus that reads a run of memory in
+bursts, into a channel.}
+
+\dsfacts{\code{lib/parts/src/dma.rs}}{\code{txhdl\_parts::dma::LineFetch}}%
+{\code{//docs:examples}}
+
+\subsection*{Function}
+
+A peripheral that wants a lot of memory should not have the core copy
+it. The video peripheral's framebuffer is 19\,200 register writes for
+a frame of the board's 160 by 120, and would be 307\,200 for a full
+640 by 480. The Ethernet peripheral is the same shape a byte at a
+time, and in both the processor's whole job during them is copying.
+
+\code{LineFetch} is the alternative, and it is the half the video and
+the MAC both want. Told an address and a count it issues read bursts
+and puts the words that come back into a channel. What consumes that
+channel is the peripheral's business: for the video it crosses to the
+pixel clock through \code{ChanCdc}, and for a MAC it feeds the
+transmitter.
+
+\subsection*{Parameters}
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}lp{0.68\textwidth}@{}}
+\toprule
+Parameter & Meaning \\
+\midrule
+\code{A} & The width of an address, in bits. \\
+\code{I} & The width of a burst identifier, in bits. \\
+\code{BEATS} & How many beats a burst asks for. \\
+\code{WC} & The width of the word count, which says how long a run is. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The identifier is a parameter and never a literal, so a link that
+widens its identifiers costs this component nothing. The tables below
+use \code{LineFetch<32, 2, 16, 16>}, the fetcher of \code{ex\_dma}:
+sixteen-beat bursts on a thirty-two bit address.
+
+\dstables{LineFetch}
+
+\subsection*{Behaviour}
+
+\begin{itemize}
+\item A run starts when \code{go} is high and nothing is in flight.
+\code{base} and \code{words} are read once, there, so a register
+written under the engine does not move the run out from under it.
+\item A burst goes out when none is in flight and words are still
+wanted, asking for \code{BEATS} beats, the rest of the run, or the
+words to the next 4\,KB boundary, whichever is fewest. AXI4 forbids a
+burst that crosses one, and the board's DDR3 controller refuses it
+(issue 1209).
+\item A beat is taken when one is offered and the channel out has
+room. That room is the backpressure: a consumer that stops taking
+stops the bursts.
+\item \code{running} is high while a run is unfinished.
+\end{itemize}
+
+Two things about the bus are the opposite of what they look like, and
+both were written the other way first, and both deadlock.
+
+\emph{The identifier arrives with the burst, not before it.} The host
+takes an \code{Issue}, chooses a free identifier and says which on
+\code{grant}, so a client sends the burst and catches the identifier
+as it comes back. Asking for one and waiting is a deadlock: nothing
+is granted until something is issued.
+
+\emph{A read burst is finished by its last beat, not by \code{done}.}
+The host puts a write's response on \code{done} and answers a read on
+the beat channel. So the identifier goes back as the last beat is
+taken, and the last beat is only taken when there is room to give it
+back.
+
+\subsection*{Verification}
+
+\begin{itemize}
+\item \code{ex\_dma} fetches sixty-four words through sixteen-beat
+bursts across a real link, with \code{AxiHost}, \code{AxiPer} and a
+memory on the far side. The build checks the netlist against that run
+under nvc and Verilator:
+\code{//docs:dma\_sim\_linefetch\_tb\_test} and
+\code{//docs:dma\_vsim\_test}.
+\item \code{a\_burst\_never\_crosses\_a\_4k\_boundary}, in
+\code{//lib/parts:parts\_test}, starts a run 32 words below a 4\,KB
+boundary with bursts of up to 128 and checks that the first is cut
+there, that none crosses one, and that every word still comes, in
+order. It fails without the cut.
+\item The example asserts rather than prints. Every word arrived;
+each word is the one at its own address, since the memory holds its
+address in each word, so a word from the wrong burst or out of order
+says so; and the run came in under a cycle bound a path spending an
+address phase per word could not meet. Sixty-four words in 93 cycles
+against a bound of 128.
+\item The memory model there answers bursts rather than words. A
+model that answered one beat per request would make a burst look like
+a word: the words would still all arrive, the cycle count would still
+pass, and nothing about bursting would be demonstrated.
+\end{itemize}
+
+\subsection*{Choosing \code{BEATS}}
+
+\code{BEATS} is the lever that decides whether real memory latency
+matters, and the number that looks like a measurement above does not
+say so on its own.
+
+The 93 cycles are measured against a memory model that answers a beat
+the cycle after the request: no activation, no CAS, no refresh. So
+that figure is a floor and not an estimate. What a real memory adds is
+one first-beat latency per burst, and the burst count is
+\code{ceil(words / BEATS)}, so the exposed latency is the burst count
+multiplied by whatever the controller's latency is. One burst is in
+flight at a time, so none of it is hidden.
+
+That makes the parameter, rather than the engine, the answer to a
+consumer that is faster than a raster. A frame of 1500 bytes is 375
+words, and at gigabit the wire takes about 1200 cycles at 100\,MHz:
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}lll@{}}
+\toprule
+\code{BEATS} & Bursts for a frame & Fits 1200 cycles while \\
+\midrule
+16 & 24 & latency is under about 27 cycles \\
+256 & 2 & latency is under about 327 cycles \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A realistic DDR3 first-beat latency is tens of cycles, so sixteen-beat
+bursts can lose that margin and 256-beat bursts cannot. The board's
+scanout learnt the same: in sixteen-beat bursts a 640-word line under
+the core's copying and the Ethernet port's sending took 4682 cycles
+of the 3175 a line lasts, and every line was late. It fetches in bursts
+of 64, \code{LineFetch<32, 2, 64, 16>}, and takes 1206; bursts of 128
+took 942, but a load of the core's waiting behind one waited 153 cycles
+rather than 94 (issue 1209). A MAC should use a longer one too. Both
+are the same component with a different parameter, and neither needs a
+second burst in flight, which is what keeps a second identifier, a
+tracker and out-of-order answers out of the design.
+
+\subsection*{Limits}
+
+\textbf{It counts the beats of a burst itself and never reads the
+returned beat's \code{last}.} So it cannot notice a peripheral that
+answers fewer beats than the burst asked for: it takes what arrives
+and waits for the rest, holding \code{running} high, with nothing to
+say why. Against the Wishbone bridge before issue 471, which answered
+any read with one beat, sixty four words became one and the run did
+not end.
+
+That is worth knowing before joining it to a peripheral written
+elsewhere. The engine assumes AXI4 is obeyed, and a peripheral that
+under-delivers is outside what it can detect rather than something it
+reports.
+
+
+\textbf{A burst never crosses a 4\,KB address boundary}, which is
+AXI4's rule: the engine cuts a burst at the boundary and starts the
+next from it (issue 1209). A run from a base aligned to \code{BEATS}
+words never meets the cut, so it costs such a run nothing; it is there
+so that a run from anywhere else is still legal. Before it, a caller
+that started a run at an arbitrary address with a long \code{BEATS}
+could send a burst the interconnect was entitled to answer however it
+liked.
+
+One burst is in flight at a time, deliberately. A second would want a
+second identifier, a tracker to tell the two apart and an answer for
+what happens when they come back out of order, and none of that buys
+anything while the consumer is a raster taking one pixel per visible
+cycle.
+
+It reads and never writes. \code{done} is drained so that a write
+answer arriving from elsewhere cannot block the host, and is
+otherwise unused.
+
+It runs on one clock, \code{DefaultClock}, which is the bus clock.
+Crossing to a consumer on another clock is \code{ChanCdc}'s job and
+not this component's.
+
+Beats are words: \code{size} is fixed at two, four bytes a beat.

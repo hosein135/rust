@@ -1,0 +1,2 @@
+Transaction { op: "MUL", a: 5, b: 3 }
+same object: true

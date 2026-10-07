@@ -1,0 +1,282 @@
+% SPDX-License-Identifier: Apache-2.0
+%
+% A reservation station in TxHDL: the tutorial on the part. Built by
+% //docs:station. Every listing is included from the tree and every
+% printout and figure is what the build made by running the example.
+\documentclass[journal,9pt]{IEEEtran}
+
+% Listings of Rust set by rustfmt at 80 columns: 5.6pt is what fits
+% the frame of a column (issue 1061).
+\newcommand{\listingsize}{\fontsize{5.6}{6.6}\selectfont}
+\input{housestyle}
+
+\InputIfFileExists{buildstamp.tex}{}{}
+\providecommand{\buildstamp}{Draft build (outside the Bazel flow).}
+
+\title{A Reservation Station in TxHDL}
+
+\author{Filip Filmar and Dragiša Janković%
+\thanks{Both authors are independent. Filip Filmar is the
+corresponding author, at f@hdlfactory.com; Dragiša Janković is
+reached at linkedin.com/in/dragisa-jankovic.}%
+\thanks{This tutorial demonstrates the reservation station component from the
+parts library, for developers who have completed the introductory
+tutorial~\cite{tutorial} and seek to utilize or study out-of-order execution
+primitives. Listings are extracted directly from the repository \code{HDL/txhdl}
+at build time; logs and waveforms reflect actual test execution. The component
+source appears in~\cite{runtime}, reference examples in~\cite{examples}, and the
+project index~\cite{cover} catalogues all companion documents.}%
+\thanks{The authors used a large language model, Claude, as an
+assistant in exploring concepts and in drafting and constructing
+the documents and implementations; every repository commit documents
+this collaboration and includes the prompt sequence verbatim.}%
+\thanks{\buildstamp}}
+
+\markboth{A Reservation Station in TxHDL}{Filmar and Janković: A Reservation Station in TxHDL}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+A reservation station gathers asynchronous operands for an operation arriving
+out of order across independent channels, dispatching them downstream once all
+dependencies resolve. The TxHDL parts library provides parameterised
+reservation stations, from \code{Station2} to \code{Station10}. Each variant
+lowers to synthesizable RTL exposing one input channel per operand and a unified
+output channel. This document describes the hardware mechanics of the station,
+traces its operational rules cycle by cycle against an executable design,
+details FIFO queue integration, and analyzes the emitted netlist.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Reservation station, Tomasulo algorithm, out-of-order execution, queues,
+hardware description languages, TxHDL.
+\end{IEEEkeywords}
+
+\section{What It Is}
+\label{sec:s-what}
+
+Operations requiring multiple operands must synchronize awaiting the final
+input. When operands originate from independent producers across distinct
+channels in non-deterministic order, intermediate storage must buffer early
+arrivals while isolating distinct operations. Tomasulo reservation stations
+solve this coordination problem. Each operation is assigned a unique tag. Each
+incoming operand holds the tag of its parent operation. The station allocates a
+storage line per tag, subdivided into cells for each input channel. Operands
+latch into their assigned line cells. When all cells within a line hold valid
+operands, the line completes and dispatches all values concurrently alongside
+its tag.
+
+In TxHDL, input and output interfaces operate as transactional channels. An
+input asserts \code{ready} when the station has buffer capacity for the offered
+transaction, determined by whether the targeted tag cell is unoccupied. Output
+\code{valid} indicates a completed line ready for dispatch, while output
+\code{ready} reflects downstream buffer availability.
+
+\section{The Interface}
+\label{sec:s-interface}
+
+Input channels transport \code{Tagged<TB, T>} structures, packaging a
+\code{TB}-bit tag alongside payload data of type \code{T}. This struct derives
+both \code{Transaction} and \code{Value}. An $N$-input reservation station is
+instantiated as \code{StationN<TB, L, T0, .., TN>}, parameterised by tag width
+\code{TB}, line capacity \code{L} (equal to \code{1 << TB}), and individual
+operand types \code{T0} through \code{TN}. The \code{run} method accepts a tuple
+of $N$ input receivers, \code{Rx<Tagged<TB, Ti>>}, and a single output
+transmitter, \code{Tx<LineN<TB, T0, .., TN>>}. The emitted \code{LineN} struct
+bundles the tag with resolved operand values \code{v0} through \code{vN}.
+Listing~\ref{lst:s-part} presents the library source code: the tagged payload
+definition and nine concrete station generators produced by macro
+\code{station!}.
+
+\lstinputlisting[rangebeginprefix=//\ begin\{,rangebeginsuffix=\},rangeendprefix=//\ end\{,rangeendsuffix=\},includerangemarker=false,linerange=part-part,caption={From \code{lib/parts/src/station.rs}: the tagged payload and the nine stations; the rule is in the module's own words there, and its tests follow.},label={lst:s-part}]{lib/parts/src/station.rs}
+
+\section{The Rule}
+\label{sec:s-rule}
+
+In each clock cycle, the station examines incoming channel offers and evaluates
+its internal state: a dedicated memory array storing operand cells per input,
+and an occupancy mask tracking valid cells per line. The dispatch discipline
+operates as follows:
+
+\begin{enumerate}
+\item A cell is \emph{free} when its corresponding bit in the input occupancy
+  mask is clear.
+\item Consuming an input \emph{completes} a line when all other operand cells in
+  that line already hold valid data, or when another input offers the matching
+  tag concurrently into a free cell.
+\item The \emph{sent} line corresponds to the lowest-indexed completing input,
+  provided the downstream channel asserts \code{ready}. At most one line
+  dispatches per cycle.
+\item An input is \emph{taken} if its cell is free and consumption either
+  completes no line or completes the active line being dispatched. Inputs whose
+  acceptance would complete a line that cannot dispatch this cycle must wait,
+  occurring when downstream channels lack capacity or when a lower-indexed
+  input claims dispatch priority.
+\item Taken inputs write their payload into cell memory and set their occupancy
+  bit. Dispatched lines clear their occupancy bit across all masks; output
+  values are routed from memory cells, with concurrent inputs forwarded
+  directly through bypass logic.
+\end{enumerate}
+
+Under this discipline, inputs never block on cells belonging to other inputs;
+they wait only on their own cell capacity or downstream backpressure. If an input
+repeatedly presents tags whose matching lines never complete due to stalled
+upstream producers, the channel stalls indefinitely. The station provides no
+internal timeout or eviction arbitration.
+
+\section{The Rule, Cycle by Cycle}
+\label{sec:s-cycles}
+
+The reference example configures a \code{Station2} module coordinating an 8-bit
+byte and a 16-bit halfword with a 2-bit tag, supporting four lines. The first
+source generates bytes tagged 0, 1, 2, 3, 0, 2 across successive cycles as the
+station permits. The second source offers halfwords tagged 2, 0, 3, 1, 2, 0,
+pausing every third cycle. The receiving sink accepts output lines on two
+cycles out of four. Listing~\ref{lst:s-out} records the cycle-by-cycle execution
+log, documenting offered inputs, occupancy masks, and retiring lines. Offers
+arrive at station inputs in the cycle following transmission, reflecting
+standard register-transfer delays.
+
+\lstinputlisting[style=ascii,caption={What \code{ex\_station} printed when the build ran it: the offers, the masks, the lines taken; then the lowering.},label={lst:s-out}]{out_station.txt}
+
+Trace execution across successive cycles:
+
+\begin{itemize}
+\item Cycle 1: Source 0 offers byte tag 0; source 1 offers halfword tag 2.
+\item Cycle 2: The station consumes both into cell 0 of mask 0 and cell 2 of
+  mask 1 (masks: \code{0001} and \code{0100}).
+\item Cycle 3: Halfword tag 0 completes line 0 because byte cell 0 is valid.
+  Line 0 dispatches immediately, while byte tag 1 fills cell 1 (masks:
+  \code{0010} and \code{0000}). The sink consumes line 0 in cycle 4.
+\item Cycle 4: Byte tag 2 completes line 2 because halfword cell 2 is valid.
+  Line 2 dispatches and cell 2 clears (masks: \code{0000} and \code{0000}).
+\item Cycle 5: Both sources offer tag 3 simultaneously. Both complete line 3
+  concurrently, dispatching immediately without updating storage masks.
+\item Cycle 6: Byte tag 0 fills cell 0 (\code{0011}). Halfword tag 1 would
+  complete line 1, but downstream output buffers retain pending lines 2 and 3;
+  lacking capacity, halfword 1 waits.
+\item Cycle 7: Halfword 1 waits again; byte tag 2 fills cell 2 (\code{0111}).
+\item Cycle 8: The sink consumes line 2; output space opens, line 1 dispatches,
+  and cell 1 clears (\code{0101}).
+\item Cycle 9: Halfword tag 2 completes line 2 (\code{0001}).
+\item Cycle 11: Output backpressure stalls halfword tag 0 until cycle 12,
+  completing line 0 once masks empty. The sink consumes lines 1, 2, and 0 in
+  cycles 11, 12, and 15.
+\end{itemize}
+
+Figure~\ref{fig:s-wave} illustrates the complete waveform: input valid/ready
+handshakes, mask transitions, and output retirements. Input 1 asserts backpressure
+through cycles 6, 7, and 11, matching the waiting conditions of Rule 4.
+
+\begin{figure*}[t]
+\centering
+\input{station_timing.tex}
+\caption{The example's run: the two inputs' tags, values and
+handshakes, the masks, and the lines out with their values.}
+\label{fig:s-wave}
+\end{figure*}
+
+\section{Using a Station}
+\label{sec:s-use}
+
+Listing~\ref{lst:s-example} presents the complete top-level integration. The
+module instantiates \code{Station2<2, 4, U<8>, U<16>>} directly. Input ports
+attach to two channel receivers, and output ports connect to a single
+transmitter. Source processes emit \code{Tagged} structures while sink processes
+consume \code{Line2} values, accessing fields \code{tag}, \code{v0}, and
+\code{v1}. Higher-order stations extend this structure up to \code{Station10}.
+Tags require at least two bits; single-bit values map to scalar wires in VHDL
+and cannot index multi-line memories.
+
+\lstinputlisting[caption={\code{ex\_station.rs}. Run with \code{bazel run //lib/examples:ex\_station}.},label={lst:s-example}]{lib/examples/ex_station.rs}
+
+Because native channels buffer two items, the station output tolerates two
+cycles of downstream backpressure before stalling. When consumers process
+traffic in large bursts, a dedicated \code{Fifo} queue is placed downstream of
+the station: \code{Fifo<Line2<2, U<8>, U<16>>, 3, 8>} provides an 8-entry queue
+indexed by 3 address bits. Listing~\ref{lst:s-queue} demonstrates FIFO operation
+buffering nine incoming items across a 4-entry queue.
+
+\lstinputlisting[style=ascii,caption={What \code{ex\_queue} printed when the build ran it: a FIFO of four between two channels, filling and draining; then its lowering.},label={lst:s-queue}]{out_queue.txt}
+
+\section{The Same Station in Verilog}
+\label{sec:s-verilog}
+
+Listing~\ref{lst:s-v} provides a hand-written Verilog implementation of the
+two-input station for comparison. Both modules implement identical port
+signatures, with one distinction: TxHDL netlists include an implicit \code{rst}
+input. The Verilog source represents an independent translation of the
+operational rules in Section~\ref{sec:s-rule}. In the testbench, both units
+execute in parallel under identical input stimulus, verifying cycle-by-cycle
+output equivalence. Listing~\ref{lst:s-src} displays macro-expanded Rust source
+from \code{station!}, and Listing~\ref{lst:s-sizes} compares physical line
+counts.
+
+\lstinputlisting[style=ascii,caption={\code{station.v}: the two-input station by hand.},label={lst:s-v}]{lib/examples/station.v}
+
+\lstinputlisting[caption={\code{station2.rs}: the two-input station as \code{station!} wrote it, printed by \code{ex\_station --source}.},label={lst:s-src}]{station2.rs}
+
+\lstinputlisting[style=ascii,caption={The two, by lines, as the build counted them.},label={lst:s-sizes}]{station_sizes.txt}
+
+Both designs implement identical hardware behavior with matching net names.
+Key differences emerge in authoring overhead and verification guarantees:
+
+\begin{itemize}
+\item \textbf{Bit-Widths and Slicing:} Verilog requires explicit bit ranges
+  (\code{[9:0]}, \code{[17:0]}) and manual payload extraction
+  (\code{in0\_data[9:8]}); altering a data type mandates coordinated edits
+  across five locations. TxHDL extracts fields automatically from typed structs
+  (\code{head0.tag}), parameterising types cleanly. While Verilog supports
+  parameterised widths, it cannot parameterise port counts cleanly; the TxHDL
+  macro generates all nine variants from one template.
+\item \textbf{Handshake Protocols:} Verilog authors manually coordinate
+  \code{ready} and \code{valid} nets, avoiding combinational feedback loops that
+  cause synthesis errors. TxHDL authors specify channel operations via
+  \code{recv\_if(take0)} and conditional \code{send}, allowing lowering passes
+  to derive valid/ready handshakes automatically.
+\item \textbf{Verification Coverage:} Verilog requires handwritten testbenches.
+  The TxHDL station executed as pure software for 400 cycles before lowering,
+  and its emitted netlists are verified continuously under both \code{nvc} and
+  Verilator on every build.
+\item \textbf{Physical Line Counts:} Verilog appears shorter because comments
+  are omitted in Listing~\ref{lst:s-sizes}. However, the Verilog author writes
+  all 53 lines manually for every port configuration. The TxHDL designer
+  invokes \code{station!(Station2, 2)} once, reusing the definition across
+  arbitrary widths and types.
+\end{itemize}
+
+\section{The Netlist}
+\label{sec:s-netlist}
+
+Listing~\ref{lst:s-out} concludes with the synthesized Verilog netlist for the
+two-input station. Each mask lowers to a 4-bit register, and operand cells map
+to 4-word synchronous memories. Intermediate signals directly mirror rule
+terminology: \code{cell\_free0}, \code{completes0}, \code{line\_tag},
+\code{send\_line}, and \code{take0}. Tags and payloads extract from input vectors
+at struct-defined offsets; one-hot masks calculate via bit shifts; and output
+data concatenates the tag with resolved operand values. The lowering engine
+produces equivalent VHDL entities using \code{shift\_left} and \code{to\_integer}.
+Both netlists are co-simulated against the Rust execution trace on every build.
+
+\begin{thebibliography}{9}
+
+\bibitem{tutorial}
+F.~Filmar and D.~Janković, ``TxHDL, step by step,'' project
+repository \code{HDL/txhdl}, \code{//docs:tutorial}, 2026.
+
+\bibitem{runtime}
+F.~Filmar and D.~Janković, ``The TxHDL runtime,'' project repository
+\code{HDL/txhdl}, \code{//docs:runtime}, 2026.
+
+\bibitem{examples}
+F.~Filmar and D.~Janković, ``TxHDL by example,'' project repository
+\code{HDL/txhdl}, \code{//docs:examples}, 2026.
+
+\bibitem{cover}
+F.~Filmar and D.~Janković, ``TxHDL documents,'' project repository
+\code{HDL/txhdl}, \code{//docs:cover}, 2026.
+
+\end{thebibliography}
+
+\end{document}

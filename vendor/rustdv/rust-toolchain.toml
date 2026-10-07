@@ -1,0 +1,7 @@
+# Pin the toolchain so every build — this Mac, the VM's offline
+# toolchain-drop, and any future contributor — uses the same rustc. The
+# book's regression checks exact transcript output, so a floating compiler
+# can break book-sync even when the code is correct. 1.97.0 is what the
+# offline drop (toolchain-drop/) installs and what the branch is tested on.
+[toolchain]
+channel = "1.97.0"

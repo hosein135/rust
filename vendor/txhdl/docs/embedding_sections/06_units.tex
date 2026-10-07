@@ -1,0 +1,319 @@
+% SPDX-License-Identifier: Apache-2.0
+\section{Units, Processes and Parallelism}
+\label{sec:e-units}
+
+A unit is a struct that implements \code{crate::comp::Unit}. The trait
+has one method.
+
+\begin{lstlisting}[caption={The unit trait. Inputs and outputs are type parameters, so one struct may implement it more than once.},label={lst:module}]
+#[allow(async_fn_in_trait)]
+pub trait Unit<In, Out> {
+    async fn run(&mut self, inputs: In, outputs: Out);
+}
+\end{lstlisting}
+
+Inputs and outputs are type parameters rather than associated types, and
+that choice buys something concrete: one struct may implement the trait
+more than once, with different shapes, so a unit that works on 32-bit and
+64-bit streams is one implementation and not two.
+
+\subsection{Parallelism is stated, not implied}
+
+Synthesis calls \code{run}. A unit with more than one concurrent process
+starts one async function per process and joins them.
+
+\begin{lstlisting}[caption={Parallelism written down. A unit with one process writes no join.},label={lst:join}]
+impl Unit<Ins, Outs> for DualPort {
+    async fn run(&mut self, _i: Ins, _o: Outs) {
+        join2(self.port_a(), self.port_b()).await;
+    }
+}
+\end{lstlisting}
+
+This replaces a rule with a construct. TxHDL said that several sequence
+blocks in one module run concurrently, which was a property of having
+declared them. It also contradicted itself: the specification stated that a
+module holds one sequence, while three of its own modules declared
+two~\cite{unification}. Here there is no rule to contradict. Parallelism is
+a \code{join}, written where it happens, and a unit with one process does
+not write one.
+
+\subsection{Processes cannot take a mutable borrow}
+
+The obvious way to write the two processes does not compile, and finding
+that out cost ten lines.
+
+\begin{lstlisting}[caption={What does not compile, and the error it gives. This is the code a Rust programmer writes first.},label={lst:e0499}]
+async fn port_a(&mut self) { /* ... */ }
+async fn port_b(&mut self) { /* ... */ }
+
+// error[E0499]: cannot borrow `*self` as mutable
+//               more than once at a time
+join2(self.port_a(), self.port_b()).await;
+\end{lstlisting}
+
+Hardware processes share state: they drive registers. Rust permits one
+mutable borrow at a time. The two facts collide directly.
+
+The repair is that a register is a cell, and a process takes a shared
+reference.
+
+\begin{lstlisting}[caption={The repair. A register is a cell several processes reach, which is what a register is. Reading and driving it are plain; the wait is the edge.},label={lst:reg}]
+pub struct Reg<T: Copy, C: Clock = DefaultClock> { .. }
+
+impl<T: Copy, C: Clock> Reg<T, C> {
+    pub fn get(&self) -> T;      // what the last edge latched
+    pub fn set(&self, x: T);     // taken at the end of the step
+}
+
+async fn port_a(&self) {
+    loop {
+        DefaultClock::rising().await;    // the wait
+        self.hits_a.set(self.hits_a + 1);  // a read at that edge
+    }
+}
+\end{lstlisting}
+
+\code{run} still takes \code{\&mut self}, and the processes it starts take
+\code{\&self}. That compiles, and it also describes the hardware better: a
+register is a thing several processes reach, which is what a register is.
+
+\subsection{A process waits, then reads, and it loops}
+\label{sec:e-regread}
+
+Listing~\ref{lst:reg} makes three claims that earlier drafts did not,
+and the first took three drafts of its own to get right.
+
+\textbf{Waiting and reading are different things.} A process waits for
+an event: the next edge of a clock, \code{C::rising()} or
+\code{C::falling()}; a transaction on a channel, \code{rx.wait()}; or
+an edge at which a condition on state holds, \code{until(C::rising,
+|| ..)} and the same with \code{falling}. Once its event has happened it reads
+state, plainly. \code{Reg::get} returns what the last edge latched and
+waits for nothing, and so does a wire's \code{In::get}. The two drafts
+before this one made the register read the wait, \code{get} being
+\code{async}, on the argument that the \code{.await} on a read was the
+mark the lowering turns into a register. It was also the only wait
+there was, so a process that wanted to react to a channel and then
+look at a pointer had no way to say it: a second \code{.await} for the
+pointer was a second edge, and a group of the two gave the pointer
+from before the channel's edge. Separating the wait from the read
+removed the problem and left the mark where it belongs: the edge is
+the cycle boundary, and everything read after it is what the hardware
+reads at that edge.
+
+\textbf{Driving is deferred.} \code{set} states the next value, and the
+register takes it at the end of the step, so a read after a drive in
+the same iteration still sees what the edge latched. That is what a
+register does, and a testbench that reads a register between steps
+sees the committed value without a second kind of read.
+
+\textbf{A process loops.} A unit runs for as long as the clock does, so
+every leaf \code{run} is a \code{loop}, and each iteration contains a
+wait. A parent whose \code{run} only joins its children needs no loop
+of its own: the children loop, the join never completes, and the
+parent is continuous through them.
+
+The prototype enforces this in the only way a simulation can. Every
+\code{.await} is a cycle boundary: a process that has crossed an edge
+at this step cannot cross it again, so a second wait written after a
+first waits for the next edge. Waits that share an edge say so:
+
+\begin{lstlisting}[caption={Two events at one edge are written inside \code{parallel!}. Written one after the other, they would be two edges, as any two awaits are.},label={lst:parallel}]
+let (x, y) = parallel!(rx_a.wait(), rx_b.wait()).await;
+\end{lstlisting}
+
+\code{parallel!} polls its futures together and returns their outputs
+as a tuple, and it is the one thing the executor treats specially: once
+one wait of the group has crossed the edge at this step, the others in
+the group are free, each once. \code{join2} and \code{parallel!} are the
+two sides of one idea: the first gives each of its futures a process,
+the second keeps them in one, and a unit uses both. Processes are told
+apart by their waker, which \code{join2} and \code{join\_all} give each
+child fresh. A loop that awaits nothing never yields and spins. That is
+the right behaviour, because such a loop is a combinational loop in
+the hardware, which is the thing that was wrong.
+
+A key timing subtlety arises from loop execution order. State sampled
+before an \code{await} statement at the top of a loop reflects the
+preceding clock step, prior to the commitment of that step's driven values.
+If an arbiter samples its round-robin priority before waiting for request
+assertion, it samples stale cycle state, causing double grants. Priority
+evaluation must occur strictly after the wait resumes. For this reason,
+arbitration blocks on an \code{until} condition combining input requests
+via \code{||}, sampling winner priority immediately upon waking. The
+\code{select!} macro provided by the library does not block; it evaluates
+combinational pattern matches, as described in Section~\ref{sec:e-select}.
+
+\begin{pitfall}
+This is the constraint most likely to surprise somebody writing a unit for
+the first time, because the code that fails is the code a Rust programmer
+would write first. It should be in the library's documentation and in the
+error message, not only in a paper.
+\end{pitfall}
+
+
+\subsection{A unit that contains units}
+\label{sec:e-hierarchy}
+
+A submodule is a field. A bus that joins two submodules is a field too,
+owned by whichever unit contains both of its ends.
+
+\begin{lstlisting}[caption={Submodules and the wire between them are fields of the parent. Each child is generic over its own configuration, not the parent's.},label={lst:hier}]
+pub struct Top<TC: TopConfig> {
+    pub producer: Producer<TC::P>,
+    pub consumer: Consumer<TC::C>,
+    pub link: DataBus,
+    pub pes: [Pe; 4],
+}
+\end{lstlisting}
+
+\subsection{Configurations nest}
+\label{sec:e-nestedconfig}
+
+Section~\ref{sec:e-binding} gives a design one configuration and makes
+every unit generic over it. That holds while every choice is global. It
+stops holding as soon as a submodule has choices of its own, and
+Listing~\ref{lst:hier} is where that shows.
+
+A configuration is a tree. A unit declares the configuration \emph{it}
+needs, and a parent's configuration names its children's rather than
+holding their fields.
+
+\begin{lstlisting}[caption={Each unit declares what it needs. The parent names its children's configurations and never mentions their knobs.},label={lst:nestedcfg}]
+pub trait ProducerConfig {
+    type Gen: Generator;
+    const DEPTH: usize;
+}
+
+pub trait ConsumerConfig {
+    const DEPTH: usize;        // the same name, a different unit
+    const CHECKSUM: bool;
+}
+
+pub trait TopConfig {
+    type P: ProducerConfig;
+    type C: ConsumerConfig;
+    const NAME: &'static str;
+}
+\end{lstlisting}
+
+Two things follow, and both were the reason to do it.
+
+\textbf{Two children may want a knob of the same name.} Both
+\code{DEPTH}s above exist, differ, and never meet, because each belongs
+to its own trait. A flat configuration would have had to rename one of
+them after the fact, which is a rename in a design that had nothing wrong
+with it.
+
+\textbf{A child's configuration is reusable.} It is written once and
+named by whichever parents want it, so two builds may differ in one
+subsystem and share the rest.
+
+\begin{lstlisting}[caption={Two builds. The consumer's configuration is written once and used by both; only the producer differs.},label={lst:nestedbuilds}]
+pub struct CheckedConsumer;
+impl ConsumerConfig for CheckedConsumer {
+    const DEPTH: usize = 64;
+    const CHECKSUM: bool = true;
+}
+
+pub struct Fpga;
+impl TopConfig for Fpga {
+    type P = FastProducer;
+    type C = CheckedConsumer;
+    const NAME: &'static str = "fpga";
+}
+
+pub struct Tiny;
+impl TopConfig for Tiny {
+    type P = SmallProducer;
+    type C = CheckedConsumer;   // reused, unchanged
+    const NAME: &'static str = "tiny";
+}
+\end{lstlisting}
+
+Nesting costs nothing at elaboration. A child's constant is still a
+compile-time value reached through the parent, so it may still size an
+array:
+
+\begin{lstlisting}[caption={A child's constant, reached through the parent, still sizes an array. This is the long spelling.},label={lst:nestedconst}]
+pub const DEPTH: usize =
+    <<Fpga as TopConfig>::P as ProducerConfig>::DEPTH;
+pub static BUF: [u32; DEPTH] = [0; DEPTH];
+\end{lstlisting}
+
+The spelling in Listing~\ref{lst:nestedconst} is the one real cost of
+nesting: reaching two levels down needs a fully qualified path, and three
+levels reads worse again. The repair is one type alias per level of the
+tree, written once beside the trait, so it serves every build rather than
+one.
+
+\begin{lstlisting}[caption={The repair. A generic alias per level, and a per-build alias where one build is being talked about. Both compile in probe~17.},label={lst:nestedalias}]
+pub type ProducerOf<T> = <T as TopConfig>::P;
+pub type ConsumerOf<T> = <T as TopConfig>::C;
+
+// One qualification, not two, for any build.
+pub const DEPTH: usize =
+    <ProducerOf<Fpga> as ProducerConfig>::DEPTH;
+
+// None at all, where one build is meant.
+pub type FpgaProducer = ProducerOf<Fpga>;
+pub const D: usize = <FpgaProducer as ProducerConfig>::DEPTH;
+pub static BUF: [u32; D] = [0; D];
+\end{lstlisting}
+
+A derive on the configuration trait could emit the per-level aliases,
+which would make the long spelling something nobody writes.
+
+Wiring is not a stored back-reference. A child is handed the ports it
+needs when its \code{run} is called, and that is what the inputs and
+outputs of \code{Unit} are for.
+
+\begin{lstlisting}[caption={Instantiating two submodules and wiring them. Both children receive the same bus; neither holds a reference to the other.},label={lst:hier-run}]
+impl<TC: TopConfig> Unit<(), ()> for Top<TC> {
+    async fn run(&mut self, _i: (), _o: ()) {
+        join2(
+            self.producer.run((), ProducerOut { out: &self.link }),
+            self.consumer.run(ConsumerIn { inp: &self.link }, ()),
+        ).await;
+    }
+}
+\end{lstlisting}
+
+\subsection{Why the borrow rule does not bite here}
+
+Section~\ref{sec:e-units} showed that two processes belonging to the
+same unit cannot concurrently hold \code{\&mut self}. Listing~\ref{lst:hier-run}
+appears to permit this and compiles cleanly.
+
+The mechanisms are fundamentally distinct. A process method borrows the
+entire struct reference, causing conflicting borrows across processes. In
+contrast, a submodule is an individual struct \emph{field}. The Rust borrow
+checker permits simultaneous mutable borrows of disjoint fields, allowing
+\code{\&mut self.producer} and \code{\&mut self.consumer} to operate
+concurrently. The interconnect bus between them is borrowed immutably by
+both endpoints, accurately reflecting shared wiring.
+
+\begin{rulebox}[Where interior mutability is needed]
+State that two processes of one unit both drive. Not submodules, which are
+disjoint fields, and not the buses between them, which are shared by
+design.
+\end{rulebox}
+
+\subsection{Arrays of instances}
+
+An array of identical submodules is an array, and joining them is a join
+over an iterator.
+
+\begin{lstlisting}[caption={An instance array. The replication count is a Rust array length, so a config can set it.},label={lst:hier-array}]
+join_all(
+    self.pes.iter_mut()
+        .enumerate()
+        .map(|(i, pe)| pe.run(i as u32, ()))
+).await;
+\end{lstlisting}
+
+TxHDL wrote this as \code{instance pe[16]} with a \code{connect} loop
+beside it. Here the replication is an array length and the connection is
+what each element is passed, so a config may set the count through an
+associated constant and nothing else changes.

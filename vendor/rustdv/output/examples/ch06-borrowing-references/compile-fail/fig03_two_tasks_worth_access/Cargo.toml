@@ -1,0 +1,6 @@
+[package]
+name = "ch06_borrowing_references_fig03"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]

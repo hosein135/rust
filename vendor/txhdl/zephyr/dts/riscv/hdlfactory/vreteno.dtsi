@@ -1,0 +1,190 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// The Vreteno machine as Zephyr sees it. Every address here is the
+// one the hardware decodes, and `cpu/vreteno/tests/zephyr_dts.rs`
+// checks that claim against the constants the design itself uses, so
+// this file cannot drift from the router's map without a test saying
+// so.
+//
+// The core is RV32IMAC with the machine mode registers: the A
+// extension's word forms are in it (issue 1010), so the SoC selects
+// the atomic instructions and the compiler's builtin atomics.
+
+/dts-v1/;
+#include <mem.h>
+#include <freq.h>
+
+/ {
+	compatible = "hdlfactory,vreteno";
+	#address-cells = <1>;
+	#size-cells = <1>;
+
+	chosen {
+		zephyr,console = &uart0;
+		zephyr,shell-uart = &uart0;
+		zephyr,entropy = &trng0;
+	};
+
+	// The clock every peripheral runs on, the memory controller's 100 MHz;
+	// the SiFive serial driver divides it into the baud rate (issue 1011).
+	pclk: clock-100m {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <DT_FREQ_M(100)>;
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		timebase-frequency = <DT_FREQ_M(100)>;
+
+		cpu0: cpu@0 {
+			device_type = "cpu";
+			compatible = "hdlfactory,vreteno", "riscv";
+			reg = <0>;
+			riscv,isa = "rv32imac_zicsr";
+			status = "okay";
+
+			hlic: interrupt-controller {
+				compatible = "riscv,cpu-intc";
+				#address-cells = <0>;
+				#interrupt-cells = <1>;
+				interrupt-controller;
+			};
+		};
+	};
+
+	soc {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		compatible = "simple-bus";
+		ranges;
+
+		// The boot memory the core fetches from at reset. It is
+		// read-only on the bus: a write is answered SLVERR, which
+		// is issue 268's decision, so nothing in an image may be
+		// linked here that expects to be written.
+		boot: memory@0 {
+			compatible = "mmio-sram";
+			reg = <0x00000000 DT_SIZE_K(4)>;
+		};
+
+		// The data memory inside the design, small and fast.
+		dmem: memory@1000 {
+			compatible = "mmio-sram";
+			reg = <0x00001000 DT_SIZE_K(4)>;
+		};
+
+		// The machine timer. The design puts `mtime` at `0xbff8`
+		// and `mtimecmp` at `0x4000` above `0x0200_0000`, which is
+		// where a RISC-V machine puts them and therefore exactly
+		// what Zephyr's own driver reads: the two registers are
+		// named rather than the block, because the driver takes
+		// them separately.
+		//
+		// `riscv,machine-timer` and not `sifive,clint0`: the
+		// latter is a different binding and `RISCV_MACHINE_TIMER`
+		// does not bind to it, which leaves a build with no clock
+		// and no error worth the name.
+		mtimer: timer@200bff8 {
+			compatible = "riscv,machine-timer";
+			reg = <0x0200bff8 0x8 0x02004000 0x8>;
+			reg-names = "mtime", "mtimecmp";
+			interrupts-extended = <&hlic 7>;
+		};
+
+		// The Ethernet port. Its registers are the fifth slot of
+		// the peripheral page; its four frame buffers are in the
+		// DDR3, two for each direction, and are named separately
+		// so that a transmit slot can never be computed at the
+		// address of a receive one.
+		//
+		// The engines that carry frames between the port and these
+		// buffers are on the board (issue 151). The driver was
+		// bound and checked from the first commit, before they
+		// existed, rather than when somebody next had a board.
+		eth0: ethernet@3400 {
+			compatible = "hdlfactory,vreteno-eth";
+			reg = <0x00003400 0x100>,
+			      <0x41000000 0x1000>,
+			      <0x41001000 0x1000>;
+			reg-names = "registers", "rx_buffers", "tx_buffers";
+			interrupt-parent = <&plic>;
+			interrupts = <3 1>;
+			local-mac-address = [00 0a 35 00 00 01];
+			status = "okay";
+		};
+
+		// The entropy source, the sixth slot of the peripheral page.
+		// Named as the chosen entropy device above, so the random
+		// subsystem takes its numbers from it and not from a counter.
+		trng0: rng@3500 {
+			compatible = "hdlfactory,vreteno-trng";
+			reg = <0x00003500 0x100>;
+			status = "okay";
+		};
+
+		uart0: serial@3000 {
+			compatible = "sifive,uart0";
+			clocks = <&pclk>;
+			reg = <0x00003000 0x100>;
+			interrupt-parent = <&plic>;
+			interrupts = <1 1>;
+			current-speed = <115200>;
+			status = "okay";
+		};
+
+		plic: interrupt-controller@c000000 {
+			compatible = "sifive,plic-1.0.0";
+			reg = <0x0c000000 DT_SIZE_M(64)>;
+			interrupts-extended = <&hlic 11>;
+			interrupt-controller;
+			#address-cells = <0>;
+			#interrupt-cells = <2>;
+			// Three sources, 1 to 3, but Zephyr's PLIC driver
+			// counts the unused source 0 as well: it takes a claim
+			// of `riscv,ndev` or more as spurious, so a count of 3
+			// made the Ethernet port's source 3 halt the system on
+			// its first frame (#786). Four is the SoC's
+			// `MAX_IRQ_PER_AGGREGATOR`, which counts the same way.
+			riscv,ndev = <4>;
+			// Seven levels, as `lib/parts/src/plic.rs` states: a
+			// source priority runs 0 to 7 and 0 never interrupts.
+			riscv,max-priority = <7>;
+		};
+
+		// The board's DDR3, a gigabyte of it, which is where an
+		// image large enough to be a kernel lives.
+		ddr: memory@40000000 {
+			compatible = "mmio-sram";
+			reg = <0x40000000 DT_SIZE_M(1024)>;
+		};
+
+		// The Ethernet port's frame buffers, kept out of the
+		// allocator's hands. Without this the kernel hands the
+		// region out and the engines write frames into somebody
+		// else's heap, which is a fault a long way from its cause
+		// and only under load.
+		reserved-memory {
+			#address-cells = <1>;
+			#size-cells = <1>;
+			ranges;
+
+			eth_bufs: memory@41000000 {
+				reg = <0x41000000 0x2000>;
+			};
+
+			// Razboj's framebuffer, 1024 rows of 4096 bytes, and its
+			// display list, four megabytes, which EGL draws and
+			// shows (issue 996): the scanout and the rasteriser read
+			// and write them behind the kernel's back.
+			razboj_fb: memory@42000000 {
+				reg = <0x42000000 DT_SIZE_M(4)>;
+			};
+
+			razboj_dl: memory@42800000 {
+				reg = <0x42800000 DT_SIZE_M(4)>;
+			};
+		};
+	};
+};

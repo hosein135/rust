@@ -1,0 +1,23 @@
+% SPDX-License-Identifier: Apache-2.0
+\section{Conclusion}
+\label{sec:conclusion}
+
+Two hardware description languages developed independently for the same
+project proved to represent complementary facets of a unified architecture.
+LHDL specifies system assembly, static configuration, and dataflow scheduling,
+yet provides no primitives for multi-cycle protocol sequencing. TxHDL specifies
+cycle-accurate transaction handling within modules, yet provides no mechanisms
+for system-level interconnect composition. The unified specification retains
+both domains.
+
+Only four issues required semantic decisions rather than syntactic reconciliation.
+Among these, reconciling the model of time is foundational: both models are
+correct within their respective operating boundaries. Cycle counts mandated by
+external bus protocols represent architectural specifications, whereas latency
+arising from target fabric timing represents an implementation parameter.
+
+Surface syntax aligns with Rust, establishing consistent conventions while
+eliminating six grammatical defects present in the source drafts. The remaining
+grammatical ambiguities are resolved through automated verification, ensuring
+that every construct in the unified TxHDL specification is backed by passing
+test suites.

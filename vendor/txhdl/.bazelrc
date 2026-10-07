@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: Apache-2.0
+common --registry=https://raw.githubusercontent.com/filmil/bazel-registry/main
+common --registry=https://bcr.bazel.build
+
+# Every document is stamped with the commit it was built from.
+build --workspace_status_command=tools/workspace_status.sh
+
+# The formatter's own settings, `max_width = 80`, wherever it runs:
+# the prescribed run of `@rules_rust//:rustfmt`, and the `rustfmt_test`
+# targets that keep the tree that way. Without this, both use the
+# default of 100 columns, and the documents set source at 80 (issue
+# 165).
+common --@rules_rust//:rustfmt.toml=//:rustfmt.toml
+
+# Clippy on every build, its warnings errors, so a lint is dealt with
+# where it is written rather than found later in a sweep (issue 228).
+# A lint the lowering forces is allowed at the item it fires on, with
+# the reason beside it: the lowering reads `name: value` and not a
+# field shorthand, `&` and not a range, and an arm's alternatives one
+# by one and not as a range.
+build --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
+build --output_groups=+clippy_checks
+# The one lint allowed everywhere: a unit's ports are tuples of channel
+# types, and a join's are tuples of those, so the types the library
+# writes are as complex as the hardware they stand for.
+build --@rules_rust//:clippy_flags=-Dwarnings,-Aclippy::type_complexity
+
+# The formatter on every build, the same way: every Rust target built
+# is checked against rustfmt, new crates included, with no list to
+# keep. //:fmt_test named twelve crates of three hundred, and the rest
+# went unchecked (issue 1152).
+build --aspects=@rules_rust//rust:defs.bzl%rustfmt_aspect
+build --output_groups=+rustfmt_checks
+
+# Vivado from the Bazel-installed toolchain, not Docker or the host.
+build --@rules_vivado//:vivado_mode=hermetic
+
+# What CI runs with, `bazel build --config=ci`, so that its log holds what a
+# failure needs rather than every action's replayed chatter (#537). A cached
+# run replays each action's stderr from the disk cache, and CI uploads its
+# log to the server, which timed out at 12 MB (#535). Measured from fresh
+# output bases against the shared disk cache: 16.8 MB of build log before the
+# Verilator headers were silenced (#536), nearly all of it their warnings;
+# 1.15 MB after, of which 0.86 MB is Yosys mapping the core onto cells and
+# 0.16 MB the generated models' compiles; and 100 KB with this config, plus
+# 23 KB for the tests.
+#
+# `--output_filter` keeps what our own packages print, which is where a new
+# warning worth reading comes from, and drops everything from external
+# repositories, the generated models' compiles and the cell mapping. It only
+# silences actions that succeed: a failing action's output is printed
+# whatever the filter, which was checked, and a failing test's output is
+# `--test_output=errors`, which the workflow still passes.
+#
+# No curses and no colour, since the log is a file, and progress at most once
+# a minute rather than five times a second.
+build:ci --output_filter=^//(?!docs:[^:]*_verilated$|cpu/vreteno/asic:vreteno_cells$)
+common:ci --curses=no
+common:ci --color=no
+common:ci --show_progress_rate_limit=60
+
+# CI keeps no output it does not need: an action's outputs stay in the
+# disk cache, and only those another local action reads are copied into
+# the output tree (#937). Measured from fresh output bases at e392f1e,
+# every action a disk cache hit: 55 s to build rather than 59 to 60, and
+# 331 MB of output tree rather than 1633. The release workflow builds
+# without `--config=ci`, since it gathers the PDFs from `bazel-out`.
+build:ci --remote_download_minimal
+# The documents unstamped in CI, so that a commit alone does not typeset
+# them all again (docs/BUILD.bazel, :buildstamp). The release build
+# (release.yml, no --config=ci) stamps.
+build:ci --//docs:stamp=off
+
+# Shared caches on the hdlfactory hosts, where the file exists; a no-op
+# elsewhere. The repository cache there already holds the installer.
+try-import /data/cache/ci.bazelrc
+
+# The machine the board is attached to, with its programming cable and
+# its serial bridge: the one place that names it. The remote programmer
+# and the serial watcher read it, and `--server=HOST` on their command
+# line overrides it.
+run --run_env=TXHDL_BOARD_SERVER=srv.filmar.us
+
+# Whatever is true of this machine rather than of the project: a Vivado
+# somewhere else, a cache on another disk, a board on another host.
+# `user.bazelrc` is not committed, and `try-import` means the build
+# works whether or not it is there.
+#
+# It is read last so that it wins. Bazel takes the last setting of a
+# flag, but only among lines of the same command: a `build` line here
+# beats a `build` line above, and a `common` line does not, however
+# late it comes, because `build` is the more specific of the two. So
+# write a setting here with the same word the line above it uses.
+# This was checked, see docs/vivado-setup.md.
+try-import %workspace%/user.bazelrc

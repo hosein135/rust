@@ -1,0 +1,5 @@
+cmd:        A: a5 Mul B: 75
+debug:      AluCommand { a: 165, b: 117, op: Mul }
+clone == cmd? true
+tweaked == cmd? false
+ops covered: 4 of 4

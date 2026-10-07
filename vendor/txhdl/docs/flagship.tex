@@ -1,0 +1,569 @@
+% SPDX-License-Identifier: Apache-2.0
+%
+% The flagship. Built by //docs:flagship. Every listing is included
+% from the tree.
+\documentclass[journal,9pt]{IEEEtran}
+
+% Listings of Rust set by rustfmt at 80 columns: 5.6pt is what fits
+% the frame of a column (issue 1061).
+\newcommand{\listingsize}{\fontsize{5.6}{6.6}\selectfont}
+\input{housestyle}
+\input{memmap}
+
+% The colours of the placement map, one per subsystem, chosen to be
+% told apart in print as well as on a screen. //tools/fpgamap names
+% them, so they are defined here and nowhere else.
+\definecolor{flagdie}{gray}{0.92}
+\definecolor{flagcore}{RGB}{40,90,170}
+\definecolor{flagmem}{RGB}{200,110,30}
+\definecolor{flageth}{RGB}{50,130,60}
+\definecolor{flagvid}{RGB}{140,60,150}
+\definecolor{flagcdc}{RGB}{30,150,160}
+\definecolor{flagtop}{gray}{0.45}
+
+\InputIfFileExists{buildstamp.tex}{}{}
+\providecommand{\buildstamp}{Draft build (outside the Bazel flow).}
+
+\title{The TxHDL Flagship}
+
+\author{Filip Filmar and Dragiša Janković%
+\thanks{Both authors are independent. Filip Filmar is the
+corresponding author, at f@hdlfactory.com; Dragiša Janković is
+reached at linkedin.com/in/dragisa-jankovic.}%
+\thanks{This document describes the unified hardware platform and peripheral
+subsystems~\cite{eth,hdmi,axi} running on the Vreteno processor~\cite{vreteno}.
+All listings are embedded from the project repository \code{HDL/txhdl} during
+compilation. The project overview~\cite{cover} indexes all companion reports.}%
+\thanks{The authors used Claude, an AI assistant, while developing
+architectural concepts, documentation, and software. Verbatim prompts are
+preserved in repository commit logs.}%
+\thanks{\buildstamp}}
+
+\markboth{The TxHDL Flagship}{Filmar and Janković: The TxHDL Flagship}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Hardware subsystems in this project were initially verified on the Alinx
+AX7A200B FPGA board as standalone designs: a processor with external DDR3
+memory, an Ethernet echo transceiver, and an HDMI video generator. Each
+experiment required a dedicated bitstream. The flagship combines these
+independent components into a unified bitstream written to on-board QSPI
+flash, establishing a persistent baseline upon board power-up. The design also
+stabilizes the hardware foundation. The processor boots into a ROM loader that
+accepts software binaries over the serial interface in seconds, leaving
+underlying gateware undisturbed. This document analyzes subsystem
+integration, clock domain crossing topologies, diagnostic status indicators,
+and non-volatile flash deployment.
+\end{abstract}
+
+\section{Why a flagship}
+\label{sec:f-why}
+
+An FPGA device holds one configuration bitstream at a time. Evaluating
+peripherals through standalone demonstrations left the physical board in an
+ephemeral state between test runs. Demonstrating the complete platform
+required reconfiguring the FPGA repeatedly for each subsystem.
+
+The flagship resolves this fragmentation. It consolidates all verified
+subsystems into a single bitstream stored in non-volatile QSPI flash,
+rebuilding whenever constituent logic changes. Applying power restores the
+complete platform immediately without requiring JTAG initialization.
+
+This architecture also accelerates software iteration. Full FPGA placement
+and routing for the combined system requires thirty minutes. Embedding software
+images directly into synthesis netlists would impose a thirty-minute turnaround
+on every code change. Instead, the processor boots into a compact ROM
+loader~\cite{vreteno}. The loader listens on the serial port, receives an
+executable binary, writes it to DDR3 memory, and branches to it. Because the
+hardware netlist remains fixed, updating software takes seconds.
+
+\section{What is in it}
+\label{sec:f-what}
+
+The flagship integrates three verified subsystems without altering their
+internal logic.
+
+\emph{Processor and memory.} The \code{board} netlist emitted by
+\code{\#[lower]} for \code{vreteno32::board::Board} provides a Vreteno RV32IMAC
+processor, an AXI bus tracker, an interconnect router, data memory, machine
+timers, software interrupts, a platform-level interrupt controller, a
+pulse-width modulator, a 16550-compatible UART, and one gigabyte of DDR3
+DRAM managed by an AMD MIG controller. Processor boot ROM contains the serial
+loader.
+
+\emph{Ethernet interface.} Lowered MAC transmit and receive units connect to
+external physical layer transceivers through an RGMII wrapper~\cite{eth}. Behind
+the MAC sits the remote peripheral mapped at \code{0x3300}, which proxies bus
+accesses to a host workstation. A transaction issued by the processor departs
+within an Ethernet frame and awaits a matching response frame. This topology
+allows developers to evaluate peripheral drivers in host software against
+authentic bus semantics before writing dedicated RTL. Section~\ref{sec:f-remote}
+details this interface. The processor also accesses the MAC directly through
+\code{EthSlots} at peripheral slot five, transmitting and receiving raw network
+frames. Hardware validation verified outbound frame counts on the link server,
+and \code{ethrx} and \code{ethirq} passed regression tests. Furthermore, a
+Zephyr fastboot service transferred over the serial link operated on UDP port
+5554, responding to \code{getvar} queries and booting target images via
+\code{fastboot boot}.
+
+\emph{HDMI display output.} The video pipeline pairs a display framebuffer
+with an I2C controller that initializes the on-board SiI9134 HDMI
+transmitter~\cite{hdmi}. The flagship couples this pipeline to the system
+bus, allowing software to update display surfaces and drive external monitors.
+
+\section{The third slot}
+\label{sec:f-slot}
+
+The system router decodes eight master ports, listed in Table~\ref{tab:f-map}.
+Address zero maps read-only boot ROM, leaving no spare router ports. Compact
+peripherals multiplex the 4~KiB page at \code{0x3000} through an AXI-Lite
+bridge, each occupying a 256-byte sub-slot. This shared mapping prevents
+low-density register banks from exhausting router ports. The video peripheral
+exposes three control registers and occupies slot three at \code{0x3200}, as
+detailed in Table~\ref{tab:f-page} and Table~\ref{tab:f-hdmi}. Tooling at
+\code{//tools/memmap} generates these tables directly from router and decoder
+definitions, matching the synthesized hardware map.
+
+\begin{table}[htbp]
+\caption{The flagship's address map, lowest first, as the core's
+router decodes it.}
+\label{tab:f-map}
+\mmget{board}{flagship}
+\end{table}
+
+\begin{table}[htbp]
+\caption{The peripheral page at \code{0x3000}, as its bridge decodes
+it.}
+\label{tab:f-page}
+\mmget{page}{flagship}
+\end{table}
+
+\begin{table*}[tbp]
+\caption{The video peripheral's registers, on the third slot.}
+\label{tab:f-hdmi}
+\mmget{regs}{hdmi}
+\end{table*}
+
+What is different about the third slot is that it does not reach a
+field of \code{Board}. It leaves the unit as five channel ports:
+
+\lstinputlisting[rangebeginprefix=//\ begin\{,rangebeginsuffix=\},%
+rangeendprefix=//\ end\{,rangeendsuffix=\},includerangemarker=false,%
+linerange=vslot-vslot,caption={\code{cpu/vreteno/src/board.rs}: the
+third slot, and why it leaves the
+unit.},label={lst:f-slot}]{cpu/vreteno/src/board.rs}
+
+This external routing accommodates an independent clock domain. The video
+scanout logic requires a 25.2\,MHz pixel clock, whereas the processor operates
+at 100\,MHz. Placing the video controller inside \code{Board} would constrain
+it to the processor clock, violating standard VGA timing. Exporting the slot
+allows the top-level module to bridge clock boundaries. Target configurations
+lacking video hardware tie these channel ports off, as implemented in
+\code{cpu/vreteno/board/vreteno\_board.v}.
+
+Slot four provides an instructive contrast. The remote peripheral operates
+synchronously on the 100\,MHz processor clock, so it resides directly within
+\code{Board} alongside the serial controller. Rather than exporting the bus
+slot, the unit exports the peripheral's external interface: packet data and
+framing delimiters. Subsystems export bus slots only when downstream hardware
+requires an independent clock.
+
+\section{Three clocks, one input}
+\label{sec:f-clocks}
+
+The carrier board supplies a single 200\,MHz differential clock input. The
+flagship buffers this reference once and feeds three dedicated clock generators,
+matching the configurations verified in the individual subsystem designs:
+
+\begin{itemize}
+\item The DDR3 memory controller clock generator uses the 200\,MHz input as its
+  delay reference, runs internal DRAM logic at 400\,MHz, and generates a
+  100\,MHz synchronous system clock for processor execution and the serial
+  interface.
+\item An MMCM multiplies the input by five to 1000\,MHz and divides by eight to
+  produce a 125\,MHz clock for the Ethernet transmit path. An internal MMCM in
+  \code{eth\_rgmii} shifts the recovered receive clock by 78.75 degrees
+  (1.75\,ns), centering sampling edges within data windows presented by the
+  physical layer transceiver. Empirical measurements indicate the PHY
+  introduces approximately 2\,ns of internal receive delay.
+\item A video MMCM scales the reference clock to 25.2\,MHz for pixel scanout,
+  matching the standard 640$\times$480 60\,Hz display rate within 0.1\% of
+  nominal (25.175\,MHz).
+\end{itemize}
+
+Two data paths cross clock boundaries, both implemented as FIFO channels rather
+than unsynchronized scalar signals. The first path routes the processor's
+AXI-Lite interface to the video peripheral. Each of the five AXI-Lite channels
+crosses independently through \code{chan\_cdc}, an asynchronous FIFO with
+Gray-coded read and write pointers. Routing each channel independently satisfies
+all protocol requirements because AXI channels maintain no inter-channel cycle
+dependencies; a write transaction completes when its write response handshake
+returns.
+
+The second path transfers remote peripheral packets between clock domains,
+routing bytes and end-of-frame flags across the boundaries. Outbound packets
+cross from the 100\,MHz processor clock to the 125\,MHz transmit clock, and
+inbound packets cross from the recovered PHY clock to the processor clock. The
+inbound FIFO allocates 128 bytes rather than the 16 bytes used in earlier echo
+tests. Because the Ethernet MAC delivers one byte every 8\,ns while the
+processor reads one byte every 10\,ns, the FIFO absorbs packet bursts while the
+software reader catches up.
+
+Listing~\ref{lst:f-cdc} presents \code{lib/board/chan\_cdc.v}, which implements
+the dual-clock channel synchronizer. Common board infrastructure now resides
+under \code{//lib/board} for reuse across top-level designs.
+
+\lstinputlisting[caption={\code{lib/board/chan\_cdc.v}: a lowered
+unit's channel, transferred across clock
+domains.},label={lst:f-cdc}]{lib/board/chan_cdc.v}
+
+\section{The peripheral that is a program}
+\label{sec:f-remote}
+
+Developing custom peripheral hardware requires extensive simulation, synthesis,
+placement, and routing before physical register behaviors can be validated. The
+remote peripheral architecture decouples register definition from FPGA
+compilation. \code{Remote} occupies peripheral slot four, behaving like any
+standard memory-mapped slave while handling no register operations locally.
+Accepted bus transactions dispatch over an outbound channel, awaiting
+completions on a matching response channel. \code{RemoteLink} marshals outgoing
+requests into 27-byte Ethernet frames and demarshals inbound replies, passing
+them through the MAC to the network. The processor communicates directly with a
+software service hosted on an attached workstation.
+
+\lstinputlisting[rangebeginprefix=//\ begin\{,rangebeginsuffix=\},%
+rangeendprefix=//\ end\{,rangeendsuffix=\},includerangemarker=false,%
+linerange=remote-remote,caption={\code{cpu/vreteno/src/board.rs}: the
+peripheral and the link that puts it on the
+port.},label={lst:f-remote}]{cpu/vreteno/src/board.rs}
+
+Two parameters are fixed within the RTL architecture. The device identifier
+is 1: every request frame holds this tag, allowing target software to multiplex
+multiple devices on a single physical link. Transaction patience is set to one
+second (100\,000\,000 cycles at 100\,MHz). If no response frame arrives before
+the timer expires, the peripheral asserts an AXI slave error (\code{SlvErr})
+to prevent bus stalls.
+
+The host software endpoint resides in \code{//tools/remote}, a Go service that
+processes incoming frames, implements peripheral register behaviors, and
+returns response packets. The service exchanges length-prefixed packet streams
+across an ssh tunnel. On the target-attached host, \code{//tools/remote/shim}
+captures peripheral frames via raw Linux network sockets, encapsulates them
+with length headers into the stream, and dispatches return frames onto the
+physical link.
+
+Full system integration succeeded on September 22, 2026. With the flagship
+bitstream loaded into flash, the bridge service running on the target host, and
+\code{//tools/remote} registered as device~1, the loader dispatched the
+diagnostic binary in Listing~\ref{lst:f-remote-rs}. The processor executed two
+register stores, read back both values over Ethernet, and confirmed data
+integrity on the serial console. Listing~\ref{lst:f-remote-run} records the
+console output and server transaction logs.
+
+Testing exposed two timing constraints. Initial gateware used a 20\,ms response
+timeout (\code{REMOTE\_WAIT}). When accessing development services across an ssh
+tunnel with a 175\,ms round-trip latency, transactions timed out prematurely,
+returning zero. Extending timeout patience to one second (issue~\#397) restored
+robust operation across network tunnels. Additionally, serial warm resets
+originally failed to reinitialize processor halt registers; clearing these
+registers upon reset (issue~\#398) ensures repeatable warm restarts.
+
+\lstinputlisting[caption={\code{cpu/vreteno/rust/remote.rs}: two
+words to the peripheral and back, with the verdict on the serial
+port.},label={lst:f-remote-rs}]{cpu/vreteno/rust/remote.rs}
+
+\lstinputlisting[style=ascii,caption={\code{docs/remote\_run.txt}:
+what the board said, and what the program beside the shim saw, on
+September 22, 2026.},label={lst:f-remote-run}]{remote_run.txt}
+
+\section{The lights}
+\label{sec:f-leds}
+
+The carrier board features four active-low LEDs. The flagship assigns them to
+critical status signals to facilitate hardware diagnostics:
+
+\begin{itemize}
+\item \textbf{LED1}, pulse-width modulator channel zero or core halt status. This
+  indicator serves software applications: the boot loader leaves it unlit,
+  allowing running software to control brightness or signal completion.
+\item \textbf{LED2}, Ethernet frame activity. Pulse-stretching logic asserts
+  this LED for 200\,ms upon detecting inbound or outbound packet traffic,
+  ensuring visual visibility.
+\item \textbf{LED3}, DDR3 calibration status. The MIG controller asserts this
+  line upon completing memory calibration. Because the boot loader stages
+  incoming software into DDR3 RAM, an unlit LED3 immediately isolates memory
+  initialization failures.
+\item \textbf{LED4}, system heartbeat. Toggling at 3\,Hz from the memory
+  controller clock, this indicator verifies clock generation and active gateware
+  execution.
+\end{itemize}
+
+The HDMI video pipeline omits dedicated diagnostic LEDs, as output monitors
+display video status directly.
+
+\section{The design}
+\label{sec:f-top}
+
+The top-level integration module brings together I/O pins, clock generators,
+reset distribution networks, clock domain crossing FIFOs, and status
+indicators.
+
+\lstinputlisting[caption={\code{flagship/board/flagship.v}: the
+flagship's top.},label={lst:f-top}]{flagship/board/flagship.v}
+
+Physical constraints are shared across modules to eliminate duplication. Clock,
+reset, LED, UART, and DDR3 pin assignments derive from constraint files under
+\code{cpu/vreteno/board/}. Physical layer Ethernet pins import from
+\code{eth/board/eth\_pins.xdc}, and HDMI encoder pins import from
+\code{hdmi/board/hdmi\_pins.xdc}. Each FPGA pin appears in exactly one primary
+constraint file, ensuring that pin modifications propagate consistently across
+all build configurations. The flagship's dedicated constraint file defines only
+inter-clock timing relationships, declaring asynchronous clock groups across
+independent generators.
+
+\lstinputlisting[caption={\code{flagship/board/ax7a200\_flagship.xdc}:
+what no subsystem owns.},label={lst:f-xdc}]%
+{flagship/board/ax7a200_flagship.xdc}
+
+\section{Building it, and putting it in the flash}
+\label{sec:f-build}
+
+Vivado targets in this repository are marked manual to prevent unintended
+long-running actions during routine builds. Compiling
+\code{//flagship:flagship\_synth} requires five minutes, and subsequent place
+and route via \code{//flagship:flagship\_pnr} consumes twenty-five minutes.
+Because the implementation step depends directly on synthesis output, executing
+place and route drives the complete flow.
+
+Synthesis stops on warnings that would otherwise escape to hardware. Vivado
+truncates sized literals exceeding declared bit widths and continues without an
+error: \code{21'd2\_100\_000} in earlier top logic was truncated to 2848,
+preventing the downstream reset counter from asserting. The build completed
+without timing violations despite generating a defective bitstream, detectable
+only through an obscure line in \code{flagship\_synth.log}. Detecting the failure
+required a complete place-and-route cycle and board bring-up. Every synthesis
+rule now queries Vivado after \code{synth\_design} to count occurrences of
+critical warning codes, failing the build if counts are non-zero. These warning
+rules are centralized in \code{tools/vivado/defs.bzl}.
+
+Programming the board requires a TCP tunnel to the host attached to the FPGA,
+opened via \code{bazel run //cpu/vreteno/board/remote:hw\_server}. Target
+\code{//flagship:flagship\_prog} downloads bitstreams directly to volatile
+FPGA SRAM for temporary testing, whereas \code{//flagship:flagship\_flash}
+writes non-volatile QSPI flash for persistent deployment. Both targets accept
+\code{-{}-hostport localhost:3122} and a hardware target filter.
+
+Executing software returns to the loader through three coordinated mechanisms:
+The carrier RESET button and adjacent KEY1 trigger core resets. External memory
+controllers continue refreshing DRAM through the reset assertion, allowing
+in-flight bus transactions to drain gracefully and preserving RAM contents
+across warm restarts. An earlier revision reset the memory controller
+simultaneously, stranding the AXI bridge and freezing subsequent boot attempts.
+From the host workstation, pulling the serial RX line low for 30\,ms initiates
+a warm reset. Invoking \code{load -{}-reset} transmits this low-speed pulse at
+300 baud, re-entering the boot loader prior to transferring executable
+binaries. Standard serial break conditions are avoided because the on-board
+CP2102N USB-UART bridge drops host break pulses under Linux.
+Core resets simultaneously clear MAC state machines and video logic through
+two-stage synchronizing registers. Cross-domain FIFOs reset synchronously: each
+\code{chan\_cdc} instance holds itself empty while either domain asserts reset,
+discarding in-flight words rather than exposing stale data to reset logic
+(issues 509 and 1325).
+
+The non-volatile storage chip is a Micron MT25QL128 quad-SPI flash. The bitstream
+occupies flash addresses beginning at zero, followed by software images at
+offset \code{0x00A0\_0000} (issue~312). For this FPGA device, uncompressed
+configuration bitstreams require 77\,845\,216 bits (9\,730\,652 bytes), ending
+at address \code{0x0094\_7A5C}. Software partitions align with the subsequent
+64~KiB erase sector at 10~MiB, leaving 6~MiB of flash capacity. The processor
+accesses flash memory through an AXI window at \code{0x20A0\_0000}. Automated
+tests \code{//flagship:flagship\_fits\_test} and
+\code{//cpu/vreteno:vreteno\_board\_fits\_test} inspect bitstream headers to
+confirm that configuration data does not exceed reserved partitions.
+Furthermore, \code{//flagship:flagship\_flash} embeds the diagnostic program
+\code{flashid} via \code{write\_cfgmem -loaddata}, validated by
+\code{//flagship:flagship\_image\_test}.
+
+With the flagship flashed, software deployment requires no FPGA compilation:
+developers build binaries via \code{bazel build
+//cpu/vreteno/rust:hello\_ram\_bin} and transmit them over the serial link
+using \code{load}. This workflow reduces turnaround cycles from thirty minutes
+to seconds.
+
+\section{What it costs}
+\label{sec:f-cost}
+
+The complete flagship consumes a small fraction of the Xilinx XC7A200T FPGA.
+Post-synthesis reports for git revision \code{806a229} record 10\,999 slice LUTs
+(8.2\% utilization), 8\,918 slice registers (3.3\%), 16.5 dual-port 36~Kb Block
+RAM tiles (4.5\% of 365), 4 DSP48E1 slices, and 126 bonded I/O pins (44\% of
+285). Clock resources comprise one PLL and four MMCM instances, including the
+dedicated MIG memory clocking structures. Logic capacity is not a design
+bottleneck; subsequent subsystem integration depends strictly on closing timing
+at target frequencies rather than conserving slices.
+
+\section{Where it landed}
+\label{sec:f-place}
+
+Resource counts quantify overall logic consumption without capturing spatial
+distribution. Multi-subsystem integration requires examining whether logic forms
+cohesive functional regions or scatters across the die, and how pin assignments
+influence placement.
+
+Figure~\ref{fig:f-map} depicts cell placement extracted directly from routed
+design checkpoints. Rule \code{//flagship:place\_report} attributes placed logic
+cells to subsystem hierarchies, recording coordinates in
+\code{docs/flagship\_place.tsv}. Build tool \code{//tools/fpgamap} rasterizes
+these totals into the placement diagram. Table~\ref{tab:f-place} tabulates the
+corresponding cell counts.
+
+\begin{figure}[t]
+\centering
+\input{flagshipmap}
+\caption{Where the flagship's subsystems landed on the xc7a200t. A
+square is eight slices by eight; its colour is whichever subsystem
+holds the most cells in it and its shade how full it is. The grey is
+part that holds nothing.}
+\label{fig:f-map}
+\end{figure}
+
+\begin{table}[t]
+\caption{The same placement as numbers. A slice holds several cells,
+so these counts are larger than a utilisation report's, which counts
+slices.}
+\label{tab:f-place}
+\centering
+\footnotesize
+\input{flagshiptotals}
+\end{table}
+
+The placement map highlights four structural characteristics:
+
+\emph{Subsystems form localized regions.} The memory controller occupies columns
+133 to 163 along the right die boundary adjacent to memory I/O banks. The
+processor core occupies central columns 97 to 145. Video logic forms compact
+clusters on the left margin near HDMI transmitter pins. Cell placement
+naturally aligns with external I/O interfaces and interconnect targets.
+
+\emph{Ethernet logic migrates toward bus masters.} In standalone echo designs,
+MAC logic clustered at columns 0 to 22 beside the PHY interface. Connected to
+the system bus, the MAC shifts inward to columns 36 to 104, reflecting the
+routing demands of its bus interconnect.
+
+\emph{The memory controller dominates peripheral resources.} The controller
+consumed 9\,493 cells compared to 10\,719 cells for the processor and
+peripherals combined under UberDDR3, remaining locked against DRAM I/O banks.
+
+\emph{Clock domain crossings cluster along subsystem boundaries.} The five FIFOs
+transferring processor AXI-Lite transactions to the pixel clock occupy columns
+104 to 122 between the processor and video pipelines. Frame FIFOs sit along the
+Ethernet boundary nearest the core.
+
+The map and the table reflect git revision \code{806a229}, routed from the same
+checkpoint evaluated above.
+
+\section{The first program down the wire}
+\label{sec:f-first}
+
+Display interfaces require visual validation. The initial demonstration software
+renders a rotating icosahedron with the TxHDL logo in the corner
+(Listing~\ref{lst:f-ico}), originally rendered directly by the processor and
+subsequently accelerated by Razboj. Compiling for DDR3 memory at
+\code{0x4000\_0000} and uploading via the serial loader enabled rapid graphics
+iteration without repeated FPGA bitstream synthesis.
+
+The rendering implementation features three key techniques. Rather than storing
+a static face table, initialization routines identify all vertex triples
+separated by pairwise unit edges, orienting face normals outward. Face normals
+are unit vectors transformed by object rotation, allowing a single dot product
+to evaluate visibility and Lambertian illumination. For convex polyhedra,
+backface culling resolves visibility without a depth buffer. Early
+processor-rendered versions composed display rows in a local scanline buffer
+before writing to the framebuffer, avoiding visible flicker caused by drawing
+directly into an active scanout buffer.
+
+Visual evaluation on physical monitors revealed two rendering subtleties.
+Positioning the virtual camera three radii away caused nearest faces to dominate
+the silhouette, creating unnatural perspective distortion. Additionally,
+independent color channel quantization introduced hue shifts during shading
+transitions. The shader was revised to use a perceptual square-root intensity
+ramp with an elevated black floor and $2\times2$ ordered dithering to smooth
+four-bit color transitions.
+
+Hardware rasterizer Razboj now accelerates rendering at $640\times480$ with
+24-bit color depth (issue~\#986). The processor manages transformation matrices
+and emits display lists (Listing~\ref{lst:f-ico-list}) containing background
+clear rectangles and shaded triangles. Polygon winding order determines
+screen-space visibility. The display pipeline utilizes alternating framebuffers
+in memory. Razboj renders to the off-screen surface; upon completion, software
+redirects scanout pointers during vertical blanking intervals to eliminate
+display tearing. The processor renders the corner logo into both framebuffers
+during initialization. Every 64 frames, software logs cycle counts for display
+list generation, rasterization, and total frame latency.
+
+\lstinputlisting[caption={\code{cpu/vreteno/rust/ico\_hdmi.rs}: the
+icosahedron.},label={lst:f-ico}]{cpu/vreteno/rust/ico_hdmi.rs}
+
+\lstinputlisting[caption={\code{cpu/vreteno/rust/ico\_list.rs}: the
+icosahedron as Razboj's display lists.},label={lst:f-ico-list}]{cpu/vreteno/rust/ico_list.rs}
+
+The logo is stored as pre-rasterized data in a dedicated crate
+(Listing~\ref{lst:f-logo}). Sized at $144\times144$ pixels, it maps one-to-one
+to screen pixels in the corner of the $640\times480$ display (issue~\#1213).
+Pixel values are 4-bit indices into a 16-color palette generated by k-means
+clustering, reducing image storage to 10~KB. Conversion utility
+\code{//tools/logo2rs} (Listing~\ref{lst:f-logo2rs}) downsamples source images
+and generates Rust source tables. Index zero represents transparent pixels,
+preserving background colors underneath. Tables are declared as static arrays
+rather than constants; in unoptimized builds, indexing constant arrays triggers
+full array copies on every pixel access, inflating paint latency from two
+seconds to 31 seconds (issue~\#1245).
+
+\lstinputlisting[caption={\code{lib/logo/logo.rs}: the head of the
+logo, as \code{logo2rs} writes it.},label={lst:f-logo},%
+linerange={1-51}]{lib/logo/logo.rs}
+
+\lstinputlisting[caption={\code{tools/logo2rs/main.go}: the PNG to the
+crate.},label={lst:f-logo2rs},tabsize=2]{tools/logo2rs/main.go}
+
+\section{What is not done}
+\label{sec:f-todo}
+
+\emph{Display pipeline maturity.} Section~\ref{sec:f-first} demonstrates
+single-buffered scanout with manual tearing prevention and convex geometry
+rendering without hardware depth buffering. Future graphics workloads will
+require hardware double buffering and a depth buffer.
+
+\emph{Target utilization headroom.} Architectural plans allow partitioning the
+flagship into numbered configurations (\code{flagship-0}, \code{flagship-1}) if
+logic density saturates the FPGA. As Section~\ref{sec:f-cost} documents, existing
+logic consumes less than 10\% of device resources, keeping a unified flagship
+viable.
+
+\begin{thebibliography}{9}
+
+\bibitem{vreteno}
+F.~Filmar and D.~Janković, ``Vreteno in TxHDL,'' project repository
+\code{HDL/txhdl}, \code{//docs:vreteno}, 2026.
+
+\bibitem{eth}
+F.~Filmar and D.~Janković, ``Ethernet in TxHDL,'' project repository
+\code{HDL/txhdl}, \code{//docs:eth}, 2026.
+
+\bibitem{hdmi}
+F.~Filmar and D.~Janković, ``HDMI in TxHDL,'' project repository
+\code{HDL/txhdl}, \code{//docs:hdmi}, 2026.
+
+\bibitem{axi}
+F.~Filmar and D.~Janković, ``AXI in TxHDL,'' project repository
+\code{HDL/txhdl}, \code{//docs:axi}, 2026.
+
+\bibitem{cover}
+F.~Filmar and D.~Janković, ``TxHDL documents,'' project repository
+\code{HDL/txhdl}, \code{//docs:cover}, 2026.
+
+\end{thebibliography}
+
+\end{document}

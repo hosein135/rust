@@ -1,0 +1,171 @@
+# SPDX-License-Identifier: Apache-2.0
+# The flagship on the Alinx AX7A200B: every part of the system that is
+# proven on this board, in one bitstream, kept in the board's QSPI
+# flash so that the board comes up as itself. See issue #224.
+#
+# Nothing here is new hardware. The Vreteno board with its DDR3 memory,
+# the Ethernet port, proven as the echo design, and the HDMI output are
+# each proven on this board on their own, and this puts the three in
+# one part, on one clock input, with the loader in the core's boot
+# memory so that the software on the flagship is whatever was last sent
+# down the serial port.
+load(
+    "@rules_vivado//build/vivado:rules.bzl",
+    "vivado_program_device",
+    "vivado_program_flash",
+    "vivado_repl",
+)
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//tools/vivado:defs.bzl", "vivado_place_and_route2", "vivado_synthesis2")
+
+package(default_visibility = ["//visibility:public"])
+
+# The hand-written tops, for //tools/topcheck (issue 508).
+exports_files(["board/flagship.v"])
+
+# Every pin the flagship drives, each named in the file that owns it,
+# and the flagship's own constraints last.
+filegroup(
+    name = "flagship_xdc",
+    srcs = [
+        "//cpu/vreteno:ax7a200_xdc",
+        "//eth:eth_pins",
+        "//hdmi:hdmi_pins",
+        "board/ax7a200_flagship.xdc",
+        "board/flagship_io.xdc",
+        "//lib/parts:hdl_xdc",
+    ],
+)
+
+# Manual, as every Vivado target is:
+#
+#   bazel build //flagship:flagship_synth
+#   bazel build //flagship:flagship_pnr
+vivado_synthesis2(
+    name = "flagship_synth",
+    srcs = [
+        "//cpu/vreteno:board_boot_v",
+        "//eth:mac_v",
+        "//hdmi:scan_v",
+        "//lib/board:chan_cdc",
+        "//lib/board:bscan_user4",
+        "//eth:eth_rgmii",
+        "board/flagship.v",
+        "//ddr3:hdl",
+        "//lib/parts:hdl",
+    ],
+    part = "xc7a200tfbg484-2",
+    top = "flagship",
+    xdcs = [":flagship_xdc"],
+    deps = ["//ddr3:ddr3_mig_axi"],
+    tags = ["manual"],
+)
+
+vivado_place_and_route2(
+    name = "flagship_pnr",
+    synthesis = ":flagship_synth",
+    xdcs = [":flagship_xdc"],
+    tags = ["manual"],
+)
+
+# Write the flagship into the FPGA, which the next power cycle forgets.
+# Bring the tunnel up first:
+#
+#   bazel run //cpu/vreteno/board/remote:hw_server
+#   bazel run //flagship:flagship_prog -- \
+#       --hostport localhost:3122 --device '*/xilinx_tcf/Digilent/*'
+vivado_program_device(
+    name = "flagship_prog",
+    prog_daemon = "//cpu/vreteno/board/remote:hw_server",
+    deps = [":flagship_pnr"],
+    tags = ["manual"],
+)
+
+# Write the flagship into the board's QSPI flash, a Micron MT25QL128
+# over a 4-bit bus, which is where a flagship belongs: the board then
+# comes up as itself with nothing attached. The part is the one this
+# board answers with, read off the chip over JTAG; see issue #210.
+# Beside the bitstream, at the flash's program offset 0x00A0_0000
+# (issue 312, the layout in docs/flagship.tex), the image carries a
+# program: `flashid`, which reads the flash back through the window.
+#
+#   bazel run //flagship:flagship_flash -- \
+#       --hostport localhost:3122 --device '*/xilinx_tcf/Digilent/*'
+vivado_program_flash(
+    name = "flagship_flash",
+    size = 16,
+    flash_part = "mt25ql128-spi-x1_x2_x4",
+    interface = "SPIx4",
+    loaddata = {
+        "//cpu/vreteno/rust:flashid_ram_bin": "0x00A00000",
+    },
+    deps = [":flagship_pnr"],
+    tags = ["manual"],
+)
+
+# The bitstream leaves the flash's program area alone: its configuration
+# data ends before 0x00A0_0000, where programs begin (issue 312; the
+# layout is in docs/flagship.tex). Manual, since the bitstream needs
+# Vivado.
+sh_test(
+    name = "flagship_fits_test",
+    srcs = ["//tools/bitfit:fits_test.sh"],
+    args = [
+        "$(rootpath //tools/bitfit)",
+        "0xa00000",
+        "$(rootpaths :flagship_pnr)",
+    ],
+    data = [
+        ":flagship_pnr",
+        "//tools/bitfit",
+    ],
+    tags = ["manual"],
+)
+
+# The flash image holds the program byte for byte at 0x00A0_0000, beside
+# the bitstream, and the bitstream ends before it (issue 312). Manual,
+# since the image needs Vivado's write_cfgmem. The filegroup is there
+# because a location of an executable target names its script alone,
+# and the image is among the target's other files.
+filegroup(
+    name = "flagship_flash_files",
+    srcs = [":flagship_flash"],
+    tags = ["manual"],
+)
+
+sh_test(
+    name = "flagship_image_test",
+    srcs = ["//tools/bitfit:image_test.sh"],
+    args = [
+        "$(rootpath //tools/bitfit)",
+        "0xa00000",
+        "$(rootpath //cpu/vreteno/rust:flashid_ram_bin)",
+        "$(rootpaths :flagship_flash_files)",
+    ],
+    data = [
+        ":flagship_flash_files",
+        "//cpu/vreteno/rust:flashid_ram_bin",
+        "//tools/bitfit",
+    ],
+    tags = ["manual"],
+)
+
+# Where the four subsystems landed on the die, read off the routed
+# checkpoint. Manual, and its output is committed, exactly as the ASIC
+# flow's numbers are: a Bazel action has no repository to write into,
+# and the document draws the map at build time from the committed file.
+#
+#   bazel run //flagship:place_report > docs/flagship_place.tsv
+vivado_repl(
+    name = "place_report",
+    data = [":flagship_pnr"],
+    script = "place/extract.tcl",
+    use_terminal = False,
+    tags = ["manual"],
+)
+
+# The sources by name, for the documents' listings.
+filegroup(
+    name = "sources",
+    srcs = glob(["board/*.v", "board/*.xdc", "place/*.tcl"]),
+)

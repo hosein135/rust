@@ -1,0 +1,13 @@
+[package]
+name = "cf_port_attr_on_non_port"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/cf_port_attr_on_non_port.rs"
+
+[dependencies]
+rustdv = { path = "../../.." }
+
+[workspace]

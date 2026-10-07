@@ -1,0 +1,2836 @@
+% SPDX-License-Identifier: Apache-2.0
+%
+% Vreteno: an RV32IMAC core in TxHDL, the first large design. Built by
+% //docs:vreteno. One column, because it is mostly listings.
+\documentclass[journal,onecolumn,9pt]{IEEEtran}
+
+% One column: 80 columns fit at the body size, so nothing is reduced.
+\newcommand{\listingsize}{\normalsize}
+\input{housestyle}
+\input{memmap}
+
+\InputIfFileExists{buildstamp.tex}{}{}
+\providecommand{\buildstamp}{Draft build (outside the Bazel flow).}
+
+% A range of the interrupt controller, by its begin/end markers.
+\newcommand{\plicpart}[3]{%
+\lstinputlisting[rangebeginprefix=//\ begin\{,rangebeginsuffix=\},%
+rangeendprefix=//\ end\{,rangeendsuffix=\},includerangemarker=false,%
+linerange=#1-#1,caption={#2},label={#3}]{lib/parts/src/plic.rs}}
+
+% A range of the Sv32 unit, by its begin/end markers.
+\newcommand{\mmupart}[3]{%
+\lstinputlisting[rangebeginprefix=//\ begin\{,rangebeginsuffix=\},%
+rangeendprefix=//\ end\{,rangeendsuffix=\},includerangemarker=false,%
+linerange=#1-#1,caption={#2},label={#3}]{lib/parts/src/mmu.rs}}
+
+\title{Vreteno: An RV32IMAC Core in TxHDL}
+
+\author{Filip Filmar and Dragiša Janković%
+\thanks{Both authors are independent. Filip Filmar is the
+corresponding author, at f@hdlfactory.com; Dragiša Janković is
+reached at linkedin.com/in/dragisa-jankovic.}%
+\thanks{This document holds the Vreteno core, a RISC-V RV32IMAC processor
+with machine, supervisor and user modes and Sv32 paging,
+written in TxHDL under \code{//cpu/vreteno} of the project repository,
+included verbatim at build time with the reference model it is checked
+against, the programs it runs, and the trace and waveform the build
+produced by running it. The language is described in the embedding
+article~\cite{embedding}, the runtime in its own
+document~\cite{runtime}, the smaller designs in the
+examples~\cite{examples}, and the cover~\cite{cover} lists all of them.}%
+\thanks{The authors used a large language model, Claude, as an
+assistant in exploring the concepts and in writing and constructing
+the documents and the programs; every commit of the repository records
+this attribution and includes the exact prompts that guided it.}%
+\thanks{\buildstamp}}
+
+\markboth{Vreteno: An RV32IMAC Core in TxHDL}{Filmar and Janković: Vreteno}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Vreteno is a 32-bit RISC-V core, the RV32I base integer set, the M
+extension, the A extension's atomic instructions and the C extension's
+compressed instructions, with machine, supervisor and user modes and
+Sv32 paging, written in
+TxHDL: the first design large enough to ask whether the language
+scales past its examples. This is its fifth form: a three-stage
+pipeline, one process in which a fetch stage reads the instruction
+memory into an instruction register, a compressed instruction
+expanded there into the one it stands for, an execute stage runs the
+instruction before it and reads the data memory into a register at
+its edge, and a writeback stage extends a load, writes the register
+file and retires, with the one hazard closed by forwarding, except
+after a load, where it is closed by a stall of one cycle, and one
+bubble per taken branch or jump, written in the subset the lowering
+reads, so that the same file simulates and is a netlist, and with
+machine-mode traps: an environment call or a word the core does not
+know saves its address and its cause in the control registers and
+enters the handler, which returns through \code{mret}; and with
+the M extension on one sequencer, a multiply one step in the part's
+multipliers and a division thirty-two, which stalls the instruction
+in execute; with an interrupt line, taken in place of the
+instruction in execute when \code{mie}, \code{mip} and
+\code{mstatus} allow; and with a bus, a request channel out and a
+response channel back through a router, on which the data memory, a
+timer and a serial port are units of their own, the timer the second
+interrupt, and the port where the demonstration says OK and echoes
+what a terminal types back. It is checked twice, and it has run on
+the board. In lockstep against a reference model of the instruction set
+written as a plain program: the model steps when the core retires an
+instruction, and after every cycle the program counter, the
+thirty-one registers, the control registers and the halt must agree,
+and at the halt the data memory must; the demonstration program and
+sixty-four random ones pass, and a deliberately broken shift, a
+branch that does not squash the word after it, and a return from a
+trap that leaves the wrong status, each fail at their first use. And as a netlist: the VHDL
+and the Verilog the lowering writes, with the program in its
+instruction memory, are simulated under nvc and Verilator against the
+trace the Rust core wrote, every register and output at every tick,
+and agree. Every listing here
+is the file in the tree, and the trace and the figure are what the
+build produced when it ran the core.
+\end{abstract}
+
+\begin{IEEEkeywords}
+RISC-V, RV32IMAC, processor, hardware description languages, Rust,
+lockstep testing.
+\end{IEEEkeywords}
+
+{\footnotesize\tableofcontents}
+
+\section{What Vreteno Is}
+\label{sec:v-what}
+
+\emph{Vreteno} is the Serbian word for a spindle: the part that turns
+and on which the rest is wound. The core is the first design in TxHDL
+with more than a handful of registers, and it exists to find out three
+things: whether the language's constructs, a unit with registers and
+memories, one process, waits, reads and deferred drives, are enough to
+write a processor without stepping outside them; whether a design of
+this size can be tested to a standard the small examples cannot reach;
+and what the lowering must grow to before such a design becomes a
+netlist.
+
+The plan had three steps, and this document covers all three and a
+fourth. The core was written first as a single-cycle machine in
+simulation form and checked against a reference model, so the design
+was known correct before anything else was asked of it. Then it
+became a pipeline of two stages, and the lockstep check validated
+that refactoring: the test changed in one place, the core in
+one file, and the same programs passed. Last, the lowering
+grew until the core was a netlist, and the core was rewritten in the
+subset the lowering reads, with the lockstep check again holding the
+rewrite to the same behaviour; and the netlist simulates, under nvc
+and Verilator, against the trace the Rust core wrote, which is the check the smaller
+examples~\cite{examples} pass. What the lowering had to grow for
+this is stated in Section~\ref{sec:v-netlist}. Then, with the
+netlist synthesized and its memories and its timing known, the core
+became the pipeline of three stages it is now, so that the data
+memory could be a block RAM, and the lockstep check held that
+refactoring too.
+
+\section{The Instruction Set as Bits}
+\label{sec:v-isa}
+
+Listing~\ref{lst:v-isa} is RV32IMAC as encoders and a decoder. An
+encoder per mnemonic builds the word, the six formats being six
+functions of their fields; the decoder takes a word apart into its
+mnemonic, its registers and its immediate, sign-extended. The core
+does not use this decoder: it decodes on its own, in
+Section~\ref{sec:v-core}, from the fields of the word with the
+language's \code{slice}, \code{concat} and \code{sext}. So there are
+two decoders, written differently, and the lockstep test compares
+what they lead to; a defect in either shows up as a disagreement. The
+disassembler is for traces a person reads, such as
+Listing~\ref{lst:v-out}. The system instructions are there with the
+rest. \code{ecall}, \code{ebreak} and \code{mret} share an opcode
+and a function code and differ in their upper twelve bits; in the
+six CSR forms those bits name the register. The eight machine-mode
+registers a trap uses, \code{mstatus}, \code{mtvec},
+\code{mscratch}, \code{mepc}, \code{mcause}, \code{mie},
+\code{mip} and \code{mtval}, and the causes the core raises, are
+constants beside them, with the external and the timer interrupt's
+bits and causes, and the timer's and the serial port's addresses.
+The two machine counters are there, \code{mcycle} and
+\code{minstret}, each 64 bits and each read as two words. They are
+what a profiler wants, and what lets the core's own numbers be
+measured by a program running on it rather than only from the
+simulation around it. \code{mcycle} counts while the core runs and
+stops when the halt stops it, since nothing restarts this machine and
+a count that ran on afterwards would be a number nobody could read.
+
+They are the one part of the core the lockstep test does not check,
+by architectural design. The model steps when the core
+retires, so it knows how many instructions have gone by and cannot
+know how many cycles the pipeline spent; a program that read
+\code{mcycle} into a register would get a number no model could
+produce without knowing the microarchitecture, which is the thing the
+model exists not to know. So the counters are checked by a run of
+their own, \code{//cpu/vreteno:counters\_test}, where a program reads
+both around a division and finds the cycles many more than the
+instructions.
+
+\code{wfi} is there as well, and it waits rather than spinning. The
+specification allows either, and a core that returned at once would be
+correct; this one stops fetching until an interrupt is pending and
+enabled, and the cycles between are cycles in which it retires nothing.
+The test measures that silence rather than trusting it: a spin would
+retire something in nearly every cycle.
+
+What the wait does not ask is whether interrupts are enabled globally.
+The specification lets a core resume with \code{mstatus} closed, and
+that is the case that matters, because a kernel idles inside its own
+interrupt lock: a wait that waited for the global bit would never end.
+So the line coming up ends the wait, and whether the trap is then
+taken is the usual question, answered the usual way.
+
+\code{mhalt} at \code{0x7c0} is this core's own, in the space the
+specification leaves to a design: it reads as zero, and a write of an
+odd value to it stops the core when that instruction retires, which
+is what \code{halt} encodes and what a program ends with.
+\code{dcsr} at \code{0x7b0} and \code{dpc} at \code{0x7b1} are the
+debug specification's two, and Section~\ref{sec:v-core} says what
+the core keeps in them. \code{mbusquiet} at \code{0x7c1} is the
+core's own, beside \code{mhalt}: its low bit set, a load the bus
+refused reads the zero the bus answered and a store it refused is
+dropped; clear, which reset leaves, either is an access fault, as
+Section~\ref{sec:v-core} says.
+
+Five more say what the machine is rather than what it is doing.
+\code{misa} reports RV32IMAC with supervisor and user mode, and \code{mvendorid}, \code{marchid},
+\code{mimpid} and \code{mhartid} read as zero: an unassigned vendor,
+an unspecified architecture and implementation, and one hart, which is
+hart zero. They are there because a stock kernel reads one of them
+before it does anything else. Zephyr's reset code begins
+\code{csrr a0, mhartid}, and until the core answered it that
+instruction was an illegal one, so the kernel's first act was a trap
+into a handler it had not installed.
+
+The four that begin \code{0xf} are read only, and the specification
+means that strictly: a write to one is an illegal instruction rather
+than a write that is ignored. The core raises it, and only for an
+instruction that really writes. \code{csrrw} and \code{csrrwi} always
+do; a set or a clear writes only when its source field is not
+\code{x0} or a zero immediate, which is stated in terms of the field
+and not of the value the register happens to hold. A read is a set
+with \code{x0}, so the kernel's first instruction is answered.
+\code{misa} is not among them: the specification makes it writable and
+lets an implementation ignore what is written, which is what this one
+does. The M extension is the
+register format with \code{funct7} one: the four multiplies, which
+differ in which operand is signed and which half of the product they
+keep, and the two divides and two remainders, signed and unsigned. The
+A extension's word forms are opcode \code{0x2f} with \code{funct3}
+two, told apart by the five bits at the top: \code{lr.w}, whose
+\code{rs2} must be zero, \code{sc.w} and the nine AMOs, swap, add,
+the three logical ones, and the signed and unsigned minimum and
+maximum (issue~1010). Bits 26 and 25, \code{aq} and \code{rl}, are
+decoded and set aside, since one hart in order already orders them.
+User and supervisor mode (issue~1012) add \code{sret}, a system
+instruction beside \code{mret}; the supervisor's registers,
+\code{sstatus}, \code{sie} and \code{sip}, which are views of the
+machine's, and \code{stvec}, \code{sscratch}, \code{sepc},
+\code{scause}, \code{stval} and \code{satp}; the delegation registers
+\code{medeleg} and \code{mideleg}; the counter enables
+\code{mcounteren} and \code{scounteren}; and the unprivileged
+counters \code{cycle}, \code{time} and \code{instret} with their high
+halves. A CSR's address names in its bits 9 and 8 the least privilege
+that may reach it, and one whose top two bits are set is read-only.
+A unit test checks each format's encoder against the decoder.
+
+The compressed instructions are sixteen-bit spellings of instructions
+above, and \code{isa} has an encoder for each, named \code{c\_} and
+the assembler's mnemonic. \code{compressed} reads a halfword as the
+thirty-two bit instruction it stands for, or refuses it: all zeros,
+\code{c.jr} of \code{x0}, \code{c.lwsp} into \code{x0}, \code{c.lui}
+and \code{c.addi16sp} of zero, the floating-point and 64-bit forms,
+and shifts by 32 or more, which RV32C leaves to custom extensions. A
+hint, \code{c.addi} of zero or \code{c.mv} into \code{x0}, is an
+instruction that does nothing, and expands to the one it is spelt
+as. \code{compress} goes the other way, as an assembler does when it
+may, and a test checks that every instruction a halfword stands for
+compresses to a halfword that expands back to it.
+
+This decoder has a checker from outside the project. The build
+assembles all 49\,152 halfwords whose low two bits are not both set
+with the GNU assembler of the toolchain it already fetches and lists
+them with its disassembler, and \code{//cpu/vreteno:compressed\_test}
+spells each instruction the listing names with the thirty-two bit
+encoders and requires \code{compressed} to give the same word, and
+to refuse every halfword the listing does not name. The two differ in
+two places, where the test follows the specification: the
+disassembler names \code{c.addi16sp} of zero and shifts by 32 or more.
+Of the 49\,152, 28\,823 are instructions.
+
+\lstinputlisting[caption={\code{isa.rs}: the encoders, the decoder,
+the disassembler.},label={lst:v-isa}]{cpu/vreteno/src/isa.rs}
+
+\section{The Reference Model}
+\label{sec:v-model}
+
+Listing~\ref{lst:v-model} is the instruction set as a program. Its
+state is the architectural state and nothing else: the program
+counter, the registers, a data memory, the eight control registers,
+and whether it has halted. One \code{step} is one instruction,
+written against the decoder in the plainest Rust that says what the
+manual says. It is the oracle: the core is right when it agrees with
+this, cycle by cycle. The data memory begins at \code{DATA\_BASE}.
+Below it a load reads the boot memory and above it the devices
+answer; a load or store in the gap between the two memories is a
+fault, so a wild address in a random program is caught rather than
+wrapped.
+
+The traps are the manual's, machine mode only. An \code{ecall}, or a
+word the decoder does not know, is a trap: the address of the word
+goes to \code{mepc}, its cause to \code{mcause}, eleven for the
+call and two for the illegal word, the interrupt enable of
+\code{mstatus} is saved into its previous-enable bit and cleared,
+and the next instruction is at \code{mtvec}. \code{mret} is the
+way back: the counter takes \code{mepc}, the enable takes the saved
+bit, and the saved bit is set. A CSR instruction reads the register
+its upper twelve bits name into \code{rd} and writes it, replaced,
+set or cleared by a register or by a five-bit immediate; a name the
+model does not have is an illegal word, and traps. \code{mtval}
+takes the illegal word itself, the address an unaligned access asked
+for, the breakpoint's own address, and zero for any other trap. The
+external interrupt is a bit in \code{mip}, which \code{line} sets
+to the line at each edge, as the privileged specification has it: the
+interrupt controller sets and clears it, and a write to \code{mip}
+changes nothing; when it is set,
+enabled in \code{mie} and interrupts are enabled in
+\code{mstatus}, the next \code{step} traps instead of executing,
+with the interrupt's cause, and returns to the same address. The
+controller is five words in the window at \code{CLINT\_BASE}, the
+count and the compare, each in two halves, and \code{msip}, read and
+written as memory is; the timer's pending bit and the software one
+are its two lines, read in \code{mip} but not stored there, and the
+order they are taken in is the specification's: the external
+interrupt, then the software one, then the timer's. The model has no
+clock and no bus, so what a device answers is not its own. The caller
+sets \code{dev\_word} before a step to what the bus answered the
+core's load from a device, and \code{tirq} to the line as the core
+saw it; the data memory's words the model keeps itself, and the
+memory unit's lanes are compared with them at the halt. A store to a
+device is the device's business; the model keeps what it can check
+at the end, the timer's compare and the bytes given to the serial
+port. Which
+interrupt that step takes, if any, is the caller's word too, since
+the core decides on the bits as they stood a cycle earlier, and the
+lockstep harness propagates the core's decision across. Only the write to
+\code{mhalt} halts. The fetch reads a halfword, the upper half of its
+word when bit 1 of the address is set, and takes a second when the
+first's low two bits are both set; a compressed instruction is read
+as the one it stands for, the counter moves on by the instruction's
+length, and a jump links that address. A halfword that is no
+instruction decodes as illegal, and is the trap value. The
+M extension is Rust's arithmetic on the
+right types: a product's low word is the same whatever the signs, the
+high word is the top of a 64-bit product of the operands extended
+as the instruction says, and a division is the wrapping one, which
+gives the manual's answer for the one overflow; division by zero,
+which Rust would refuse, is spelled out, all ones and the dividend.
+The A extension is a read, the operation and a write, with the old
+word in \code{rd}; \code{lr.w} reserves the word and \code{sc.w}
+stores only while it is reserved, writes 0 if it stored and 1 if not,
+and uses the reservation up either way. A misaligned one traps,
+\code{lr.w} as a load and the rest as a store, and a word the bus
+refuses is a load's access fault for \code{lr.w} and a store's for
+an AMO. The privilege is a number, 3 machine, 1 supervisor, 0 user. A
+trap below machine mode whose cause machine mode delegated, in
+\code{medeleg} for an exception and \code{mideleg} for an interrupt,
+goes to the supervisor through its registers, saving \code{SIE} and
+the mode in \code{SPIE} and \code{SPP}; any other goes to machine mode,
+saving \code{MIE} and the mode in \code{MPIE} and \code{MPP}. An
+interrupt machine mode keeps is taken below machine mode always and in
+it with \code{MIE}; one it delegated is taken below supervisor mode
+always and in it with \code{SIE}; the machine's come first. The
+model takes the supervisor's external line on \code{sline}, beside
+\code{line} for the machine's.
+\code{mret} and \code{sret} return to the saved mode and leave user
+mode in its place, and \code{ecall}'s cause is 8 plus the mode it came
+from. A CSR the mode may not reach, \code{mret} below machine mode, and
+\code{sret} and \code{wfi} in user mode are illegal instructions.
+
+The same model is also a fast machine, for software too large for the
+cycle-level runs: a kernel, and what boots it (issue~\#1016). Given a
+\code{Bus}, it sends every fetch, load and store there instead of to
+its own memories, and a store goes out as a word and a mask of its
+lanes, so that a device is never read on the way to being written.
+\code{cpu/vreteno/src/machine} puts the board around it at the
+addresses its maps give: the DDR3 as a gigabyte of plain memory, the
+CLINT with its count moving one an instruction, the PLIC with its two
+targets, and the serial port as SiFive's. A loader lays an image and
+a device tree blob into the DDR3 and starts the hart as a bootloader
+would, \code{a0} the hart's number and \code{a1} the blob's address,
+and \code{//cpu/vreteno:machine} runs it with the serial port's output
+on the terminal and the terminal's input on the port, so a shell on the
+machine can be typed into or fed from a pipe (issue~\#1127). A program built for the board's DDR3 runs there
+unchanged: \code{hello\_ram\_bin} prints its line and halts after 267
+instructions. Without a bus the model is the board's reference as
+above, and the lockstep test holds the core to it as before.
+
+What Linux boots from is one image, which fastboot loads at
+\code{0x4000\_0000} and jumps to (issue~\#1019). \code{//tools/bootimg}
+lays it out: OpenSBI's \code{fw\_jump} at \code{0x4008\_0000}, the
+device tree at \code{0x4030\_0000}, the kernel at \code{0x4040\_0000},
+where OpenSBI jumps, and the initramfs past the kernel's \code{\_end},
+taken from its \code{System.map}, so that the kernel's BSS is clear of
+it. The image does not hold them there, though. Placed at those
+addresses it was half zeros, and fastboot sends every byte at about
+26\,KB/s, so the parts are packed one after another and the initramfs
+gzipped, which the kernel unpacks itself (issue~\#1201). A few
+instructions at the front stand in for a bootloader. First they move
+each part to its address, the last part first and each a word at a
+time from its top down: no part is packed above its address, so no
+word is overwritten before it is copied. Then \code{a0} is zero,
+\code{a1} the tree, and a jump to OpenSBI. Before the jump
+they leave the serial port and the interrupt controller as SiFive's
+parts leave them at reset, as Linux's drivers expect
+(issue~\#1136). Our port resets with its receive interrupt enabled,
+so the serial loader's bytes raise its line, and the controller keeps
+the request. Linux's driver enables the source before it has
+registered the port, so the request reached the handler with no port
+and the kernel panicked. The shim writes the port's \code{ie} to zero,
+claims and completes every request the controller holds, and leaves
+every source disabled at priority zero. \code{boot\_loaded\_test}
+boots Linux on the machine with the port as the loader leaves it. The
+tree is
+written last, with the initramfs's range and the command line in its
+\code{/chosen}, and the packer refuses an image longer than fastboot
+takes, its download size less the header page the host puts in front
+of a file, naming the sizes. The command line is
+\code{earlycon console=ttySIF0} unless a boot asks for another, so the
+kernel speaks on the serial port from its first line (issue~\#1125).
+The rule \code{boot\_image} chains the steps, and
+\code{fastboot boot NAME.bin} sends the result; its \code{model}
+attribute adds \code{mem=64M} for a boot on the machine below, where
+setting up the board's whole gigabyte is most of the kernel's early
+work, and the board's own image boots with all of it. The
+machine above is its first reader: a test boots a packed image there
+and checks the shim's registers and every part's address before an
+image ever reaches the board.
+
+Linux reaches the network through its own LiteEth driver,
+\code{litex\_liteeth}, on the Ethernet port (issue~\#1203). The
+port's registers are LiteEth's at LiteX's offsets, and its two
+receive and two transmit slots are the DDR3 buffers the tree reserves,
+so the driver runs as the kernel ships it. The tree names the port as
+\code{litex,liteeth}, with its registers and its buffers. The machine
+has the port too: its registers by the hardware's own map, its engines
+as copies to and from the DDR3, and with \code{--eth-peer} a station
+on the cable that answers ARP and ping at 10.0.0.2. It has the entropy source too, its registers by the part's map and
+a fixed sequence in place of the rings, so that a Zephyr image whose
+network stack asks for entropy boots there: \code{fastboot\_model\_test}
+boots the fastboot server to its listening line (issue~1386). With \code{--fastboot-peer} the far end of the cable is a fastboot
+client instead, smoltcp's TCP/IP with the protocol on top, and it
+sends the server a download, which arrives through the port's slots
+at the line's pace and is dropped as the board drops it (issue~1390).
+\code{fastboot\_download\_model\_test} sends 256~KiB, checks the
+staged bytes against the image, and says the steps a byte took, the
+retransmits and the dropped frames. A step is an instruction, since
+the machine has no memory latency, so the number is the work the
+receive path does and how TCP fares on the port, and the board still
+says what the DDR3 costs. Its frames arrive
+at the line's pace and wait for the driver as the hardware's do, at
+most one a slot, and a frame that finds both slots held is dropped and
+counted in \code{rx\_errors} (issues~1313 and~1314), so a driver
+too slow for a burst loses frames on the machine as it does on the
+board.
+A step of the machine is an instruction, which is what lockstep
+compares, and \code{mcycle} reads zero there. With \code{--timing} a
+step is charged what the core would spend on it instead (issue~1392):
+one cycle an instruction and four more when control does not fall
+through, and for a data access forty more from the DDR3, three into
+it, nine from a memory on the bus and one from the core's own, eight
+from a peripheral and two into one. \code{mcycle} and the timer count
+those cycles. The costs are fitted to the board's own programs, and
+\code{timing\_test} holds the model to the fit: \code{cpi.rs}'s warm
+loop takes 7000 cycles where the board took 7036 from the data memory
+and 7088 from the DDR3, and \code{ethperf.rs} copies a full frame into
+a DDR3 slot in 20\,142 where the board took 19\,926. A cold run misses
+by the instruction cache's fills, which the model does not have, and a
+transmit by the engine, which it does not time.
+\code{boot\_net\_test} boots an image whose command line asks
+\code{/init} for the network, and passes when Linux has pinged that
+station and had its replies.
+\code{/init} reads two words of the command line for it (issue~1318):
+\code{txhdl.ip=} brings \code{eth0} up at an address, and
+\code{txhdl.ping=} pings a host and says whether it answered;
+\code{txhdl.net} is the two at the machine's addresses.
+The board's image specifies \code{txhdl.ip=192.168.1.50/24}, the
+address the fastboot server has, so on the board Linux is on the
+network beside srv's 192.168.1.1 with nothing typed.
+\code{boot\_ip\_test} boots the machine's image with the two words
+spelled out.
+
+\lstinputlisting[caption={\code{model.rs}: the reference
+model.},label={lst:v-model}]{cpu/vreteno/src/model.rs}
+
+\section{The Core}
+\label{sec:v-core}
+
+Listing~\ref{lst:v-core} is the core. It is one unit whose state is
+the fetch stage's program counter; an instruction register with the
+program counter it was fetched at, a valid bit, and a bit that says
+the instruction was compressed, which together
+are the boundary between fetch and execute; the writeback registers,
+the boundary between execute and writeback, which hold whether an
+instruction is there, its program counter, its destination, its
+value if it is not a load, the raw word read for a load with the
+lane and the width to take from it, the word itself, and whether it
+halts; the halt itself; the eight control registers; the sequencer's
+seven, a busy bit, a count, the two halves of the pair it shifts, the
+multiplicand or divisor, and two sign bits; the word a load read
+from the bus and whether a load is waiting on it; and two memories:
+the register file, and the instruction memory loaded from the
+program with \code{Mem::with}. The data memory is a device on the
+bus, a unit of its own. Its inputs are
+the reset, the three interrupt lines, the bus's answers and the
+debugger's requests, and its outputs are the halt, the word
+executed, a \code{Writeback} value, the bus's requests and the
+debugger's answers; the \code{Writeback} value says whether an instruction retired this cycle,
+the register it wrote and what it wrote, which is what the waveform
+decodes field by field and the lockstep test steps the model on.
+The pieces of the step that are functions of their operands alone
+come first in the file, each a function under \code{\#[lower]} with
+a name and a sentence of its own: the expander of compressed
+instructions and the encoders of the formats it builds, the five
+immediates, the ALU, the
+branch condition, a loaded word's extension, what a store puts on
+each lane and which lanes it writes, the CSR read, the CSR number
+check and the CSR's new value, the sequencer's signs and its result.
+The step calls them, and the lowering writes them in where it does,
+so the step is the pipeline's decisions and drives, some four
+hundred and seventy lines, and the netlist is the one it made when
+the pieces were written in place.
+
+The process is one \code{loop} with one wait, the rising edge, and
+everything after the wait is one cycle of all three stages at once.
+The fetch stage reads the instruction memory at its program counter
+and at the word after, since an instruction may cross from one word
+into the next. The halfword at the counter is the upper half of its
+word when bit 1 of the address is set. If its low two bits are not
+both set it is a compressed instruction, and \code{expand} makes it
+the thirty-two bit instruction it stands for; otherwise the halfword
+after it is the instruction's upper half. The counter moves on by two
+or by four, and the instruction register takes the instruction with
+a bit that says which, so nothing after the fetch knows there are two
+lengths but the link a jump writes, two bytes on for a compressed
+call. \code{expand} is one \code{select!} on the three bits of the
+major opcode above the two that say compressed, over the instructions
+the encoders build from the halfword's fields, and it gives a halfword
+that is no instruction back as itself: no thirty-two bit instruction
+has its low two bits clear, so it traps as illegal, with itself as
+the trap value, which is what the specification asks. A test compares
+it with \code{isa::compressed} on every compressed halfword. The
+execute stage takes the instruction register:
+the decode, the fields of the word by \code{slice} and the five
+immediates assembled by \code{concat} and \code{sext}, as the manual
+draws them; two plain reads of the register file; the execute, an
+ALU shared by the register and immediate forms and a branch
+condition, each a function of its inputs; and the store and the
+load, which go out on the bus as one request, the address, the data
+in its lanes and the lanes a store covers, a load's word coming back
+on the bus into the writeback stage's register. The writeback stage
+takes the byte or the half out of that word by the lane and the
+width the load specified, extends it, and writes the register file, or
+writes the value execute computed; an instruction retires there.
+
+The one hazard a third stage brings is closed in one place. An
+instruction in execute may read a register the one in writeback has
+not yet written; the operand reads check the writeback stage's
+destination and take its value instead, the forwarding path, and
+since the register file is written at the end of writeback, an
+instruction two behind reads what it wrote. Register zero reads as
+zero before that check, so a writeback to nowhere forwards nothing.
+A load is the exception. Its word lands in the writeback register at
+the edge and is extended there. That value, forwarded through the
+ALU and the branch compare into the fetch counter, is the longest
+path in the core, and once the traps had lengthened the fetch's
+multiplexer it no longer fit in ten nanoseconds. So an instruction
+that reads what the load in writeback will write waits one cycle,
+the fetch holding with it, and reads the register file, which has
+the value by then. The stall is one \code{let} and the one case in
+which the core waits. Only the execute stage's values are forwarded,
+and those are registers, and fast.
+
+The traps are in execute, beside the ALU. The system opcode is
+taken apart by its function code and its upper twelve bits into the
+CSR operation, the call, the break and the return, and the
+\code{select!} that says whether the core knows the opcode has an
+arm for it, so an unknown system word is an unknown word like any
+other. A trap is a call or an unknown word in a valid instruction;
+its drives write the address, the cause and the new status into the
+control registers, its target is \code{mtvec}, and it is a redirect,
+so the word behind it is squashed as a taken branch's is, and it
+writes no register. \code{mret} is a redirect to \code{mepc} with a
+drive of the status. A CSR instruction selects the old value by the
+register's number, computes the new one by the function code, the
+source a register or the immediate in the \code{rs1} field, and
+drives the one register named, with the old value as its result
+through the ordinary writeback. The model's CSR step is one function
+over an enum; the core's is five entries of one \code{with!} under
+one enable, which is what five registers with one write each are.
+
+The M extension is a sequencer, and the second use of the stall. A
+multiply or a divide in execute starts it: the operands' magnitudes
+go into the pair and the multiplicand or divisor register, the signs
+into two bits, and the instruction stalls, the fetch holding with it.
+A multiply is one step: the 64-bit product of the two registers,
+\code{mul::<64>} of the examples document's multiply-accumulate
+\cite{examples}, into the pair, which synthesis makes of the part's
+DSP blocks. A division is thirty-two steps, one a cycle, each shifting
+the pair left, subtracting the divisor from the high half when it
+fits, and shifting the fit in as the quotient bit, which leaves the
+quotient in the low half and the remainder in the high. When the
+count is up the instruction runs: the result is the pair with the
+signs put back, the product or quotient negated when the signs
+differed, the remainder given the dividend's sign, a quotient by
+zero left as the all-ones the steps produce, and it goes through the
+ordinary writeback. So a multiply takes three cycles and a division
+thirty-four, and one set of registers serves both. The multiplier
+reads registers and writes registers, so it is a path of its own, a
+cycle long, and not on the one that sets the clock; the first form
+of the sequencer multiplied by thirty-two shifts and adds, and the
+change to the multiplier was one step's arm and the count it starts
+from.
+
+The A extension (issue~1010) is the third use of the writeback stage's
+hold, and it is placed to keep its arithmetic off the two paths that
+set the clock, the operands' forwarding into the adder and the branch
+into the next counter, which the design note \code{docs/sv32-timing.md}
+measured. An AMO goes out as a load does, from execute, and its word
+lands in writeback. There the instruction stays for two more cycles:
+in the first the new word is computed by \code{amo\_alu}, from two
+registers, the old word and the register operand kept from execute;
+in the second it goes out as a store, from writeback, with the
+address the load used. Then the instruction retires with the old
+word. \code{lr.w} is a load that also sets a one-word reservation,
+and \code{sc.w} is a store that goes out only while the reservation
+holds, writing 0 or 1. The reservation is compared with the address
+register itself rather than with the adder's sum, which an A
+instruction does not need since it adds no offset. Every A
+instruction first waits, as \code{fence} does, for the stores already
+posted, so \code{aq} and \code{rl} need nothing more. The cost is
+time, not clock: an AMO on the data memory takes about forty cycles,
+most of them the wait for the previous one's store.
+
+User and supervisor mode (issue~1012) are a two-bit privilege register
+and the supervisor's registers beside the machine's, and they are
+built so that a trap's destination is decided the way its cause is:
+\code{to\_s} is one bit of \code{medeleg} or \code{mideleg}, picked by
+the cause's low five bits, and it chooses the vector, \code{stvec} or
+\code{mtvec}, the registers the trap writes, and the status it
+leaves. The interrupt is chosen from the pending and enabled bits
+split by \code{mideleg}, the machine's set first when the mode allows
+it, which is a function of registers alone and so adds nothing to
+the paths that set the clock. \code{mip}'s supervisor bits are
+software's: machine mode sets them, which is how a supervisor gets
+its timer from the SBI, and the supervisor clears its own software
+interrupt through \code{sip}. \code{time} reads the timer's count,
+which the timer hands the core on a port of its own, so that the CLINT
+and the counter cannot disagree. Writing the lockstep test for this
+found that a \code{wfi} the core refused in user mode still set its
+wait, and a core that waited for an interrupt nothing would send; the
+wait now asks that the instruction be legal.
+
+Three of the cycle's decisions, whether the instruction in execute
+is stalled, whether an interrupt takes its place and whether the
+fetch is redirected, are wires kept as fields, \code{Wire<Bit>} of
+the runtime: the process sets each and reads it back in the step, the
+trace shows them under the core's name beside the registers, and the
+netlist declares them from the fields, so the testbench that checks
+the core checks them too. Any \code{let} of the loop can be made
+one, at no cost in hardware, which is how an internal signal is
+looked at.
+
+The interrupt is the second input of the core, and it is taken in
+execute as a trap is. The pending bit of \code{mip} is the line,
+taken at each edge, and a write to \code{mip} changes nothing, since
+the specification makes the bit read only and leaves it to the
+interrupt controller. It once latched until software cleared it, which
+software written to the specification never does: Zephyr took one
+interrupt, returned to the bit still set, found nothing to claim, and
+halted (issue 788). An instruction in execute that is not
+stalled is live; when the pending bit, its enable in \code{mie} and
+the enable in \code{mstatus} are all set, the interrupt takes the
+live instruction's place: it runs nothing, its address goes to
+\code{mepc} with the interrupt's cause, \code{mtval} takes zero,
+the status is saved and cleared as for any trap, and the fetch is
+redirected to \code{mtvec}. The decision is made a cycle before it is
+acted on (issue 1331): whether one is pending and enabled, for which
+mode, and from which set, go into registers, and the take reads them,
+since the enables' logic in front of the fetch's address was the
+flagship's worst path. A cycle later is nothing a program can see.
+What it could see is an interrupt taken just after it was forbidden,
+so the decision is dropped after a write of \code{mstatus},
+\code{sstatus}, \code{mie}, \code{sie}, \code{mideleg}, \code{mip} or
+\code{sip}, an \code{mret} or \code{sret}, a trap, and debug mode.
+Only as the instruction runs: a CSR access merely sitting in execute
+once dropped it every cycle, and a loop reading \code{mip} while it
+waited for an interrupt never took one. The instruction still passes through
+the writeback stage, writing nothing, so that it retires as a trap
+does and the lockstep test steps the model on it. A division in
+flight when an interrupt is taken is cancelled, and starts again
+when the handler returns, on the registers as they are then: the
+sequencer must never step under an instruction other than its own,
+which is a defect the random programs found. On the board the line is the
+interrupt controller's, whose input from the board itself is tied
+low; the run and the test drive it.
+
+Debug mode is the third thing that keeps a live instruction from
+running, and it is entered as an interrupt is taken: before the
+instruction, whose address goes to \code{dpc} and which runs when
+the mode is left. Three things ask for it, and the cause field of
+\code{dcsr} says which did: a halt request on the core's
+\code{haltreq} input, the instruction after a single step, and
+\code{ebreak} when \code{dcsr.ebreakm} is set, which otherwise
+raises the breakpoint trap. In the mode the fetch is held, nothing
+runs and nothing retires, and an interrupt that arrives waits with
+its pending bit set. A resume, \code{resumereq} held high for a
+cycle and acted on once per entry, redirects the fetch to
+\code{dpc}; with \code{dcsr.step} set it arms a step, and the next
+instruction to run asks to enter again before the one after it,
+which is how a debugger walks a program an instruction at a time.
+A core that has stopped itself, by writing \code{mhalt}, enters the
+mode on a halt request too, with \code{dpc} the instruction after the
+write, and the stop ends, so a debugger can read what a finished
+program left and resume it (issue~1047).
+\code{dcsr} holds the specification's version, the privilege,
+\code{ebreakm}, \code{step} and the cause, and nothing else is
+written. The two requests are inputs of the core and the mode is
+its output \code{dbg}; on the board the debug module of issue 154
+drives them, and the lockstep test drives them from a plan,
+Section~\ref{sec:v-lockstep}. The CSR instructions name \code{dcsr}
+and \code{dpc} only in debug mode, as the specification has it: from
+machine mode a read or a write of either is an illegal instruction
+and writes nothing (issue~972). A debugger sets \code{step} and
+\code{ebreakm} through the module's own port, the abstract command,
+while the core is halted.
+
+The reset line puts the CSRs back as configuration left them: the
+status, the trap vector, the enables and the pending bits, the trap
+registers, the scratch register and both counters, and debug mode
+with its two registers. The core declares \code{rst} itself, so no
+register of its is put back by the netlist, and until the line did
+this a program started by it ran with the previous program's trap
+vector and interrupt enables (issue 419). The specification asks only
+that interrupts be disabled at reset; the rest is this design's
+decision, taken so that a program started by the line sees what a
+program started by configuration sees. The register file is not
+reset, which is what a register file is, and the lockstep test relies
+on that: its program counts its own starts in a register.
+
+The bus is everything from the data memory up in the address map,
+and it is two channels: a request out of the core, one word of the
+address, the data in its lanes, the lanes a store covers and whether
+it is a store; and a response back, the word read. A channel is
+what the language has for two units, registered on both sides and
+indifferent to which ran first in the step, so a device is a unit of
+its own, and the core's process talks to it by predicate, as the tap
+of the examples document does~\cite{examples}: a receive with no
+wait before it, which takes the response whenever it comes, and a
+send under \code{if}, whose \code{valid} is the condition. A
+store to the bus goes out when the bus has room and the instruction
+runs on; a load goes out, sets the wait bit and moves on to
+writeback, which holds it, and the whole pipeline behind it, until
+the response has landed in a register of its own there. The hold is
+the third use of the stall,
+and it is a register's say: an earlier form stalled the load in
+execute on the decode of its address, and that decode, the address
+add and the fetch's multiplexer were the path that limited the
+clock. A load or a store also waits for room on the bus whatever its
+address, so that the fetch's hold never hangs on the address; the
+devices keep up, so there is always room. A load that has gone out
+is not taken by an interrupt: the interrupt waits for the next
+instruction, so a device is never read twice for one load. A store
+is posted, and a program that needs it to have landed before it
+goes on says \code{fence}: the core counts the stores it has posted
+and not yet had answered, and a fence waits in execute until the
+count is zero. A load already waits for its answer, so that is the
+whole of what a fence has to wait for; until issue 432 the
+instruction retired at once and ordered nothing.
+
+The bus says how an access went, and the core listens. A load the
+bus refused, by a peripheral that failed or by the router for an
+address that is nobody's, retires as a trap: the load access fault,
+cause 5, with the address in \code{mtval} and the load's own address
+in \code{mepc}, nothing written, the instruction behind it squashed
+and the fetch restarted at the handler. A store is posted, so its
+refusal comes back later; the core keeps it and raises the store
+access fault, cause 7, before the next instruction to run, whether or
+not interrupts are enabled, with \code{mepc} naming that instruction
+and \code{mtval} zero, since the address is gone. Until this a load
+from nowhere read zero and a program proceeded as though it had read
+a word, which two board programs paid for in silence (issue 417).
+The remote peripheral refuses on purpose when its patience runs out,
+so a program that means to poll it sets \code{mbusquiet} and reads
+the zeros as before. A fetch the bus refused comes back as a zero
+word with a mark, and the instruction taken from it raises the
+instruction access fault, cause 1, with its own address in
+\code{mtval}, rather than the illegal instruction the zero would be
+(issue 423).
+
+The bus is AXI4~\cite{axi}. The core is a host, and a host written
+as hardware, so it holds the link's channel ends themselves rather
+than the simulation-side \code{Host}: it issues a burst of one beat
+per load or store on \code{issue}, sends a store's beat on
+\code{wbeat} in the same cycle, and hands the identifier the tracker
+granted back on \code{release} as the answer arrives. It writes no
+identifier and counts no beat.
+
+Three devices sit behind the link's router, the \code{Router} of
+\code{txhdl\_parts}, whose map type states the address map: the data
+memory at \code{0x1000}, the serial port at \code{0x3000}, and the
+timer and software interrupt the 64~KiB from \code{0x0200\_0000}, and
+every other address a hole the router answers \code{DecErr} itself.
+The run in \code{run.rs} adds a fourth range, the boot memory at
+\code{0x0000}, for the loader. The data memory and the
+timer are each behind an \code{AxiPer}, so what each sees is a whole
+request and, for a write, its beat. The serial port is an AXI-Lite
+peripheral behind \code{LiteBridge<1, ..>}, a bridge of one peripheral,
+which sends the router's bursts to it one beat at a time, as
+AXI-Lite transactions with no identifier~\cite{axi}. None of the
+three decodes an address any more, because the router and the
+bridge have already done it. Nothing in this section is the
+core's or the devices' own code: the link, the router and the two
+trackers are parts, and this design is their first user that is not
+a test.
+
+A load waits for its answer and a store is posted, so the core has
+one read and as many writes in flight as the link has identifiers,
+which is four. A write's response and a load's beat come back on
+channels of their own and one identifier goes back a cycle, so a
+write's is taken first and a load's waits; that cannot starve the
+load, because a load holds the core in its wait and no further store
+is issued while it does.
+
+The data memory, Listing~\ref{lst:v-dmem}, is the first device:
+1024 words in four memories of a byte, one per lane, so that a store
+of a byte or a half writes its lanes and reads nothing. A write lands
+in the lanes the request covers; a read goes into the memory's own
+register at the edge, the synchronous read a block RAM has, and is
+answered the cycle after. The router sends it only the requests in
+its range, so it checks no address. What the memory costs as a unit
+of its own is the bus's round trip: a load's request crosses the
+core's channel, the router and the memory's channel, the memory
+reads and answers, and the answer crosses the memory's channel, the
+router and the core's channel, so a load retires ten cycles after
+its execute, the nine bubbles before each load in the run, where the memory in the core had it retire in one. The
+random programs pay it in the wait in writeback and nothing else,
+and the board's own memory could take the same place. The
+timer, Listing~\ref{lst:v-timer}, is the second device, in the
+same subset. It takes every request offered,
+answers a read in the cycle after with the word addressed, or zero
+for an address that is not its own, writes the lanes a write covers
+into its word, counts from the reset one a cycle, and raises its
+line while the count has reached the compare; the reset puts the
+compare at all ones, since a compare of zero beside a count of zero
+is a line raised from the first cycle (issue 419). Its five words are
+declared once, with \code{regmap!}, which writes the read mux, the
+write enables and the offsets the model and the tests address by; a
+word the map does not name reads zero and takes no write (issues 668
+and 681). The line is a wire,
+not a channel, and a wire between units offers no guarantee about the
+step, so the timer drives it from a register, and the run and the
+test poll the timer before the core: then the core reads in a cycle
+what the timer decided the cycle before, which is what the netlist
+does too. The board's other device that raises an interrupt, the
+interrupt controller, has a section of its own,
+Section~\ref{sec:v-plic}. The timer's own netlist is checked as the core's is, from
+the same trace; the two entities share one run. Between two lowered
+units a unit's port is one side of the handshake, and the sides wired
+together would make a combinational loop, which the placer refused
+when the first board top did that. So the board, one lowered unit of
+units, joins its children through a channel of the lowering's own:
+its netlist puts an instance of \code{txhdl\_chan}, a buffer of two
+as the runtime's channel is, between each sender and its receiver.
+
+\lstinputlisting[caption={\code{dmem.rs}: the data memory, an AXI
+peripheral.},label={lst:v-dmem}]{cpu/vreteno/src/dmem.rs}
+
+\lstinputlisting[caption={\code{timer.rs}: the timer, an AXI
+peripheral.},label={lst:v-timer}]{cpu/vreteno/src/timer.rs}
+
+The serial port, Listing~\ref{lst:v-uart}, is the third device,
+with a line each way, and its registers are SiFive's
+\code{sifive,uart0} (issue 1011), so that the serial drivers of Linux,
+OpenSBI and Zephyr drive it as they are rather than one written here.
+It is an AXI-Lite peripheral, so it holds no state for the bus: a read
+takes an address and answers the word in the same cycle, and a write
+takes an address and a word together and answers at once. A byte
+written to \code{txdata} joins a queue of eight, and while the queue
+holds any and \code{txctrl}'s enable is set, the oldest goes out on
+the line as a start bit, the eight bits least significant first, and
+a stop bit, or two, each \code{div} plus one cycles long; a write
+while the queue is full is dropped, and a read of \code{txdata} says
+so in its bit 31. A frame coming in on the other line is sampled in
+the middle of each bit, once a low on the resting line has said a
+start bit is there: a high where the start bit should be is a false
+start and the frame is dropped, the eight bits in between are shifted
+in, and a high at the stop bit lands the byte in a queue of eight
+behind \code{rxdata}, whose read takes the oldest and says in bit 31
+when there was none. Each queue is a memory of eight bytes with the
+index of the oldest and a count, a push and a pop in one cycle leaving
+the count where it was; so a terminal may type ahead of the program,
+as the terminal of the runs does, its bytes back to back, and a
+program may write a line without waiting between its bytes.
+\code{ip} says which watermark is passed, the transmit queue holding
+fewer than \code{txctrl}'s count or the receive queue more than
+\code{rxctrl}'s, and the port's interrupt line is high while one that
+\code{ie} enables is; on the board it is source 1 of the interrupt
+controller, whose line is the core's external interrupt, and the
+demonstration joins it to the line it drives. Two resets differ from
+SiFive's, so that a program that never writes the controls finds the
+port as it was before the map: both enables start set, and
+\code{div} starts at the unit's parameter \code{DIV} less one:
+867 for 115\,200 baud at 100~MHz on the board, and 3 in the runs that
+are checked, so that a byte takes forty cycles rather than nine
+thousand. \code{ie} starts clear, as SiFive's does: a receive bit that
+started set let the serial loader's bytes leave a request pending in
+the interrupt controller, which Linux took before its port was ready
+(issues~\#1136 and~\#1137). The two are the same unit lowered twice, and a driver sets
+\code{div} from the clock it is told the port runs on. The line in
+goes through one register before the logic, as a pin's should. The
+port's pieces, the frame a byte goes out as, the frame after a bit, a
+bit's middle and a bit taken in, are functions under \code{\#[lower]},
+inlined where the step calls them, so the step is the two sides'
+drives; the examples document~\cite{examples} states the form. Its
+seven words are declared once, with \code{regmap!}, \code{rxdata} as a
+register the read takes, and the macro writes the word a load reads,
+which word a write goes to, when a read takes a byte, and the offsets
+a test holds to the ones SiFive's drivers use (issue 669). The run and the lockstep
+test put a terminal on the two lines, \code{term.rs}: it decodes
+what the core sends, and once the core has said a line it types
+three bytes back, a pause between them for the program to take
+each, and the run prints what was said both ways.
+Figures~\ref{fig:v-out}, \ref{fig:v-in} and \ref{fig:v-bus} are
+the port at work, three windows on the run's one trace. The first is
+the demonstration's O going out: the write reaches the port, the
+bit count loads ten, and the line falls for the start bit, then
+transmits the byte's bits four cycles each, low first, as the shift
+register empties, and rises for the stop bit; the requests after
+the first are the program polling the status for the next byte. The second is the
+terminal's y coming in: the line falls, the port's register of it
+follows a cycle later, the bit count loads ten and counts down as
+the bits are shifted in at the middle of each, and at the stop bit
+the byte lands in the buffer, whose count rises and with it the
+interrupt line.
+The third is the bus under the status poll and the write before the
+first: the core's request goes out, the router hands it to the
+bridge on \code{ar2}, the bridge hands it to the port on \code{uar},
+the port answers on \code{ur}, and the answer comes back through the
+bridge and the router into the core, which holds in writeback until
+it does; then the load retires. The store goes out the same way on
+\code{aw2} and \code{uaw}, is answered on \code{ub}, and retires at
+once.
+
+\begin{figure}[htbp]
+\centering
+\input{vreteno_out_timing.tex}
+\caption{A byte out: the write into the port, ten bits to send, and
+the line's start bit, eight bits low first, and stop bit, four
+cycles each; the requests after the first are the program's polls
+of the status for the next byte.}
+\label{fig:v-out}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\input{vreteno_in_timing.tex}
+\caption{A byte in: the line, its register, the bits left, the byte
+shifting in, and the buffer's count and the interrupt as it lands.}
+\label{fig:v-in}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\input{vreteno_bus_timing.tex}
+\caption{The bus under a status poll and a byte write: request out,
+through the router and the bridge to the port, response back, the
+core waiting in writeback, and the retire.}
+\label{fig:v-bus}
+\end{figure}
+
+\lstinputlisting[caption={\code{uart.rs}: the serial port, an
+AXI-Lite peripheral.},label={lst:v-uart}]{cpu/vreteno/src/uart.rs}
+
+\lstinputlisting[caption={\code{term.rs}: the terminal on the port's
+lines, for the run and the test.},label={lst:v-term}]{cpu/vreteno/src/term.rs}
+
+The stages meet at the end of the cycle, in the deferred drives of
+the fetch's state and the writeback's. When the execute stage's next
+program counter is the one after its own, the word the fetch stage
+read this cycle is the right one and moves into the instruction
+register, valid, with the fetch counter advanced by two or four, as
+the instruction is compressed or not. When it is
+not, on a taken branch, a jump, a trap or a return, that word is the
+wrong one: the instruction register is marked empty, the fetch
+counter takes the target, and the next cycle executes nothing, which
+is the one-cycle penalty a machine pays for resolving branches in
+its second stage. Reset empties the instruction register and
+restarts the fetch at zero; a halting instruction stops the fetch
+and parks its counter one instruction past it, as the model's
+counter parks, and
+sets the halt a cycle later when it retires, so the two agree there
+as well. The fetch counter's drive is shaped for the netlist. The
+redirect is the last thing the cycle decides, a compare or an add on
+a forwarded value. So the counter's next value is two candidates,
+advance and target, with reset, park and hold folded into each, and
+the redirect chooses between them one multiplexer from the
+instruction memory's address. The instruction register's drives are
+a \code{case!} on the early conditions alone.
+
+This is the lowerable form, and it reads as a netlist does: every
+name after the wait is a function of the state and the inputs, and
+nothing branches. \code{select!} chooses among values, the ALU by
+\code{f3}, the branch condition, the loaded and the stored word, the
+writeback value, the target, the old and the new CSR value and
+whether the core knows the opcode; \code{with!} and \code{case!}
+choose among drives, the register file's write under its enable,
+the control registers under a CSR write, a
+trap, the line or a return, the writeback registers under execute's run, and
+the instruction register by reset, halt or fetch, in that priority.
+Register zero reads as zero rather than being protected from writes, since a mask
+on a read is a multiplexer and a guard on every arm is not. The
+first form of this file, single-cycle and with Rust \code{match}es,
+is in the history; the lockstep test passed each form, which is what
+made rewriting it safe.
+
+\lstinputlisting[caption={\code{core.rs}: the three-stage
+core.},label={lst:v-core}]{cpu/vreteno/src/core.rs}
+
+\section{The Interrupt Controller}
+\label{sec:v-plic}
+
+The core has one external interrupt line, and a machine has more
+sources than one. On the board a platform-level interrupt controller,
+Listing~\ref{lst:v-plic-gateway} and those after it, stands between
+them, at \code{0x0c00\_0000}, where RISC-V machines put it. It is a
+part of \code{txhdl\_parts}, \code{Plic<N, EDGE>}, one unit for every
+count of sources, whose sources are an array of ports and whose
+priorities are an array of registers, \code{Plic1} to \code{Plic8}
+naming the counts; it is an AXI-Lite peripheral behind a bridge of
+its own. Its words are the
+RISC-V PLIC's for two targets, the hart's machine mode and its
+supervisor mode: a priority per source from \code{0x4},
+three bits, where 0 never interrupts; the pending bits at
+\code{0x1000}; the machine target's enable bits at \code{0x2000}, its
+threshold at \code{0x20\_0000} and its claim word at
+\code{0x20\_0004}; and the supervisor target's at \code{0x2080},
+\code{0x20\_1000} and \code{0x20\_1004}, the second context's
+offsets. Sources are numbered from 1, and a source's number is its
+bit. The two targets share the sources and the pending bits, so a
+source enabled for both is served by whichever claims it first; the
+supervisor's line is \code{mip.SEIP}'s: the core takes it on its
+input \code{seirq}, registered as the machine's line is (issue~\#1094).
+A read of \code{mip} or \code{sip} shows SEIP as that line ORed with
+the bit software may set, and a set or a clear of \code{mip} modifies
+only software's bit, so the line never latches into it, as the
+privileged specification requires.
+
+A source's line goes through a gateway first,
+Listing~\ref{lst:v-plic-gateway}. A level source asks while its line is
+high, and an edge source, whose bit is set in the \code{EDGE}
+parameter, asks on a rising edge. A request goes forward, and becomes
+pending, only when the source has none in service: service runs from
+the claim that took the last request to the complete that ended it.
+An edge during a service is held, one deep, and asks on the complete;
+a level source still high on the complete asks again at once.
+The choice, Listing~\ref{lst:v-plic-choice}, is a loop over the
+sources that keeps the best so far. A source is a candidate when it is pending,
+enabled and above the threshold, and the best has the highest
+priority, the lowest number winning a tie. A read of the claim word
+answers with the best source's number, or 0, and clears its pending
+bit; a write of the number back is the complete. Each target chooses
+alike, from its own enables and above its own threshold, and each
+target's interrupt line is a register, high a cycle after it has a
+best source, so the core reads the machine one as it reads the
+timer's.
+
+\code{ex\_plic}, Listing~\ref{lst:v-plic-ex}, drives a \code{Plic3}
+whose second source asks on an edge, the way a handler would: it sets
+the priorities to 1, 3 and 3 and raises all three lines. The claims
+come out 2, 3 and 1, and a fourth claim answers 0. On the completes the
+two level sources still high ask again and the edge source does not. A
+threshold of 1 hides a priority of 1, and a second pulse on the edge
+source during its service asks once on its complete. Last, source 3
+is enabled for the supervisor target alone: it asks on that target's
+line and not the machine's, and is claimed and completed at the
+supervisor's offsets.
+Figure~\ref{fig:v-plic} is the start of that run. The build simulates
+the controller's netlist against the run under nvc and Verilator, and
+\code{//lib/parts:parts\_test} checks the same four rules on their
+own.
+
+\begin{figure}[htbp]
+\centering
+\input{plic_timing.tex}
+\caption{Three sources asking at once: the lines, the pending and
+active bits, the claims on \code{ar} and their answers on \code{r},
+and the interrupt line, which falls a cycle after the last claim and
+rises again when source 1, completed and still high, asks again.}
+\label{fig:v-plic}
+\end{figure}
+
+\plicpart{gateway}{The gateway: the lines as one word, and the
+requests that go forward.}{lst:v-plic-gateway}
+
+\plicpart{choice}{The choice of the source a claim takes.}%
+{lst:v-plic-choice}
+
+\plicpart{bus}{The words on the bus, the claim and the complete.}%
+{lst:v-plic-bus}
+
+\plicpart{drives}{The drives: the requests, the registers and the
+line.}{lst:v-plic-drives}
+
+\lstinputlisting[caption={\code{ex\_plic.rs}: a controller of three
+sources, claimed and completed.},label={lst:v-plic-ex}]{lib/examples/ex_plic.rs}
+
+\lstinputlisting[style=ascii,caption={What \code{ex\_plic} printed when
+the build ran it.},label={lst:v-plic-out}]{out_plic.txt}
+
+On the board the controller is a \code{Plic3}. Its source 1 is the
+serial port's interrupt line, its source 2 the board's \code{irq}
+input and its source 3 the Ethernet peripheral's, all level sources, and its line is the core's external
+interrupt. \code{irq.rs}, Listing~\ref{lst:v-irq}, is a program for the
+board that takes its input by interrupt. It enables source 1, installs
+the trap entry of \code{vreteno\_hal} (Section~\ref{sec:v-hal}),
+registers a handler for the external interrupt's line, allows that
+interrupt and says \code{ready}, then waits in a loop that never
+reads the serial port. Each byte the terminal types lands in the
+port's buffer and raises its line. The controller raises the core's,
+and the handler claims, reads one byte and completes. A byte still in
+the buffer keeps the port's line high, so the controller asks again on
+the complete, and the next byte is the next interrupt. The core's
+pending bit for the external interrupt is the controller's line, so
+the crate's dispatcher clears nothing after the handler; the
+controller's line fell a cycle after the claim. \code{//cpu/vreteno:board\_test} runs the board's design on it,
+with a terminal that types \code{ping}, and the program says
+\code{got ping in 4 interrupts}.
+
+\lstinputlisting[caption={\code{cpu/vreteno/rust/irq.rs}: input by
+interrupt, one interrupt a byte.},label={lst:v-irq}]{cpu/vreteno/rust/irq.rs}
+
+\section{The Programs}
+\label{sec:v-programs}
+
+Listing~\ref{lst:v-program} holds the programs. \code{Asm} is the
+smallest assembler that has labels: a branch to a label not yet
+placed is emitted as a placeholder and patched when the label is,
+which is all a forward branch needs. It holds halfwords, a thirty-two
+bit instruction being two of them and a compressed one one, and packs
+them into the little-endian words the instruction memory holds. With
+\code{compress} set, \code{emit} writes an instruction in its
+compressed spelling where it has one; a branch to a label keeps
+thirty-two bits, since its size is fixed before the label is placed.
+\code{align} pads to a whole word, which a trap handler needs:
+\code{mtvec} keeps no low bits, so a handler starting in the upper
+half of a word is entered two bytes early. The demonstration program
+is written with \code{compress} set, so it runs the same
+instructions in the same cycles in fewer bytes. It sums
+one to ten in a loop, calls a function that doubles the sum and
+returns through \code{jalr}, stores and loads every width so the sign
+extension of \code{lb} and \code{lh} and the zero extension of
+\code{lbu} and \code{lhu} are exercised, uses the upper immediates,
+the arithmetic shift and both compares, then traps twice and ends
+in the write to \code{mhalt} with 110 in \code{x10} and at the first
+data word.
+The traps need a label's absolute address, which \code{abs} gives
+an encoder once the label is placed. The handler's address goes into
+\code{mtvec} first of all, the timer's compare is set to 150, both
+interrupts are enabled in \code{mie} and interrupts in
+\code{mstatus}, so that the line can be raised at any point of the
+run and the timer fires in the middle of it. An \code{ecall} and then the
+word of all ones, which is illegal, enter the handler. The handler
+reads the cause into \code{x23} and branches on its sign: an
+interrupt has nothing to clear in \code{mip}, whose bits are the
+lines, and the timer's has the compare
+moved past the end of the run and a \code{fence} after it, since the
+store is posted and the line drops only when it lands, and either is counted in \code{x8}
+and returned from to the word it interrupted; an exception has
+\code{mepc} read, stepped past the word that trapped and written
+back. The program then writes \code{mscratch} by immediate and
+reads it back into \code{x24}, so that two is in \code{x23} and
+five in \code{x24} at the end, and two in \code{x8}: the line,
+raised once, and the timer. Before the traps it writes OK and a
+newline to the serial port, a byte at a time. Each byte waits for a
+load of \code{txdata} to say the queue has room, its sign bit clear,
+the polling loop every program writes for a port like this. Then it
+echoes three bytes: each loads \code{rxdata} until its sign bit says a
+byte came, which the load takes, waits for room and writes it back; the
+terminal typed the three back to back, so the second and third
+waited in the port's buffer. The
+timer's interrupt is enabled from the start and the line's only
+after the echo, since a byte received raises the line too; the
+pulse and the bytes have left the pending bit set by then, so the
+line's interrupt comes once, as counted. Between the shifts
+and the traps it multiplies and divides, five of the eight
+instructions, on the sum and on minus two: minus 220 into
+\code{x26}, minus 55 into \code{x29}, and the remainder minus two
+into \code{x30}.
+
+The random generator writes straight-line programs of a given length
+from a seed: every register operation, aligned stores and loads
+within the first data words through \code{x2}, which it keeps at the
+data base, now and then a forward branch over one or two words, so
+both outcomes of every branch condition occur, the M extension in
+half the places an \code{or} would go, the A extension's word forms
+on an aligned data word through \code{x28}, an AMO, or \code{lr.w}
+and \code{sc.w} on one word, or \code{sc.w} alone; the mode the
+body runs in, machine, supervisor or user, with illegal instructions,
+user mode's environment calls and the supervisor's software interrupt
+each delegated or not by the seed, and a supervisor's handler beside
+the machine's; and the six CSR forms on
+\code{mscratch}, \code{mcause}, \code{mepc} and \code{mtval},
+and now and then an \code{ecall} or an illegal instruction: a word of
+zeros, which is two illegal halfwords, a reserved compressed halfword,
+or a word of ones. Half of its instructions are shaped to have a
+compressed spelling, with the destination as the first operand, the
+registers \code{x8} to \code{x15} and a six-bit immediate, and are
+written in it, and some forward branches are \code{c.beqz},
+\code{c.bnez} or \code{c.j}. So the two lengths are mixed, and a
+thirty-two bit instruction often starts in the upper half of a word.
+Half the word stores and loads go to the timer through
+\code{x30}, which the program keeps at its address, so the count
+and the compare are written with anything, and the count read
+back. Both interrupts are enabled from the start, and the compare is
+zero then, so the timer fires at once and keeps firing. The handler
+placed after the halt branches on the cause's sign as the
+demonstration's does: an interrupt has the line's bit cleared and
+the compare set to the count plus sixty-four, both halves, since a
+program may have stored anything into the count, and returns to the
+word it interrupted; an exception returns past the instruction that
+trapped, four bytes on for an \code{ecall} or an illegal instruction
+whose low two bits are both set and two for the rest, which the
+handler reads off the cause and the trap value. \code{x30} and
+\code{x31} are the handler's and the program leaves them alone;
+\code{x29} is the handler's too, and a program that writes it loses
+it at the next trap, in the core and the model alike. Nothing in it can loop, so every program halts, the
+timer's storms included.
+
+\lstinputlisting[caption={\code{program.rs}: the assembler, the
+demonstration, the random
+programs.},label={lst:v-program}]{cpu/vreteno/src/program.rs}
+
+\section{The Lockstep Test}
+\label{sec:v-lockstep}
+
+Listing~\ref{lst:v-lockstep} is the test, \code{bazel test
+//cpu/vreteno:lockstep\_test}. It builds the core with the program, keeps
+handles on its program counters, valid bit, register file, data
+memory and halt bit, which \code{Reg} and \code{Mem} give out as
+clones, holds the reset for one cycle, and then runs the core a cycle
+at a time, stepping the model once whenever the writeback says an
+instruction retired. After each cycle the architectural program
+counter, that of the instruction about to execute or the fetch's
+when the stage is empty, the thirty-one registers, the eight control
+registers, the two debug registers, the debug mode and the halt must
+agree, and the failure names the cycle
+and the instruction; at the halt every word of data memory must
+agree too, and the count of
+retired instructions must not exceed the count of cycles, which is
+what one instruction per cycle at most means. The demonstration program passes with the values the
+comments promise, and sixty-four random programs of two hundred
+words each pass, more than two hundred instructions where some are
+compressed, which covers every instruction the generator
+emits many times over with operands it did not choose. The test also
+walks each random program from its start and counts its instructions
+by length: across the sixty-four there must be more than three
+thousand compressed ones, more than three thousand whole words, and
+more than two thousand thirty-two bit instructions that start in the
+upper half of a word, so the mix the fetch has to get right cannot
+quietly go away.
+
+The compressed instructions have a test of their own,
+\code{compressed\_instructions}, which runs every one of them at
+least once with the lengths mixed: the arithmetic group, the stack
+pointer's short forms, the loads and stores, a loop on
+\code{c.bnez}, calls by \code{c.jal}, \code{jal} and \code{c.jalr}
+with their links two or four bytes on, returns by \code{c.jr}, a
+reserved halfword that traps with itself as the trap value, and the
+write to \code{mhalt}, a thirty-two bit instruction among the short
+ones, to end. Two more negative controls belong to it. With
+a compressed call linking four bytes on, it fails at cycle 59 on
+\code{x1}; with a thirty-two bit instruction in the upper half of a
+word taking its upper half from its own word rather than the next, it
+fails at cycle 9 on the first such instruction.
+
+A test that cannot fail proves nothing, so negative controls were
+run, six of them. With the arithmetic shift in the ALU replaced by the
+logical one, the demonstration fails at its \code{srai}, naming the
+register, the cycle and the instruction, and the random programs
+fail within a few cycles of their first \code{sra}. With the redirect
+kept but the squash removed, so that the word after a taken branch
+executes, the demonstration fails at its first \code{bne}. With the
+forwarding path cut, it fails at the first instruction that reads
+what the one before it wrote. And with \code{mret} restoring the
+interrupt enable but leaving the previous-enable bit clear, where
+the manual sets it, the demonstration fails at its first
+\code{mret}, on \code{mstatus}. With \code{mtval} written as
+zero for an illegal word, the demonstration fails on \code{mtval}
+at that word, which is why the word is all ones rather than zero.
+With the timer's compare made strict, so that it fires a cycle late,
+a random program fails on the program counter. Every control was
+then removed. The single-cycle core passed the
+first; the pipeline passes them all. The random programs found a
+defect the controls did not look for: a division interrupted in the
+middle went on stepping under the handler's instructions, and one of
+them was a multiply, so the pair was overwritten and the quotient
+came back wrong nineteen steps short. The sequencer is cancelled by
+an interrupt now.
+
+The line is the test's. For the demonstration program it is
+raised at cycle forty and held until the core takes it, since the
+pending bit is the line and not a latch; for a random program it is high in one cycle of sixteen
+from the seed. The core decides on the pending bit as it stood
+before the cycle, so the test reads that bit with the two enables
+while the instruction is in execute, and tells the model, when the
+instruction retires a cycle later, whether the interrupt was taken
+in its place; the model raises its own pending bit in the cycle the
+line is high, as the core does at its edge. The timer's line and
+the bus's answers go across the same way. The test reads the timer's
+pending register while the instruction is in execute, and the core's
+register for a load's answer before the cycle in which the load
+retires, and hands both to the model with the instruction. So a load
+from a device agrees on what the device said, and the timer's
+interrupt is decided on the same bit in both. The test hands the model
+the interrupt the core decided on, a cycle old, and checks each one
+against the model's enables where it is taken, which is what fails
+if the decision is not dropped after a write of them (issue 1331). The compare lands in
+the timer a cycle after the core's store, so it is checked at the
+halt, as the memory is. So are the serial port's count of bytes and
+its last byte, against the bytes the model was given.
+
+The control registers are compared with one allowance. The core
+writes them in execute, when the instruction is in its second stage;
+the model writes them when the instruction retires, a cycle later.
+So in the one cycle in which a CSR instruction, a call, a return,
+an illegal word, an interrupt or a store, which may be to the
+timer's compare, is in execute the two disagree by design; the
+compare is checked with the control registers. The test
+skips the comparison in that cycle and requires it in every other,
+and the negative control above shows the allowance is narrow enough
+to catch a wrong status.
+
+The debugger is the test's as well, as a plan: the cycle of a halt
+request, held until the core is in debug mode; the cycles to hold it
+there; and how many resumes to give, each two cycles high, since the
+core acts on the level once per entry and the line must drop between.
+The model has no debugger, so it follows the core's mode register at
+each edge: entered, it records the cause and \code{dpc} as the core
+does, before the instruction in execute and after the one behind it
+retired; left, it goes to \code{dpc} and arms a step when
+\code{dcsr.step} is set. In debug mode the architectural program
+counter is \code{dpc}, since nothing is in flight and the fetch has
+run ahead. \code{dpc} and \code{dcsr} are compared with the other
+control registers and the mode itself in every cycle, so a core that
+ran an instruction while halted, or entered a cycle late, fails on
+the program counter or on a register. Three programs use the plan,
+which also names what the debugger writes through the module's port
+at an entry, as OpenOCD writes \code{dcsr}.
+The demonstration, halted at cycle two hundred, held for twenty
+cycles and resumed, ends as it does without the debugger, with one
+entry whose cause is the request. A program halted once, with
+\code{dcsr.step} written at that entry and resumed as often as the
+plan asks, enters again after every instruction with the step as the
+cause until the tenth entry clears the bit, and then runs to its halt
+with every step counted in a register. And a program halted at its
+start, with \code{dcsr.ebreakm} written and resumed once, enters
+at its \code{ebreak}, with the breakpoint as the cause and the
+instruction's address in \code{dpc}, and is left there, held. A
+fourth program, with no plan, reads and writes both registers from
+machine mode and traps on every access. The plan with no resume left ends the run in the
+mode, which is the one run that does not end in the halt.
+
+The reset line is the test's too, high for one cycle when a run asks
+for it. A program that has set its trap vector, enabled the timer's
+interrupt and enabled interrupts is reset in its loop: the core starts
+again at zero with the CSRs cleared and the timer's compare all ones,
+the model is reset the same way once whatever retired in that cycle
+has been stepped, and the two agree in every cycle after it. The
+register file keeps what it held, so the program's count of its own
+starts is two the second time, and it halts on that.
+
+The bus's refusals go across to the model as the timer's line does:
+the core's register for a refused load is read with the load's
+answer, and the model traps on the load instead of writing; the
+register for a refused store is read before each cycle, and when it
+is set the model is told the fault was taken before the instruction
+that retires next, as it is told of an interrupt, so \code{mepc}
+agrees however long the bus took. The program for it loads from and
+stores to an address nothing decodes, with a handler that counts,
+sums the causes, keeps the trap values and steps past a load, then
+sets \code{mbusquiet} and does both again to read a zero and drop the
+store. The board test's program that pokes the boot memory has a
+handler for the refusal too. A third program jumps into nowhere and
+comes back through its handler with the fetch's cause and address.
+The fence has a negative control of its own: with the instruction
+retiring at once, as it did before issue 432, the demonstration's
+handler returns before its compare has landed and the run counts
+three interrupts where it counts two.
+
+\lstinputlisting[caption={\code{lockstep.rs}: the core against the
+model.},label={lst:v-lockstep}]{cpu/vreteno/tests/lockstep.rs}
+
+\section{The Run}
+\label{sec:v-run}
+
+Listing~\ref{lst:v-main} runs the demonstration program and prints a
+line per cycle, the program counter, the disassembly of the word
+executed and the register written, or a bubble when the execute
+stage was empty; Listing~\ref{lst:v-out} is what it printed when the
+build ran it. An instruction the program holds compressed is marked
+with a \code{c} and printed as the instruction it stands for, which
+is what the core executes; the address after it is two bytes on
+rather than four. The loop is visible as the three
+instructions at \code{0x36} that repeat ten times with a bubble after
+each taken \code{bne}, the call as the jump to \code{0x110} and the
+compressed return to \code{0x42}, each with its bubble, and the loads
+as the sign and zero extensions of the same byte and half, each after
+the nine bubbles of the bus's round trip. The one stall a load causes
+after it is the bubble after \code{lw}, where the next instruction
+adds to what it loaded; each multiply is a run of two bubbles and
+each divide a run of thirty-three, which the run prints as one line
+with the count, and the last line of the printout is what the port
+said, decoded from its line. The timer's interrupt is the first jump
+to the handler at \code{0x114}, at \code{t} 308 in place of the first
+\code{div}, once the timer reaches the compare of 150: cause seven
+and the top bit in \code{x23}, the compare moved past the end of the
+run, one counted into \code{x8}, and the return to the \code{div} it
+displaced, which starts again. The line's interrupt comes next. The
+line is raised at cycle forty and held until the core takes it, as a
+device holds its line until it is served, since the core's pending
+bit is the line rather than a latch (issue 958). The moment the echo's
+\code{csrrw} at \code{0x0f8} enables it, at \code{t} 1140, it is taken
+in place of the \code{ecall} after it: cause eleven and the top bit in
+\code{x23}, two counted into \code{x8}, and the return to the
+\code{ecall}, which traps in its turn. The two traps are the
+last jumps to the handler, the first from the \code{ecall} with
+eleven read into \code{x23}, the second from the illegal word, all
+ones and thirty-two bits long, with two, each with its bubble, as the
+returns have theirs. Figure~\ref{fig:v-wave} is the opening of the same run, the reset
+and the first dozen instructions, drawn from the waveform the run
+wrote; \code{pc} there is the fetch
+stage's counter, one instruction ahead of the one executing, and
+\code{done} is low on the bubble. The whole run is in the FST beside
+it, for a viewer. The run ends by writing the VHDL of the core, with
+the program in its instruction memory, which Section~\ref{sec:v-netlist}
+takes up, and by printing the Verilog, which closes
+Listing~\ref{lst:v-out}.
+
+\lstinputlisting[caption={\code{main.rs}: the run and the
+waveform.},label={lst:v-main}]{cpu/vreteno/src/main.rs}
+
+\begin{figure}[htbp]
+\centering
+\input{vreteno_timing.tex}
+\caption{The opening cycles: reset, then an instruction per edge,
+the handler's address, the timer's compare and the two enables set
+up, the counter moving on by two after a compressed instruction and
+by four after the rest; \code{rd} and \code{val} are the writeback,
+\code{rd} zero when nothing was written.}
+\label{fig:v-wave}
+\end{figure}
+
+\lstinputlisting[style=ascii,caption={What \code{vreteno} printed when
+the build ran it.},label={lst:v-out}]{out_vreteno.txt}
+
+\section{The Interrupt Controller}
+\label{sec:v-clint}
+
+The timer is the core's interrupt controller, placed where
+standard RISC-V platforms locate one: it fulfills the standard
+requirements that an operating system port asks of a platform, providing
+\code{mtime} and \code{mtimecmp} at the conventional offsets, and
+\code{msip}, one bit whose writing raises a software interrupt.
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}lll@{}}
+\toprule
+Offset & Name & What it is \\
+\midrule
+\code{0x0000} & \code{msip} & bit 0 raises the software interrupt \\
+\code{0x4000} & \code{mtimecmp} & the compare, low half \\
+\code{0x4004} & & its high half \\
+\code{0xbff8} & \code{mtime} & the count, low half \\
+\code{0xbffc} & & its high half \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The window is 64~KiB, which those offsets need, so the controller has
+a range of its own in the address map rather than the nibble the timer
+had. The offsets are far apart, so the decode is on the offset and not
+on two bits of it, and a word in the window that is none of the five
+reads as zero.
+
+\code{msip} is a register and a line: a program writes one to raise
+its own interrupt and zero to clear it, and the line is the register
+itself, so nothing in between can lose it. That is how a scheduler is
+entered: a port raises the software interrupt, the trap takes the
+machine into the handler, and the handler clears the bit and switches
+context.
+
+The core gains a line for it, \code{mip} bit 3 beside the timer's bit
+7 and the external bit 11, and \code{mie} gates it as it gates the
+others. When more than one is pending the core takes the external
+interrupt first, then the software one, then the timer's, which is the
+order the specification gives and the order the reference model keeps,
+so the lockstep compares them.
+
+\code{//cpu/vreteno:lockstep\_test} runs a program that raises the
+software interrupt for itself three times and counts the traps in the
+handler, against the model, cycle by cycle.
+
+\section{Fetching From the Bus}
+\label{sec:v-fetch}
+
+The core fetched only from the memory inside it, so the program was
+fixed when the bitstream was, and four kilobytes was all of it. That
+was the one thing in the way of everything else: a bootloader, an
+operating system that starts a task from an image, a test runner on
+the target.
+
+The counter now says where the instruction comes from. Below
+\code{IMEM\_BYTES} it is the memory inside the core, as before, and
+that memory is the boot ROM: what runs before there is anything else.
+At or above it, the core asks the bus, on the same channels its loads
+and stores use, and waits.
+
+The same words sit on the bus as well, at address zero, behind a
+tracker like the data memory's, readable and not writable
+(\code{crate::rom}, issue 268). The fetch reads the copy inside the
+core in the same cycle; a load reads the copy on the bus a few cycles
+later, like any memory; the netlist initialises both from one image,
+so they cannot disagree. A write to it is taken, its beat consumed so
+the channel does not jam, and answered \code{SlvErr}, which is what
+settles what a fetch sees when a write lands on the same address in
+the same cycle: nothing lands. So a program's constants live beside
+its code, \code{.rodata} is linked into the boot memory, and a
+debugger on the bus can read the program that is there. Every load
+and store goes to the bus; the core no longer keeps a hole below the
+data memory.
+
+The primary latency source is sequential transaction stalling.
+The core issues one transaction at a time, so an instruction fetch goes
+out only after outstanding data transactions complete, and the pipeline
+stalls until the requested word returns. A thirty-two bit
+instruction at an odd halfword takes its upper half from the word
+after, so the fetch keeps a buffer of two words and asks for the
+second only once the first says it is wanted; a run straight through
+memory therefore asks for a word every second instruction rather than
+every one.
+
+It was correct and it was slow: issue~\#1009's loop of three
+instructions ran at 14.655 cycles an instruction from the data memory
+and at 1.333 from the boot memory. So a fetch from the data memory or
+the DDR3, the two memories behind the bus, goes to an instruction
+cache instead (issue~\#1021): sixteen kilobytes, 1024 lines of four
+words, one way. The fetch registers the word's physical address where
+it would have sent it to the bus, once translated, and the cycle after
+reads the line's tag and the word at it; so the cache is indexed and
+tagged by the physical address, and two virtual pages of one physical
+page share its lines. It was four kilobytes at first, and the GL
+frame's code, of 34~KB, did not stay in it: at sixteen its misses
+fell from 6.45 to 0.70 per cent of lookups and the frame took 25 per
+cent fewer cycles; thirty-two bought three more (issue~\#1290). Its
+words are in two banks, the even and the odd: a lookup reads a word
+and the one after it, which are always in different banks, so each
+bank is read once a cycle and is a block RAM (issue~\#1303). A hit puts the
+word in the buffer; a miss asks the bus for the line as one burst of
+four, writes each beat into it, and looks it up again. The data memory
+answers such a burst a beat a cycle. That brought the loop from the
+data memory to 4.093 cycles an instruction, most of what was left
+being the buffer, which served one instruction's words and not the
+next one's, so each instruction was a lookup of its own.
+
+So a hit fills both of the buffer's words when the line holds the
+next one, and the word after the buffer's one is asked for ahead of
+time when it is in the same line (issue~\#1187). An instruction is
+read from the first word only. When the counter moves on from an
+instruction there to one that begins in the second, the buffer shifts
+along at that edge, the second word and its fault marks moving to the
+first; if the second word is still out, it goes into the first place
+when it comes back. A jump into the second word misses and fetches it
+again, which is rare. The first version compared the counter with
+both words' addresses and chose between them before the instruction
+register, and the flagship missed timing on that choice
+(issue~\#1279); shifting at the edge keeps one compare, of a register
+with the counter, in front of the read and the fetch.
+\code{//cpu/vreteno:icache\_test} measures the loop at 3.349 cycles an
+instruction. It counts from the reset, and the loop jumps to the data
+memory at once, so it waits first for the tags to be cleared: 1024
+cycles at sixteen kilobytes, 0.341 of a cycle over its 3002
+instructions. At four kilobytes the clearing took 256 cycles, and the
+test measured 3.093 with the window. Asking ahead alone moved
+nothing, since one fetch is out at a time and a lookup takes three
+cycles: two words from one lookup is what pays. A fetch can now be
+out under an instruction that is ready to run, so a load waits while
+one is: the core still holds one read at a time.
+
+A store does not reach the cache, as the specification allows, so code
+written by stores runs after a \code{fence.i}, which clears the tags,
+a line a cycle, as a reset does. The loader in the boot memory ends
+with one before it jumps to the program it was sent.
+
+\code{//cpu/vreteno:lockstep\_test} runs a program that lives above the
+boot memory: the boot memory holds a jump into the data memory, the
+program itself is in the data memory, and every instruction after the
+jump comes back over the bus. The model fetches from the same place
+and the two agree cycle by cycle, which is what says the fetch is a
+fetch and not a guess.
+
+\section{Virtual Memory}
+\label{sec:v-mmu}
+
+Linux runs each program in an address space of its own, and the
+hardware that makes that possible is the memory management unit. On a
+thirty-two bit RISC-V hart it is Sv32: a virtual address is translated
+through a table of two levels into a physical one, page by page, and
+an access the table does not allow traps (issue~\#1014). This section
+is the unit, \code{Mmu} in \code{lib/parts/src/mmu.rs}, and
+Section~\ref{sec:v-hart} the core around it. Where it goes was decided
+by measuring first,
+in \code{docs/sv32-timing.md} (issue~\#1009): the core asks with an
+address it already holds in a register, so the lookup is off the two
+paths that set the clock, at the cost of a cycle per access that goes
+to the bus.
+
+The unit has two translation lookaside buffers, one for fetches and one
+for data, each of eight entries, fully associative and refilled in
+turn, and one walker that fills both. Listing~\ref{lst:v-mmu-lookup}
+is the lookup. Every entry is compared with the request's page at
+once; a megapage, a leaf at the first level, covers four megabytes and
+compares only the upper ten bits. The answer is a register, so it
+comes a cycle after the request: on a hit, the physical address, or a
+page fault if the entry does not allow the access. A miss answers
+nothing, and the core holds its request, the address and the request
+bit both steady, while the walker reads the table; the answer comes a
+cycle after the entry is filled. An answer always belongs to the
+request of the cycle before, so one that arrives after the core has
+moved on is for the old request, and the core ignores it. Outside
+supervisor and user mode, or with \code{satp.MODE} clear, the address
+passes through unchanged, with the same latency of a cycle, so the
+core has one rule for every access.
+
+The check, Listing~\ref{lst:v-mmu-check}, is the specification's:
+execute for a fetch, write for a store, read for a load or execute
+under \code{MXR}; a user page only from user mode, and from supervisor
+mode only for data under \code{SUM}; and the accessed bit always, with
+the dirty bit for a store. The walker, Listing~\ref{lst:v-mmu-walk},
+never writes. An entry whose accessed or dirty bit is clear is a page
+fault, and the kernel sets the bit and flushes, which the
+specification allows; a walker that wrote would need an atomic read
+and write on the bus. It reads one entry at a time over a channel of
+its own, which the core will put on its bus port: \code{satp}'s page
+first, indexed by the upper ten bits of the page number, then the
+second level's if the first entry points to one. An invalid entry, a
+pointer at the second level and a megapage whose low page number is
+not zero are page faults; a read that fails, or a page past the
+board's thirty-two bits of physical address, is an access fault.
+A flush, on a write of \code{satp} or an \code{sfence.vma}, empties
+both buffers, and a walk under way when it comes finishes without
+filling anything. A request in the cycle of a flush is not answered
+from the buffers as they were: it is held, and answered from the
+emptied ones by a walk. Address space identifiers are not kept, which the
+specification allows.
+
+\mmupart{lookup}{The lookup: every entry at once, and the answer in the
+cycle.}{lst:v-mmu-lookup}
+
+\mmupart{check}{The check an entry's bits must pass.}{lst:v-mmu-check}
+
+\mmupart{walk}{The walker: the first level's entry, the answer, and
+what makes it a fault.}{lst:v-mmu-walk}
+
+\code{translate} in the same file is the reference: the
+specification's walk with no buffer at all. The tests in
+\code{lib/parts/src/mmu/tests.rs} hold the unit to it, against tables
+in a memory that answers the walker after a few cycles: a page walked
+once and then hit a cycle after it is asked, a megapage, every fault,
+the flush, a flush in the middle of a walk and a request in the cycle
+of one, the turn in which entries are replaced, and six hundred random
+requests over random tables, on both ports and in every mode.
+
+\code{//lib/parts:mmu\_pnr} places and routes \code{Mmu8} alone, out of
+context, against the core's ten nanosecond clock, with the requests
+arriving a nanosecond after the edge, as from a register of the core's.
+It meets the clock with 2.440\,ns to spare, in 493 LUTs and 919
+flip-flops, the eight entries of each buffer held in flip-flops rather
+than block RAM. The lookup, from the request's address through every
+entry's compare and the check into the answer's registers, has
+3.583\,ns to spare for a fetch and 3.713\,ns for data, and the answers
+leave those registers 1.22\,ns before they reach the unit's edge. The
+answer was not always a register. Used in the cycle it was asked, it
+took 7.86\,ns from the address to the physical address, and the core's
+bus request already spends 8.9\,ns of its own
+(\code{docs/sv32-timing.md}), so the two would not have fit in one
+cycle. The register costs the one cycle per access that the note
+already counts, and the board's place and route will say what the
+paths are in place.
+
+\code{ex\_mmu}, Listing~\ref{lst:v-mmu-ex}, is the unit as a kernel
+meets it. A fetch from the kernel's text walks one level to a megapage
+and then hits; a load from a user page faults until \code{SUM} is set;
+a store to a page whose dirty bit is clear faults until the kernel sets
+it and flushes; and with both ports missing at once, the data port's
+walk goes first, since its instruction is the older.
+Figure~\ref{fig:v-mmu} is the first walk. The build simulates the
+unit's netlist against the run under nvc and Verilator.
+
+\begin{figure}[htbp]
+\centering
+\input{mmu_timing.tex}
+\caption{A fetch from the kernel's text: the request, the walk's one
+read on \code{ptw} and its answer on \code{pte}, and the answer to the
+fetch, then the next fetch from the same megapage, a hit answered a
+cycle after it is asked.}
+\label{fig:v-mmu}
+\end{figure}
+
+\lstinputlisting[caption={\code{ex\_mmu.rs}: translation as a kernel
+meets it.},label={lst:v-mmu-ex}]{lib/examples/ex_mmu.rs}
+
+\lstinputlisting[style=ascii,caption={What \code{ex\_mmu} printed when
+the build ran it.},label={lst:v-mmu-out}]{out_mmu.txt}
+
+\subsection{In the core}
+\label{sec:v-hart}
+
+\code{Hart}, Listing~\ref{lst:v-hart}, joins the unit and the core
+with the core's ports and nothing more, so the board, the pair, the
+runs and the tests hold a hart where they held a core. The unit goes
+first in the join, since its answers are registers the core reads in
+the same step. The core's requests are registers too, and the unit
+reads them a step late in simulation and on time in hardware; so the
+core believes an answer only two cycles after it made the request,
+which is right in both, since the unit holds its answer as long as the
+request is held. The walker's reads go out through the core's own port
+on the bus, one at a time, once every store the core has posted has
+been answered. Only one read of the fetch's, the data's or the
+walker's is ever out.
+
+Translation is on below machine mode when \code{satp} says so. The
+fetch then takes every word from the bus, the boot memory's included,
+since a page may map anywhere. It keeps one translation, of the page it
+last asked for, in \code{ft\_valid}, \code{ft\_vpn} and \code{ft\_ppn},
+and asks the unit only when the word it wants is on another page, so a
+fetch within a page costs nothing more. A page that faults is kept the
+same way, and its words are taken as faults at once, without a read.
+The fault is the first half's if that half's page faults, else the
+second's, which is on the next page only for a thirty-two bit
+instruction in a page's last halfword; the trap's value is the address
+of the half that faulted.
+
+A load, a store, \code{lr.w}, \code{sc.w} or an AMO waits in execute
+for its physical address. The address the adder computed goes into
+\code{x\_va}, the unit is asked from that register, and the answer is
+kept in \code{x\_pa}, \code{x\_pf} and \code{x\_af} until the
+instruction leaves execute. A page fault is cause 13 for a load and
+\code{lr.w} and 15 for the rest, which write; a walk that reads nothing
+is an access fault, 5 or 7. Either is taken from those registers, so
+neither the choice of trap nor the redirect waits on anything late. A
+misaligned access traps as one whatever its page says, as the
+specification orders the two. In machine mode with \code{MPRV} set, a
+load or a store is translated and checked as the mode \code{MPP} names,
+and the fetch is not; that is how OpenSBI reads the instruction a
+supervisor trapped on, which Linux makes it do before its first
+program runs. The core tells the unit the data's mode, which is the
+fetch's but under \code{MPRV}, and a return below machine mode clears
+the bit (issue~\#1105).
+
+A write of \code{satp} and an \code{sfence.vma} tell the unit to flush,
+and refetch the instruction after them, since that one was fetched
+under the old translations. \code{sfence.vma} first waits, as a fence
+does, until every store is answered, so that the tables a kernel wrote
+are in memory before a walk reads them. A change of mode with
+translation on, a trap, a return or a resume, drops the fetch's one
+translation and its buffer, and a fetch out on the bus across any of
+these is dropped when it answers. \code{fence.i} does the same to the
+buffer: it used not to, and a program that rewrote the word the buffer
+held ran the old one (issue~\#1096). It also clears the instruction
+cache's tags (issue~\#1021).
+
+The lockstep test holds the hart to the model, which translates with
+\code{translate} and keeps nothing. One program writes tables into the
+data memory's one page, the root and the second level both, and runs
+supervisor mode through every kind of page: allowed and not, under
+\code{SUM} and \code{MXR}, a walk that reads nothing, ten pages twice
+past a buffer's eight entries, an entry rewritten and flushed, a jump
+where no page is, and an instruction that straddles into a page that is
+not there; it checks every trap's cause and value. \code{random\_vm}
+then runs the random programs' body in supervisor or user mode, over
+tables the seed chooses, with the page faults delegated or not, and
+machine mode either stepping past one or doing what a kernel does:
+setting what the entry lacks, flushing, and running the instruction
+again. Ninety-six seeds run in lockstep. The cost is the fetch: under
+translation every word comes from the bus, and every return translates
+its page again; the instruction cache of issue~\#1021 takes the words
+from its lines, and a return still translates its page.
+
+The flagship, Vreteno's board with the Ethernet and HDMI parts on one
+FPGA, places and routes with the hart in it. On 2026-10-04 at commit
+\code{f9be2042} it met the core's ten nanoseconds with 0.099~ns of
+slack, and hold with 0.028~ns, in 21\,327 LUTs and 19\,786
+flip-flops, as much slack as it had with user and supervisor mode
+alone (issue~\#1012). Its worst path is now in the
+fetch's buffer, from the address the buffer holds through the compare
+with the one the fetch wants and the add of the next word's, into the
+buffer's register again. It took two tries. The first run missed by
+1.599~ns: the delegation of a trap, which chooses between \code{stvec}
+and \code{mtvec} and so feeds the next program counter, had the new
+faults ahead of the late choices, so the stall's settling went through
+two more multiplexers on its way to the boot memory's address. With the
+faults chosen first, from registers, it missed by 0.274~ns, on the
+stall itself, which waited on the adder twice, once for the bus and
+once for the translation. A misaligned access now waits as an aligned
+one does and traps when it runs, so the stall waits on no adder at all,
+and the path that had set the clock since the stall was written is no
+longer the worst.
+
+\lstinputlisting[caption={\code{hart.rs}: the core and its unit, with
+the core's ports.},label={lst:v-hart}]{cpu/vreteno/src/hart.rs}
+
+\section{The Netlist}
+\label{sec:v-netlist}
+
+The Verilog at the end of Listing~\ref{lst:v-out} is the core as
+hardware: its registers, two memories, the instruction
+memory holding the program, a wire per \code{let} of the loop, seven
+temporaries, and one clocked block of a hundred and twelve lines;
+the timer's, after it, is six registers and a block of twenty-eight.
+The VHDL the run
+wrote beside it says the same, and the build simulates both against
+the trace the Rust core wrote, the VHDL under nvc and the Verilog
+under Verilator, the testbench replaying the reset and checking every
+register and every output at every tick; the netlist agrees. The
+tests are \code{//docs:vreteno\_sim\_vreteno\_vreteno\_tb\_test}
+and \code{//docs:vreteno\_vsim\_vreteno\_test}: the run writes the
+netlists of nine units, and six of them are checked against the run
+this way, so each name designates the entity as well as the run's.
+
+The lowering grew in five ways for this, each stated and checked in
+the examples document~\cite{examples} before the core used it. A
+memory is an array, written through \code{at} and read by index, and
+the netlist takes the memory's first words from the example, since
+the lowering cannot see what \code{Mem::with} gave at run time.
+\code{slice}, \code{concat}, \code{sext} and \code{zext} are the
+part selects, concatenations and extensions of the target language,
+the width of an expression inferred where an extension replicates a
+bit; a slice of an expression, which neither language allows, is
+hoisted into a wire. \code{select!} is a chain of conditionals, and
+an integer is a pattern. A \code{let} is a wire named for it, so the
+netlist reads as the source does, and a struct literal is the
+concatenation of its fields. And in VHDL a conditional inside an
+expression and a truth value as a bit are functions, \code{mux} and
+\code{tobit}, declared in every architecture, since VHDL-2008 has
+neither as an operator.
+
+The netlist was checked as the model was: a testbench that could not
+fail would prove nothing. The register file is not traced, so the
+testbench cannot see it, but every write to it shows in the
+writeback output the next tick, and every read shows in the program
+counter and the outputs that follow; the six hundred and six
+cycles of the demonstration exercise every instruction of
+the program through both, the two traps and their returns included,
+since a wrong \code{mepc} or \code{mtvec} is a wrong program
+counter, and every register of the sequencer at every step of three
+multiplies and two divides, since the whole unit is traced. A second
+run, \code{vreteno\_amo}, is the same machine with the A extension's
+program in place of the demonstration, every AMO, \code{lr.w} and two
+\code{sc.w}, and the core's netlist is checked against its trace the
+same way, under its own entity's name (issue~1010). The
+router, the timer, the serial port and its bridge are checked from
+the same trace as entities of their own, each channel's six wires and each
+line among the signals, so the bus is checked from every end. One
+channel has a name on each side, and the run traces it under one of
+them; a port traced under another name than its own says so in the
+ports file. The checks that failed on the way, a truth value rendered
+ambiguously, a bitwise \code{and} rendered as a comparison, a
+concatenation of ambiguous type, a slice of an expression and a
+temporary named with a leading underscore, all failed to analyze or
+differed at their first tick, which is the test doing its work.
+
+\section{Synthesis}
+\label{sec:v-synth}
+
+The Verilog synthesizes, and the build does it: \code{bazel build
+//cpu/vreteno:vreteno\_synth} runs Vivado, which \code{rules\_vivado}
+installs itself from the AMD archive into a cache the machine's
+workspaces share, so the toolchain is as hermetic as nvc and
+Verilator are, once per machine rather than per workspace. The target
+is an Artix-7, \code{xc7a200tfbg484-2}, with a clock constraint of
+ten nanoseconds and no pins, since the question is whether the
+netlist synthesizes and to what, not where it goes on a board.
+Synthesis took two minutes and finished with no error and no
+critical warning. Table~\ref{tab:v-synth} is its report, run on
+2026-10-04 at commit \code{a2b06993}.
+
+\begin{table}[htbp]
+\caption{The core on an Artix-7, after synthesis; the data memory,
+the timer and the serial port, units of their own, are not in it.}
+\label{tab:v-synth}
+\centering
+\begin{tabular}{@{}lr@{}}
+\toprule
+Resource & Used \\
+\midrule
+LUTs, as logic & 2624 \\
+LUTs, as distributed RAM & 48 \\
+Flip-flops & 809 \\
+Block RAM tiles & 2 \\
+DSP blocks & 4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The memories are where the third stage shows. The instruction
+memory, written by nothing and holding the program from its
+\code{initial} block, is a read-only memory of 1024 words by 32 bits.
+The fetch reads it at two addresses, the word at the counter and the
+word after, since an instruction may cross from one into the other,
+and the tool makes that two block RAM tiles, one per address, rather
+than one tile's two ports; they are the core's two tiles. Without the
+compressed instructions the fetch read one word, the memory was one
+tile, and the logic was 1952 LUTs: the second read, the choice of
+halfword and the expander cost some two hundred LUTs, a tenth of the
+core. The data memory, a
+device of its own now, is four block RAMs of 1024 by 8 in two tiles
+in its unit, each written by a store on its port and read by a load
+into the memory's register on the other: the synchronous read a
+block RAM has, which is what the third stage was for while the
+memory was in the core. With two stages the data memory had been
+560 LUTs of
+distributed RAM, since the load read it combinationally and the
+store read it to merge a byte; the lanes removed the store's read
+and the stage registered the load's, and the LUT count fell by a
+third. The register file, 32 by 32 with one write port and two
+reads, is twelve of the small distributed primitives, which is what
+a register file of that size is on this family. The flip-flops are
+the core's registers less the bits a mask makes constant: \code{mstatus} has two bits that
+can be set, and \code{mtvec} and \code{mepc} lose the alignment
+bits the core clears on every write. The rest of the control
+registers stay, since every bit can be read back through a CSR
+instruction. Synthesis also
+trims \code{f\_w1}, the word after the counter as a fetch from the
+bus returned it, from 32 bits to 16, with a warning: an instruction
+that crosses into that word takes only its lower half.
+
+The netlist is also placed and routed, \code{bazel build
+//cpu/vreteno:vreteno\_pnr}, with the same constraint and no pins,
+so the bitstream is a stub and the reports are the point. It is
+synthesised out of context, so its ports are the partition's pins
+and not pads: the core has 308 ports and the package 285 pins, and placement failed on them until it was
+(issue~971). Run on 2026-10-04 at commit \code{a2b06993}, the routed
+design meets ten nanoseconds with 0.267~ns of slack, and hold with
+0.132~ns, in 2622 LUTs and 809 flip-flops. The critical path is
+9.717~ns, of which routing is two thirds, through seventeen levels of
+logic, nine in dedicated \code{CARRY4} primitives: from the first register field of the
+instruction register, through the register file's read and the
+operand's forwarding, along the ALU's adder, into the writeback
+stage's result. The last run that placed, on an older core, had
+9.661~ns, 0.296~ns of slack and hold 0.102~ns, from the second register field
+through the operand's forwarding into the ALU's compare and the
+writeback value.
+The expander of compressed instructions is in the fetch, before the
+instruction register, and is not on it. Before the compressed
+instructions the slack was 0.315~ns, on a path from the writeback's
+destination register, through the forwarding compare into an
+operand and the jump's add, to the instruction memory's address.
+With the data memory in the core that path had
+0.643~ns, and with the step's pieces written in place rather than
+as functions 0.776~ns: the synthesis and the placement move by that
+much on one design written three ways. Before the device load's wait moved into
+writeback the
+slack was 0.129~ns, on a path from the same read through the
+address add and the decode of whether the address is a device's
+into the fetch's hold: the fetch waited on the address. Now the
+hold is a register's, and the path is gone. With two stages the
+slack had been 0.263~ns, on a path from a register through the
+decode and the ALU into the register file's write. With three stages and the
+load forwarded it was 0.361~ns, on a load followed at once by a jump
+through what it loaded. With the traps, whose return and handler
+addresses widened the fetch's multiplexer, that path missed by
+0.36~ns. That is what the stall of Section~\ref{sec:v-core} was
+for: it took the data memory's read and the load's extension off the
+forwarding path, and the slack tripled. The sequencer of the M
+extension adds nothing to the path, since its result is a register
+and its steps are a cycle each, the multiplier's included, which
+runs from registers to registers. The tool had an opinion of its own
+on the way. Left to itself it moved three of the four data memory
+lanes into distributed RAM to shorten the load's path, so the
+board's constraints pin the lanes to block RAM, where the third stage
+put them; the data memory is a unit of its own now, and not in the
+core synthesised here.
+
+\subsection{The board}
+
+The board is the Alinx AX7A200B, the Artix-7 the part was chosen for.
+Everything that computes is one lowered module, \code{board}, the
+netlist \code{\#[lower]} writes for \code{vreteno32::board::Board}: a
+unit of units holding the core and its tracker, a router of nine, and
+the peripherals of Table~\ref{tab:v-map}, each behind a tracker of its
+own or, for the page, the interrupt controller and the debug module,
+behind an AXI-Lite bridge. The page at \code{0x3000} is seven
+peripherals of a sixteenth each, in Table~\ref{tab:v-page}: the
+serial port, the pulse width modulator, a slot for a peripheral on a
+clock of its own, the remote peripheral whose transactions leave the
+board as Ethernet frames, the Ethernet port's registers, the entropy
+source, and the configuration flash's SPI master. Both tables are written by \code{//tools/memmap} from
+the maps the router and the page's bridge decode, \code{BoardMap} and
+\code{SlotMap}, so they are the map the netlist has and not a copy of
+it. The interrupt controller's line is the core's external interrupt.
+The configuration flash, the chip that holds the bitstream, is reached
+twice (issue 312): through that master, for commands such as the
+chip's identity, and through a window of 16~MiB at
+\code{0x2000\_0000} on the router's eighth port, where an ordinary
+read is answered with what the flash holds. Between both and the chip
+stand the \code{STARTUPE2} primitive, the only way to the flash's
+clock pin once the part is configured, and the pins, which wait for
+the end of configuration and refuse write enable, so nothing the core
+runs can change the bitstream. On the board, \code{flashid} read the
+chip's identity, \code{0020ba18}, the MT25QL128's; found its write
+enable latch clear after a write enable the pins refused; and found
+the bitstream's sync word through the window at byte 48. Nothing was
+written to the flash.
+The DDR3 memory is a gigabyte behind AMD's MIG controller, which the
+build generates with its own AXI4 port, and \code{AxiPerPins}, which
+puts the router's port onto the controller's pins with no tracker in
+front, since the controller keeps transactions outstanding itself
+(issue~\#1023). The controller is a module from elsewhere, so the
+netlist names its wrapper and does not write it, and the memory's pins, the data and strobe lines among
+them, are the module's own ports. \code{board\_netlist} writes it with
+a program already in the instruction memory and the data memory,
+since nothing on the machine loads them at run time.
+A program loaded into the DDR3 keeps its stack in 64~KiB at
+\code{0x1\_0000} rather than at the top of its region, since the DDR3
+is not cached for data and a stack there paid the controller's latency
+on every spill and reload (issue~\#1278). That window was at first a
+memory on the router's ninth port, the data memory's unit made larger:
+a frame of the GL icosahedron's list in \code{board\_test} took 5.42
+million cycles with its stack in the DDR3 and 3.30 million with it
+there. A load from it still crossed the router and a tracker both ways
+and took 9.14 cycles, about 30\% of the frame.
+
+So the window is now a data RAM in the core, on its own port and not
+on the bus (issue~\#1275), four lanes of a byte, written at one
+address and read at another, as a block RAM is. Whether an access is
+in the window is found from the upper half of its base register and
+the carry out of the lower halves' sum, since the offset is twelve
+bits, signed; that sum also gives the lanes their address, so the
+decision costs the bus's valid half the adder's carry chain. A load
+there does not go to the bus: the lanes read at the address the access
+had in execute, into a register, and writeback takes the word from it
+in the next cycle, so a stack load costs what any load costs when the
+next instruction does not use it. A store writes the lanes in the
+cycle it runs, under its strobes; \code{lr.w}, \code{sc.w} and the
+AMOs work there as on the bus. The GL frame takes 1.54 million cycles,
+31\% fewer than the 2.23 million it took with the window on the
+router. Nothing but the core reaches the window now: not the debug
+module's access to the system bus, so a debugger reads a program's
+stack through the core (OpenOCD's \code{riscv set\_mem\_access progbuf
+sysbus}), and neither Razboj nor a DMA engine. Nothing is fetched from
+it either; a fetch there is refused, in the model as on the board.
+The netlist the documents simulate and the layout maps keeps four
+words a lane, where the window's addresses wrap, since a cell library
+has no RAM and 64~KiB of flip-flops would be most of the layout; the
+board's is 16384.
+
+The data memory's tracker hands a request to the memory, and a read
+beat to the router, over unregistered channels (issue~\#1291), so each
+crosses in the cycle it is offered: a load from the data memory takes
+two cycles fewer. The tracker runs before the memory and the router in
+the board's join, as the sender of an unregistered channel has to.
+
+\begin{table}[htbp]
+\caption{The board's address map, lowest first, as the router decodes
+it.}
+\label{tab:v-map}
+\mmget{board}{vreteno}
+\end{table}
+
+\begin{table}[htbp]
+\caption{The peripheral page at \code{0x3000}, as its bridge decodes
+it.}
+\label{tab:v-page}
+\mmget{page}{vreteno}
+\end{table}
+
+The peripherals that declare their registers with \code{regmap!} are
+listed by the same tool, each from the base the maps above give it:
+the timer in Table~\ref{tab:v-timer}, the serial port in
+Table~\ref{tab:v-uart}, the pulse width modulator in
+Table~\ref{tab:v-pwm}, the Ethernet port's registers in
+Table~\ref{tab:v-ethslots}, the entropy source in
+Table~\ref{tab:v-trng}, and the configuration flash's master in
+Table~\ref{tab:v-spi}. That is every peripheral on the page with
+registers of its own: the remote peripheral's behaviour is a program on
+another machine, and the third slot is brought out of the unit, where
+the flagship puts its video peripheral, whose table is in the flagship
+document.
+
+\begin{table}[htbp]
+\caption{The timer's registers.}
+\label{tab:v-timer}
+\mmget{regs}{timer}
+\end{table}
+
+\begin{table}[htbp]
+\caption{The serial port's registers.}
+\label{tab:v-uart}
+\mmget{regs}{uart}
+\end{table}
+
+\begin{table}[htbp]
+\caption{The pulse width modulator's registers.}
+\label{tab:v-pwm}
+\mmget{regs}{pwm}
+\end{table}
+
+\begin{table}[htbp]
+\caption{The Ethernet port's registers.}
+\label{tab:v-ethslots}
+\mmget{regs}{ethslots}
+\end{table}
+
+\begin{table}[htbp]
+\caption{The entropy source's registers.}
+\label{tab:v-trng}
+\mmget{regs}{trng}
+\end{table}
+
+\begin{table}[htbp]
+\caption{The configuration flash's SPI master's registers.}
+\label{tab:v-spi}
+\mmget{regs}{spi}
+\end{table}
+
+Listing~\ref{lst:v-board} is the one file written by hand, and it
+holds only what a board needs and a lowered unit cannot say. The
+controller makes the clocks: it takes the board's 200~MHz, which is
+also its delay reference, runs the memory at 400~MHz, and hands back
+the 100~MHz the design runs on, with a reset that holds until that
+clock is good, so the board has no clock generator of its own. The
+controller's reset is a pulse at power-on and nothing else; the core's
+follows the button, the controller's clock being good and its
+calibration, so the core starts only once the memory it may reach is
+ready. The LEDs, lit when driven low, show the
+core halted, the serial line driven at least once, the memory
+calibrated, and a heartbeat. The second LED held the heartbeat until
+the board was first run, and the heartbeat moved to the fourth, which
+held the clock generator's lock: a blinking heartbeat says as much,
+since the counter behind it runs on the clock the controller makes. What no LED said was
+whether a byte ever left the core's serial port. That question is
+issue~195, where the board halts with every LED on and the host's
+serial port stays silent, so the second LED now latches the first start
+bit on the line. A heartbeat in a new place also tells somebody at the
+board that a new bitstream is in the part.
+
+The program for the board says more than the one a simulation runs.
+Built with \code{--cfg=board\_run} it puts a header line out before
+it touches the memory, and a dot every ten seconds for half a minute
+before the test and two minutes after it, so that a reader who
+attaches at any moment can tell a silent serial path from a core that
+never ran. It also halts only when every word came back, and spins
+when one did not, which puts the verdict on the first LED for anybody
+who cannot read the line. Simulation runs the program without those,
+since tests directly verify the entire output stream and every byte is
+simulated time they pay for.
+
+The integrated design is simulated under Vivado's simulator by
+\code{//cpu/vreteno/board/sim:board\_test}: the top, the netlist with
+the DDR3 test in its memories, the controller, and two Micron models
+of the board's chips on its pins. The program writes sixteen words
+across the memory's region and reads them back. In the run the memory
+calibrates at 108.1~microseconds, the controller's fast calibration
+being what its simulation variant provides, and the core says
+\code{ddr3 ok} on the serial port and halts at 130.4, which is what
+the test's terminal reads. The controller alone is checked the same
+way, against the same models, by \code{//ddr3/sim:wrapper\_test}, and
+AMD's own example design, its traffic generator writing and reading
+the memory through the controller, by \code{//ddr3/sim:example\_test}.
+
+\code{bazel build //cpu/vreteno:vreteno\_board\_pnr} synthesises it,
+places and routes it with the board's pins and the memory's, and
+writes the bitstream. Every timing constraint is
+met: the worst setup slack is 0.307~ns, the worst hold slack
+0.033~ns, over 32\,815 endpoints on the clocks the controller's
+generators derive from the one constraint on the board's 200~MHz
+input. No register is without a clock, and no internal endpoint is
+unconstrained. The design takes 12\,296 LUTs, 11\,209 flip-flops, five
+block RAM tiles, four DSP blocks, 86 pins, the controller's PLL and
+MMCM, its 64 output and 32 input serialisers with 32 delays, and the
+\code{STARTUPE2} that clocks the configuration flash. These are the
+numbers of \code{main} at eed5b7f, with the configuration flash and
+the entropy source's capture buffer on it (issue 842); the pins'
+constraints, the MDIO master, the debug transport and the SD card
+host came after, and the size has not been measured since. The
+memory's pins specify no input or output delay, as in the a200t
+examples, since the controller calibrates their timing itself. The
+board's other pins are timed, or cut by a false path, in
+\code{board/ax7a200\_io.xdc} (issue 847), so none is left without a
+delay. The report's
+eight combinational loops are the entropy source's eight rings, which
+are loops by design and cut by a false path.
+
+The run on the board below was made with the design before the DDR3
+memory was on the bus, when the top wired the units to each other by
+hand around an MMCM. The design with the memory has run since, first
+with UberDDR3 and then with AMD's controller; Section~\ref{sec:v-next}
+says when and what it said.
+
+The board sits on another machine, with its programming cable and
+its serial bridge, and is programmed from here. Vivado's
+\code{hw\_server} and the cable's libraries come out of the
+hermetic installation, \code{vivado\_extract}, into a bundle that
+\code{bazel run //cpu/vreteno/board/remote:hw\_server} uploads over
+ssh, starts there with an idle timeout, and tunnels back to a local
+port; \code{bazel run //cpu/vreteno:vreteno\_board\_prog} then has
+Vivado connect to that port and write the FPGA, which the next power
+cycle forgets, and \code{vreteno\_board\_flash} the same way writes
+the QSPI flash, which it does not. The serial port is watched the
+same way: \code{bazel run //cpu/vreteno/board/remote:serial} uploads
+a small program, one static binary in Go on the standard library
+alone, and runs it on the far machine over ssh and under a timeout
+that frees the port whatever happens here; it prints what the board
+says for a while and may type a reply once the board has said a
+line.
+
+The watcher is opened before the programming, since the board's
+program says its first line within seconds of the part being
+configured. On 2026-10-04 a watcher opened before
+\code{vreteno\_board\_prog} and held across the reconfiguration
+received the DDR3 test whole (issue~965). It was not always so. Issue~195
+measured the opposite: with a bitstream that says one line a second in
+the part, a watcher held open across a reconfiguration saw no bytes in
+150 seconds, and one opened straight after saw 360 bytes in 30, which
+was read as the reconfiguration's high-impedance pins making a break on
+the board's serial bridge. That cost an evening of runs that looked
+like a silent design, which is why the board's program says a header
+and a dot every ten seconds: a board that keeps talking for two minutes
+can be read whenever the reader is ready, whichever order turns out to
+hold.
+
+The bitstream in that measurement is \code{//cpu/vreteno/board/probe},
+which has no core, no memory and no bus: the board's 200~MHz clock, a
+counter, and a transmitter that says one line a second on the same pins
+and the same I/O standards the design uses. It is the control for any
+question about the serial port, since a line from it and silence from
+the design says the fault is in the design, and silence from both says
+it is the path or the reader.
+
+The board did what the runs did. Programmed over the tunnel, it said
+OK and a newline on the serial port at 115\,200 baud, the watcher
+typed \code{yes}, and the board echoed the three bytes: six bytes on
+the line, the same six the lockstep test's model had recorded. The
+LEDs were looked at on the board itself, by an author with a camera:
+they did what that run's top said, and the photographs and the video
+are the record. The top below is today's, whose LEDs show the halt,
+the first start bit on the serial line, the memory's calibration and
+a heartbeat. Holding the reset puts the halt LED out; releasing it says OK
+and waits for three keys again.
+
+\lstinputlisting[caption={\code{board/vreteno\_board.v}: the board
+top, by hand.},label={lst:v-board}]{cpu/vreteno/board/vreteno_board.v}
+
+
+\subsection{The board with a logic analyser}
+\label{sec:v-ila}
+
+A design on the board shows four LEDs and a serial line, and a
+question about a wire inside it had no answer but another run under
+Vivado's simulator. The analysis in \code{docs/on-chip-debug.md}
+lists the ways to see more and puts an integrated logic analyser
+first, because the rules exist and the design does not change.
+\code{//cpu/vreteno:vreteno\_board\_ila\_pnr} is that bitstream
+(issue~239): the same lowered module under a top that is
+\code{vreteno\_board.v} with one block added, Vivado's analyser
+generated by \code{vivado\_ila} with thirteen probes and 4096 samples,
+sampled on the core's clock. It is built beside the shipping
+bitstream and is not it, since the analyser costs block RAM and a
+run of its own: routed, the design takes 11\,010 look-up tables,
+11\,334 registers and 19 block RAM tiles, against the 8\,100, 6\,959
+and four of the board it was measured beside, the one with UberDDR3, and meets its timing with 0.6~ns to spare.
+
+The probes are the nets a reader of the board asks about first, and
+the top says why each is there: the core's reset, its halt and the
+memory's calibration; the serial line both ways and the break that
+resets the core; the modulator's four channels; the third slot's
+three request channels, on which a program that touches
+\code{0x3200} on this board is seen waiting for an answer that never
+comes; the remote peripheral's frames, byte by byte; and the two
+flags the LEDs show. The core's retire stream is not among them: it
+ends inside the lowered module and is not a port of it, which is what
+the retire buffer of issue~240 is for. The memory's command pins are
+on the 400~MHz clock and are left out rather than sampled across a
+clock boundary.
+
+A capture is read back over the JTAG cable through the probe file
+the implementation writes beside the bitstream, with
+\code{//cpu/vreteno:vreteno\_board\_ila\_read}, once the board has
+been programmed with \code{vreteno\_board\_ila\_prog}. That was done
+on September 22, 2026, in a board window with nobody at the board:
+the analyser bitstream was programmed over the tunnel, the core was
+run with no trigger, so it captured the board as it stood, and the
+4096 samples came back as the VCD in Listing~\ref{lst:v-ila}, kept
+in the tree as \code{docs/ila\_capture.vcd}. Nothing in it changes
+for 41~$\mu$s, which is the board at rest a minute after
+configuration, and every probe says what the LEDs say and more:
+\code{calib} high, the memory calibrated; \code{halt} low and
+\code{said} high, the core running and the serial line driven at
+least once, which is the program having said its line and waiting
+for a key; \code{rst} and \code{brk} low, \code{uart\_tx} and
+\code{rx\_sync} idle high; the third slot's three channels with no
+valid, holding the last phases that crossed them; the remote
+peripheral's frame channel idle; the modulator's four channels low.
+The analyser's own three marks, \code{\_TRIGGER}, \code{\_WINDOW}
+and \code{\_GAP}, are Vivado's, and the trigger mark at sample 2048
+is where the run began.
+
+The read went through Vivado's Tcl by hand rather than through the
+rule's generated script, which failed twice before it reached the
+part: it looked for its log library under a name that exists in no
+repository, and it asked for \code{arm\_hw\_ila}, which is not a
+Vivado command. Both are fixed upstream in
+\code{bazel\_rules\_vivado}, with the Tcl the rule generates and the
+Tcl run by hand being the same after the fix.
+
+\lstinputlisting[style=ascii,caption={\code{docs/ila\_capture.vcd}: the capture,
+as Vivado wrote it.},label={lst:v-ila}]{ila_capture.vcd}
+
+\subsection{The bus from the cable}
+\label{sec:v-jtag}
+
+The loader takes a program over the serial port, and the analyser
+shows a capture, but neither reaches the bus from outside: a program
+that has hung, or a peripheral that is not answering, could be read
+only by the core, which is the thing in question. The analysis in
+\code{docs/on-chip-debug.md} puts a host path onto the bus third,
+after the analyser and before a debug module, and this is that path
+(issue~\#241): Vivado's JTAG-to-AXI master, generated by
+\code{vivado\_ip} as \code{//cpu/vreteno:jtag\_axi}, on a second host
+port of the lowered board, reached over the cable that programs the
+part.
+
+The board changed in two places for it. Its ports are two structs
+now, \code{BoardIn} and \code{BoardOut}, the old ports under their old
+names and the master's pins under \code{jtag\_}, one field of type
+\code{AxiHostPins}, passed whole to an \code{AxiPins} that joins them
+to the link's channels. And the router got an arbiter in
+front of it, \code{Arbiter2} then, with the core's tracker on one port
+and the pins on the other. An arbiter puts the port number above a
+host's own identifier, so the peripheral side of the bus allocates four
+bits where it previously allocated two: two for a host's own identifier and two for the port,
+which is room for four hosts. Four filled it, \code{Arbiter4} over
+the core, the pins and the Ethernet port's two engines
+(issue~\#151); the fifth widened it, below. The debug
+transport of Section~\ref{sec:v-dtm} does not: it shares the pins'
+port, through an \code{Arbiter2} of its own in front of it, the pins
+and the transport one bit of identifier each, which is what the
+JTAG-to-AXI master's IP ever used. Every peripheral's
+tracker, the memories, the timer and the bridges were widened with
+it; none of them names the width except at its instantiation.
+
+The video scanout's fetch is a fifth host (issue~\#151). It first
+shared the Ethernet send engine's port through a nested
+\code{Arbiter2}, as the debug transport shares the pins', so that
+nothing past the arbiter widened. With more hosts coming, the SD
+card's engine and Razboj among them, the choice was to widen once and
+stop nesting (issue~\#1022): the peripheral side allocates five bits of
+identifier, two for a host's own and three for the port. Three bits of
+port number cover up to eight hosts, so each one after the fifth
+raises the arbiter's count and widens nothing behind it. Every
+peripheral's tracker, the router, the bridges and the DDR3's were
+widened again with it, each at its instantiation.
+
+The SD card's engines took the sixth port (issue~\#912), and the
+arbiter is \code{Arbiter6}. They are two, a store engine for a read
+and a fetch engine for a write, and they reach that port through an
+\code{Arbiter2} of their own. That is a nest after all, and the reason
+against nesting does not apply to it: hosts behind one port share its
+turns, and these two never offer at the same time, since a command
+is a read or a write and none starts until the last has finished.
+The host checks the two busy lines are never high together. The nest
+keeps two ports free, for Razboj and a texture fetch.
+
+Razboj took the seventh (issue~\#985), and the arbiter is
+\code{Arbiter7}. Its rasteriser draws into the frame the scanout
+shows, at \code{0x4200\_0000}, from a display list at
+\code{0x4280\_0000}. It reads the list's count from a doorbell on the
+peripheral page's tenth slot, at \code{0x3900}: a register that holds
+zero from reset, so no word of memory can start a list nobody wrote.
+The doorbell also drives a line to the rasteriser, high while the
+count is not zero, and the rasteriser reads the count only then. An
+idle rasteriser therefore puts nothing on the bus. Reading the count
+back to back, or even once in 256 cycles, moved the timing of every
+other host's accesses, and the board tests that time the DDR3 path
+or sample the entropy source failed with it. Razboj's rows are
+$2^{10}$ words, so the scanout's stride became 4096 bytes, of which
+it shows the first 640 words. A board test writes a list of one rectangle,
+rings the doorbell, and reads the pixels back over the bus.
+On the board, \code{razprobe} does the same with a full screen and
+three shapes, shows them through the scanout, and says on the serial
+port whether the pixels it read back are the list's
+(issue~\#1169).
+
+The cost of a host is its share of the bus when every host is busy.
+For the scanout, a line of 640 words, 2560 bytes, must arrive within
+the 31.8\,$\mu$s of the line before it, about 80\,MB/s. The link
+moves at most four bytes a beat at 100\,MHz, 400\,MB/s, and the DDR3
+controller behind it less. With every port offering a burst, each
+wins one turn in seven, and a turn is a burst of sixteen beats. The
+SD port offers a burst only as fast as the card fills one, though,
+at most 12.5\,MB/s on four lines at 25\,MHz, so the other six share
+nearly all of the link and the scanout's worst share is about
+65\,MB/s, short of a line's need. That bound holds only while
+every other host moves bursts back to back for a whole line, which
+the core's single-word accesses do not. The tighter limit is behind
+the arbiter: the DDR3 path takes one access at a time, and measured
+at the model's best latency the whole path moves about 79\,MB/s
+(issue~\#1023), so a scanout under load already fills it. More than
+one access in flight, or whole bursts to the controller, is what
+changes that, and is issue~\#1023's to decide.
+The scanout's sticky underflow bit is what says whether it ever
+happens, and the board check runs the scanout with the core copying
+in the DDR3 and the Ethernet port sending, so that the bit is read
+under contention and not on an idle bus.
+
+On the board it did happen (issue~\#1209): under that load the
+picture showed short streaks of colour from elsewhere on the row, the
+line buffer running dry and showing what the line before had left. A
+burst of sixteen paid the path's latency and a turn at the arbiter
+forty times a line, and the core's single words between them are turns
+too. In the board's simulation, a line as long as the board's, 3175
+cycles, took 1964 idle and 4682 under the load, every line late. The
+scanout now fetches a line in ten bursts of 64 beats: a line from a
+4~KiB-aligned base never crosses a 4~KiB boundary, and
+\code{LineFetch} cuts a burst at one if it would. The same runs then
+take 974 idle, 1206 under the load and 1200 with Razboj drawing as
+well, under two fifths of a line, and
+\code{the\_scanout\_keeps\_up\_with\_the\_boards\_load} holds every
+line to half of one. Longer bursts fetch faster, 942 under the load
+at 128 beats, but a burst holds the path, and a load of the core's
+behind one waits for it: 88 cycles with no scanout, 94 beside bursts
+of 64 and 153 beside bursts of 128, which
+\code{a\_core\_load\_waits\_behind\_the\_scanout} measures. A column whose word is late anyway now shows
+magenta, \code{LATE}, rather than a stale word, so an underflow looks
+like one. And a late line's words land in its own row: before, the
+words of a line that came after its start went into the half filling
+for the next row, which then showed them as its own, one row low
+(issue~\#1233).
+
+\code{vreteno\_board\_jtag.v} is the top with the master, the board's
+own top with one block added, and every other top ties the pins off,
+so the shipping bitstreams are unchanged in what they do.
+\code{//cpu/vreteno:vreteno\_board\_jtag\_probe} is the proof
+(Listing~\ref{lst:v-jtag}): from the hardware manager, words go into
+the data memory and the DDR3 and come back, and the timer's
+\code{mtime} is read twice and differs, which is a peripheral
+answering while the core runs its own program.
+
+\lstinputlisting[style=ascii,caption={\code{board/jtag/probe.tcl}:
+the bus from the cable, and what it checks.},label={lst:v-jtag}]{cpu/vreteno/board/jtag/probe.tcl}
+
+It ran on September 22, 2026, in a board window with nobody at the
+board, and every word came back (Listing~\ref{lst:v-jtag-run}, kept
+in the tree as \code{docs/jtag\_probe.txt}): two words into the data
+memory and two into the DDR3, read back as written, and \code{mtime}
+two different numbers a moment apart. The core was running the
+board's own program from the boot memory the whole time; the master
+and the core share the bus through the arbiter, and neither knows
+the other is there. Routed, the design takes 10\,795 look-up tables and 11\,244
+registers, against the 8\,100 and 6\,959 of the board it was measured
+beside, the one with UberDDR3, and meets its
+timing with 0.17~ns to spare, closer than the board alone, since the
+master and the arbiter add a stage on the bus's paths.
+
+\lstinputlisting[style=ascii,caption={\code{docs/jtag\_probe.txt}: what
+the probe said.},label={lst:v-jtag-run}]{jtag_probe.txt}
+\subsection{The debug module}
+\label{sec:v-dm}
+
+The core's debug mode, Section~\ref{sec:v-core}, is reached from
+outside through the debug module, the RISC-V debug specification's
+module as far as a debugger on the bus needs it: the second of the
+three steps of issue 154, after the mode and before a transport of
+its own. The specification puts the module behind a small address
+space of registers a transport reaches from the cable; here that
+space is on the bus, an AXI-Lite peripheral behind a bridge of its
+own on the router's seventh port, the 64~KiB from \code{0x1000\_0000},
+each register a word at four times its number. So the JTAG host of
+the last section reaches it from the hardware manager today, and a
+transport reaches it the same way when there is one. \code{dmcontrol}
+encodes the halt and resume requests and \code{dmactive};
+\code{dmstatus} says whether the core is halted or running and
+whether a resume was acknowledged; \code{abstractcs}, \code{command}
+and \code{data0} are the abstract command, access-register only, one
+32-bit word: a general register, which the core reads and writes for
+the module through its register file's lent ports, or a CSR, which
+it reads through its CSR read and writes only for \code{dpc} and
+\code{dcsr}. A command while the core runs is \code{cmderr}~4, an
+unsupported one 2, one while another is in flight 1, and a command
+under a standing error is ignored, as the specification says. There
+is no program buffer. The specification's system bus access,
+\code{sbcs}, \code{sbaddress0} and \code{sbdata0}, is served beside
+the module by the transport's bridge, where the bus master is
+(Section~\ref{sec:v-dtm}); a debugger on the board's own bus, as the
+JTAG host is, needs none of it.
+
+The module's own test plays the core, sets halted and the word read,
+and reads the lines back; the board test puts a debugger on the JTAG
+pins, a master model that follows a plan of writes, reads and waits,
+against a program counting to three thousand: it halts the core, reads
+the count and \code{dpc}, writes the count to its end, resumes, and the
+program finishes at once, which is the write having landed. On the
+board, \code{vreteno\_board\_dm\_probe} is to do the same from the hardware
+manager against whatever program runs; that run is owed (issue 154).
+
+\subsection{The debug transport}
+\label{sec:v-dtm}
+
+The third step of issue 154 is the transport, so that a stock
+OpenOCD, and gdb through it, reaches the module from the cable that
+programs the part, with nothing written for either of them.
+\code{Dtm}, in \code{txhdl\_parts::dtm}, is the specification's
+transport, version 0.13. It sits behind \code{BSCANE2} on the
+device's fourth user scan chain, which every top instantiates as
+\code{bscan\_user4}, and it runs on the cable's clock. OpenOCD
+reaches it through its BSCAN tunnel, \code{riscv use\_bscan\_tunnel
+5}, which encapsulates each of the transport's own scans inside one data
+scan of that chain. The examples document has the transport alone
+and the tunnel's framing.
+
+Each access the transport takes crosses to the board's clock through
+a \code{ChanCdc}. There \code{DtmBridge} makes it a read or a write on
+the link, through a host tracker of its own: one of the module's
+registers at \code{0x1000\_0000} plus four times its number, or the
+system bus access, which the bridge serves itself. It serves the access
+8, 16 or 32 bits wide, a narrow one as a word on the link with only
+its lanes' strobes set, since gdb reads and writes a compressed
+instruction, and the \code{c.ebreak} it puts over one, a halfword at a
+time (issue~873). The bridge's host
+and the JTAG master's pins share the arbiter's second port through
+an \code{Arbiter2}, taking turns, so nothing past the arbiter changed.
+
+Two tests check it on the whole board in simulation, with a model of
+the Artix-7's TAP in front of \code{BSCANE2}, its instruction
+register six bits and \code{USER4} at \code{0x23}. In the first,
+OpenOCD~0.12.0 itself, pinned and unmodified, drives the board over
+its \code{remote\_bitbang} adapter. It finds the device, examines the
+hart (one hart, 32 bits, \code{misa} \code{0x40001104}), halts it,
+reads \code{pc}, reads four words of the data memory by system bus
+access, steps one instruction, writes a word and reads it back, and
+resumes it. The run takes under half a minute, so it is
+in the suite. Stepping is what found the module refusing a write of
+\code{tselect}: OpenOCD counts the triggers that way, and refused, it
+stops writing any CSR by the abstract command, \code{dcsr} and its
+step among them. With no trigger module the module now takes that
+write and changes nothing. In the second test, the JTAG master reads the data memory
+without a pause while the transport reads it too, and both get their
+words: the master read 122 words, 79 of them while the transport's
+access was in flight, so neither port waits for the other to stop.
+
+\section{Programs in Rust and C++}
+\label{sec:v-rust}
+
+Everything above runs programs written with the assembler in
+\code{program.rs}, which is enough to check a core and no way to
+write software. The core is an RV32IMAC machine, so a compiler can
+target it, and the toolchain for that is fetched by the build like
+every other: \code{MODULE.bazel} names the bare-metal RISC-V target
+beside the host's, and the ruleset downloads that target's standard
+library by checksum. The linker is \code{rust-lld}, which comes with
+the toolchain, so there is no cross binutils to install either.
+Nothing is on the machine that Bazel did not put there.
+
+A program for the core is built for another machine than the one the
+build runs on, so \code{vreteno\_image} bridges the transition: a rule
+with a platform transition that builds the binary for the core, runs
+\code{//tools/elf2vreteno} over the linked ELF, and gives back the
+image as Rust source. The rest of the tree depends on that source, so
+a program for the core is built by \code{bazel build //...} like
+anything else, with no flag to remember.
+
+The transition also sets the flags every crate built for the core is
+compiled with: optimised for size, no debug assertions, no overflow
+checks. A library a program links is built with them as the program
+is, and a build of the same library for this machine, its tests
+included, keeps its own (issue 1248). Before, a library that named no
+flags of its own was built for the core unoptimised. The logo's pixel
+table was copied whole for each pixel read, and the paint took 31
+seconds where it takes two (issue 1245). The GL ES library's list of
+a frame of the icosahedron took four times the instructions it takes
+now, and the program twice the bytes.
+
+The board's own test, \code{//cpu/vreteno:board\_test}, is built the
+other way round: everything it links, the simulation of the whole
+board among it, is optimised at level 3, through \code{opt\_test} in
+\code{tools/opt\_test.bzl}, with its debug assertions and overflow
+checks kept on, so it checks what it checked at level 0 (issue 1250).
+At level 0 the board ran some 1500 cycles a second and the test took
+670 to 1100 seconds; optimised it takes about 35.
+
+\subsection*{What the machine will not let a compiler do}
+
+Two of the core's properties decided how a program had to be
+written, and each of them the core met by going quietly wrong rather
+than by refusing. One of them is gone.
+
+The first was the one that shaped the linker script. A load below the
+data base never left the core: no request was sent, and the
+instruction that was waiting retired with whatever word the previous
+device load had left in its register. The instruction memory was not
+a device on the bus, so a constant placed there was a constant the
+program could not read, and it was not an error, it was a wrong
+answer. So \code{.rodata} was linked into the data memory rather than
+beside the code. Since issue 268 the boot memory is on the bus as
+well, read-only at address zero (Section~\ref{sec:v-fetch}), every
+load goes to the bus, and \code{.rodata} is linked beside the code
+where the linker script puts it; the data memory stores only what a
+program writes, and \code{Dmem::with} gives it its initial bytes.
+
+The second is the size. A program is 4096 bytes, 1024 words, the
+loader truncates a longer one without saying so, and the fetch takes
+its word by \code{pc[11:2]}, so a program that runs off the end wraps
+into itself. Optimising for size is not a preference here. It is also why
+debug assertions are off: one of them pulls in \code{core}'s panic
+formatting, which is larger than the whole instruction memory. The
+compressed instructions help: the target the ruleset maps has them,
+the core runs them, and the greeting is 25 words where it was 33
+without them.
+
+Two more things nothing else does: the stack pointer is zero at
+reset, and \code{.bss} is not cleared. An entry stub does both, in
+the assembly that has to come before Rust can run at all. And a
+program ends by writing an odd value to \code{mhalt},
+\code{csrwi 0x7c0, 1}, which is one instruction and needs no runtime;
+\code{ebreak} is a breakpoint here as the specification says, and
+traps. Neither is in the greeting any more: they are
+\code{vreteno\_hal}'s, Section~\ref{sec:v-hal}, and the greeting is
+the program and nothing else.
+
+\lstinputlisting[caption={\code{cpu/vreteno/rust/hello.rs}: Rust
+compiled for the core. Run the whole machine on it with
+\code{bazel run //cpu/vreteno:hello}.},label={lst:v-hello}]{cpu/vreteno/rust/hello.rs}
+
+\lstinputlisting[caption={\code{cpu/vreteno/rust/vreteno.ld}: where
+each section goes, and why it has to go
+there.},label={lst:v-ld}]{cpu/vreteno/rust/vreteno.ld}
+
+\subsection*{What every program would otherwise write again}
+\label{sec:v-hal}
+
+The greeting was the right amount of machinery for a greeting and the
+wrong place to start the fourth program from: a naked \code{\_start},
+addresses copied from the board's map, a panic handler, and, in the
+program that takes input by interrupt, a trap vector that saved and
+restored sixteen registers by hand. \code{vreteno\_hal}, the crate
+under \code{cpu/vreteno/rust/hal}, holds that once.
+
+Listing~\ref{lst:v-hal} is the crate less its trap entry: the address
+map in one place; the serial port, the timer, the interrupt
+controller, the pulse width modulator and the video peripheral as
+types whose methods are volatile accesses at the map's addresses and
+nothing else; the control and status registers a program touches;
+\code{entry!}, which owns the reset path; and \code{halt}. The crate
+is inline RISC-V assembly from end to end, so it builds only for the
+core, through the transition a program's image applies, and a program
+names it in \code{deps}.
+
+\lstinputlisting[caption={\code{cpu/vreteno/rust/hal/lib.rs}: the
+map, the peripherals as types, the registers, the entry and the
+halt.},label={lst:v-hal}]{cpu/vreteno/rust/hal/lib.rs}
+
+Listing~\ref{lst:v-trap} is the trap entry and the dispatcher. The
+entry saves every register a call may change and \code{mepc} into a
+frame on the stack, hands the frame to the dispatcher, and on the way
+back restores the registers and \code{mepc} from the frame and returns
+with \code{mret}. So a handler is an ordinary Rust function that takes
+the frame, and one that wants to resume after a faulting or calling
+instruction moves \code{frame.mepc} on. The dispatcher reads
+\code{mcause} and calls the handler the program registered for that
+interrupt line or that exception cause; an interrupt nobody registered
+for is taken and ignored, and an exception nobody registered for halts
+the core, since a program that traps where it did not expect to has
+nothing sensible to resume. Nothing is cleared after the handler: the
+core's pending bit for the external interrupt is the controller's
+line, as the specification has it.
+
+\lstinputlisting[caption={\code{cpu/vreteno/rust/hal/trap.rs}: the
+frame, the entry, the dispatcher, and how a handler is
+registered.},label={lst:v-trap}]{cpu/vreteno/rust/hal/trap.rs}
+
+Listing~\ref{lst:v-traps} exercises it. The program registers a
+handler for \code{ecall} that counts the call and moves \code{mepc}
+past it, makes three calls, registers a handler for the timer's line,
+asks the timer for an interrupt four hundred cycles on, turns
+interrupts on, and waits in a loop that touches nothing until the
+handler has run and disarmed the timer. It says
+\code{ecall 3 timer 1}, and \code{//cpu/vreteno:traps\_test} runs it
+on the machine of Section~\ref{sec:v-rust} and checks that it did.
+The greeting and \code{irq.rs} run on the crate as well, and their
+tests are unchanged, which is what says the crate is the same
+machinery and not different machinery.
+
+\lstinputlisting[caption={\code{cpu/vreteno/rust/traps.rs}: an
+environment call resumed past, and a timer interrupt taken, through
+the dispatcher.},label={lst:v-traps}]{cpu/vreteno/rust/traps.rs}
+
+The run is the check. \code{//cpu/vreteno:hello} builds the image,
+puts it and its constants in the boot memory and its initialised data
+in the data memory, runs the whole machine with the router, the timer and
+the serial port, and reads the port's line with the same terminal the
+demonstration uses. It asserts what came out, so a program that says
+nothing fails rather than passes quietly, and it asserts that the
+core halted itself. The same run is \code{//cpu/vreteno:hello\_test},
+so the toolchain and the core are checked together by
+\code{bazel test //...}.
+
+\subsection*{And in C++}
+
+The other toolchain is the GNU one for bare-metal RISC-V, fetched by
+checksum like the first. It is the GNU one rather than a Clang
+because of what comes with it: its \code{rv32imc/ilp32} multilib,
+RV32IMC and the soft-float ABI, is this core less the atomic
+instructions, so its code runs here directly, and it includes
+\code{newlib} and a precompiled \code{libstdc++},
+so a standard library is something the
+toolchain provides rather than something the build would have to compile.
+
+Everything the machine forbids forbids it just as firmly in C++, and
+the same linker script says so, since what a machine allows does not
+depend on the language above it. Four flags are the language's own.
+There is no unwinder and nothing to unwind to, so exceptions are off;
+nothing reads a type at run time, so \code{RTTI} is off; a static
+with a guard would call a lock that does not exist, so thread-safe
+statics are off; and the entry point is the core's reset vector
+rather than a C runtime's, so the toolchain's startup files are left
+out and the reset stub sets the stack pointer and clears the
+uninitialised data itself, as the Rust one does.
+
+Deploying a standard library on a machine with 4~KiB of
+instruction memory imposes practical boundaries. The portion
+consisting of templates and constants is usable, and the program uses
+it: \code{std::array}, \code{std::string\_view}, \code{std::for\_each},
+and a sum of squares the compiler works out before the core is
+started. The half that needs an operating system underneath, a heap,
+file descriptors, an unwinder, is not usable, and no toolchain fetch
+makes it so. That is freestanding C++: most of the language and a
+good deal of the library, and none of the runtime.
+
+\lstinputlisting[caption={\code{cpu/vreteno/cpp/hello.cc}: the same
+greeting, in C++, against the standard library the toolchain provides
+for this core.},label={lst:v-hellocc}]{cpu/vreteno/cpp/hello.cc}
+
+The run is checked the same way, by \code{//cpu/vreteno:hello\_cc}
+and its test. Both languages end at the same place: the machine of
+\code{run.rs}, the same terminal on the serial line, and the same
+two assertions. What changes between them is the language and
+nothing else.
+
+\section{Two of It, Compared}
+\label{sec:v-pair}
+
+A machine that must not be quietly wrong runs two of itself and
+compares. \code{Pair} is that: two \code{Vreteno} cores on one bus,
+with everything they say compared and one line, \code{differs}, that
+goes up when they stop agreeing and stays up until reset.
+
+What makes the comparison worth anything is that both cores see
+exactly the same inputs in the same cycles. The wires are given to
+both; each of the three channels the pair receives goes through a
+\code{Tee}, a part that offers each word to both cores and takes the next
+only once both have taken it, so neither core can be more than a
+word ahead. Each of the three
+channels the cores drive goes through a \code{Check}, which takes a
+word from both in the same cycle, passes the first core's on and
+raises its line when the two differ. Both parts are in
+\code{//lib/parts} under \code{redundant}.
+
+The three wires, \code{halt}, \code{instr} and the writeback, have no
+handshake, so \code{Watch} compares them every cycle and passes the
+first core's on; it also gathers the three checks' lines into
+\code{differs}, since a unit of units has no logic of its own to do it
+with.
+
+What leaves the pair is the first core's, so a design puts a pair
+where it would have put a core and wires nothing differently. What it
+adds is one input and one output: \code{fault}, which holds the second
+core in reset while it is high, and \code{differs}.
+
+\code{fault} is the self-test. A comparator nobody has ever seen fire
+is a comparator nobody knows the state of, and holding one core in
+reset for a cycle is a divergence with a known cause that runs through
+every part of the comparison path. \code{//cpu/vreteno:pair\_test}
+does both halves: eight random programs run with the two cores agreeing
+throughout, and then one of them run again with a single cycle of
+\code{fault}, after which the line is up. A third run reads the line
+again at the end of six hundred cycles and finds it still up, which is
+the half of the promise the first two do not check.
+
+What the pair does not do is decide what to do about a disagreement.
+It says that there was one; a design around it chooses between a
+reset, a trap and a stop, and that choice belongs to the system rather
+than to the pair.
+
+\section{What Comes Next}
+\label{sec:v-next}
+
+More clock. What sets the timing now is stated in
+Section~\ref{sec:v-synth}: the branch on a register, three quarters
+routing, which a fourth stage, or a register file read a cycle
+earlier, would shorten, and which the bus took the timer's store off
+by taking the timer out of the core; then the multiplier, which a
+second register in the middle of its adder pipeline, one more step of
+the sequencer, would. The lockstep test is the check for either,
+since it compares architectural state when an instruction retires.
+
+The design with the DDR3 memory ran on the board on September 18,
+2026, and said \code{ddr3 ok}: sixteen words written across the
+memory's range and read back, every one of them correct. It ran twice,
+once written into the part over JTAG and once from the board's own QSPI
+flash after a power cycle, with nothing attached but power. So the
+whole path is proven on hardware: the core, the AXI link, \code{AxiWb},
+the controller and the board's memory chips. That run was made with
+UberDDR3 as the controller; the board integrates AMD's MIG since issue
+188, GPL-3.0 having no place in a design this tree claims as
+Apache-2.0. The design with MIG ran on September 28, 2026, written into
+the part over JTAG, and said \code{ddr3 ok} the same way: the
+controller calibrates, the memory returns what it was given, and the
+core runs on after. The run from the flash after a power cycle is still
+owed (issue~\#188). Since issue~\#1023 the core reaches the controller
+through the controller's own AXI4 port rather than through
+\code{AxiWb}, and the run of that path on the board is the issue's
+fourth step.
+
+\begin{thebibliography}{10}
+
+\bibitem{embedding}
+F.~Filmar and D.~Janković, ``Deleting a language: Embedding TxHDL in
+Rust,'' project repository \code{HDL/txhdl}, \code{//docs:embedding},
+2026.
+
+\bibitem{runtime}
+F.~Filmar and D.~Janković, ``The TxHDL runtime,'' project repository
+\code{HDL/txhdl}, \code{//docs:runtime}, 2026.
+
+\bibitem{axi}
+F.~Filmar and D.~Janković, ``AXI in TxHDL,'' project repository
+\code{HDL/txhdl}, \code{//docs:axi}, 2026.
+
+\bibitem{examples}
+F.~Filmar and D.~Janković, ``TxHDL by example,'' project repository
+\code{HDL/txhdl}, \code{//docs:examples}, 2026.
+
+\bibitem{cover}
+F.~Filmar and D.~Janković, ``TxHDL documents,'' project repository
+\code{HDL/txhdl}, \code{//docs:cover}, 2026.
+
+\end{thebibliography}
+
+\end{document}

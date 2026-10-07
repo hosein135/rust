@@ -1,0 +1,130 @@
+% SPDX-License-Identifier: Apache-2.0
+% covers: Fb
+\datasheet{Fb}{Razboj's framebuffer: a memory of one word per pixel behind an AXI peripheral end.}
+
+\dsfacts{\code{gpu/razboj/src/fb.rs}}{\code{razboj::fb::Fb}}%
+{\code{//docs:razboj}, \code{//docs:axi}}
+
+\subsection*{Function}
+
+\code{Fb} is \code{N} words of memory, \code{px}, behind the
+peripheral end of an AXI link. A pixel is one word. The rasteriser
+writes pixels into it, and in Razboj's runs the same memory also
+holds the display list and its count, which the rasteriser reads.
+
+It is the peripheral client of an \code{AxiPer}, and its link is one
+port, \code{bus}, a \code{PerPort} of the four channels: requests
+come on \code{bus\_req} and write beats on \code{bus\_w}, and answers
+go out on \code{bus\_ans} and \code{bus\_r}. It answers write
+bursts and read bursts of any length. The rasteriser writes a run of a
+row's pixels as one write burst (issue 987) and fetches a display list
+entry as one read burst. A read's first beat is answered from the
+memory in the cycle the request is taken and the rest follow a beat a
+cycle, one burst at a time. A write is held while its beats arrive,
+since AXI4 puts no identifier on the write data channel, and is
+answered once, with its last beat. A beat writes only the bytes its
+strobes name, so a beat with none writes nothing. It counts what it
+served: \code{rbursts} read bursts taken, \code{rbeats} read beats
+sent, \code{wbursts} write bursts taken and \code{wbeats} write beats
+that wrote something, which a run reads to say how much of its time
+the link was busy and how many pixels it wrote.
+
+\subsection*{Parameters}
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}lp{0.7\textwidth}@{}}
+\toprule
+Parameter & Meaning \\
+\midrule
+\code{A} & The width of the link's address, in bits. \\
+\code{I} & The width of the AXI identifier, in bits. \\
+\code{N} & Words of memory, a power of two. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The tables use \code{Fb<16, 2, 1024>}, the framebuffer of
+\code{//gpu/razboj:trace}.
+
+\subsection*{Address map}
+
+The word a burst names is its address shifted down by two, cut to
+sixteen bits, and masked with \code{N}~$-$~1. The memory itself gives
+no word a meaning. In \code{//gpu/razboj:trace} and the tests of
+\code{gpu/razboj/src/sim.rs}, with \code{N} of 1024:
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}lp{0.6\textwidth}@{}}
+\toprule
+Byte address & What \code{sim.rs} puts there \\
+\midrule
+\code{0x000} & The framebuffer, sixteen by sixteen pixels, a word
+each. \\
+\code{0x400} & The display list, eight words an instruction. \\
+\code{0x600} & The count of instructions, written last. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\dstables{Fb}
+
+\subsection*{Behaviour}
+
+\begin{itemize}
+\item A read is taken when \code{bus\_r} has room and no write is waiting
+for its beat. It is answered on \code{bus\_r} in the cycle it is taken,
+with the word from \code{px}, \code{OKAY} and \code{last} set.
+\item A write is taken when no write is held. Its first word and its
+identifier go into \code{paddr} and \code{pid}, \code{pend} is set,
+and \code{wbursts} counts it.
+\item While a write is held, each of its beats is taken as it arrives,
+and the last only when \code{bus\_ans} has room. A beat writes the
+bytes its strobes name over the word at \code{paddr}, which then
+moves to the next word; \code{wbeats} counts a beat with any strobe
+set.
+\item The last beat ends the write: \code{pend} clears and
+\code{bus\_ans} sends \code{OKAY} with \code{pid}.
+\item While a write is held, no request of either kind is taken.
+\item An address beyond the memory wraps rather than ending the run.
+\item \code{pixel} reads a word back for a run or a test.
+\end{itemize}
+
+\subsection*{Verification}
+
+\begin{itemize}
+\item \code{//gpu/razboj:razboj\_test} renders every scene on the rasteriser
+through the link into \code{Fb}, reads the pixels back and compares
+each with the model in \code{gpu/razboj/src/model.rs}. The tests are
+\code{a\_scene\_of\_every\_kind\_agrees\_with\_the\_model},
+\code{a\_clear\_says\_only\_its\_colour},
+\code{a\_triangle\_is\_the\_same\_whichever\_way\_it\_is\_wound},
+\code{a\_triangle\_hanging\_off}\allowbreak\code{\_the\_screen\_is\_clipped},
+\code{a\_single\_pixel\_and\_an\_empty\_box} and
+\code{pseudorandom\_scenes\_agree\_with\_the\_model}.
+\item The build simulates \code{Fb<16, 2, 1024>}'s netlist, with the
+display list and its count in \code{px}, against the trace of
+\code{//gpu/razboj:trace} under nvc and Verilator:
+\code{//docs:razboj\_sim\_fb\_fb\_tb\_test} and
+\code{//docs:razboj\_vsim\_fb\_test}.
+\item \code{//gpu/razboj:trace} and \code{//gpu/razboj:demo} assert that the
+framebuffer equals the model's picture. The build runs
+\code{//gpu/razboj:demo} to draw the picture in \code{//docs:razboj}.
+\end{itemize}
+
+\subsection*{Used by}
+
+\code{razboj::sim::run} and \code{razboj::sim::run\_list}, and so Razboj's
+tests, \code{//gpu/razboj:trace} and \code{//gpu/razboj:demo}. The system's
+\code{//soc:demo} draws the core's display list a second time with
+\code{run\_list}, on a plain link into \code{Fb}, and checks that the
+picture is the same. On the lattice itself the memory is the
+simulation-only \code{Ram}.
+
+\subsection*{Limits}
+
+It holds one write at a time and takes no read while it does, and a
+read burst's beats are answered a cycle apart. A write burst's beats
+are taken as they come; its length is not read, and its last beat ends
+it. The
+word index is sixteen bits wide, so the framebuffer reaches at most
+65536 words.

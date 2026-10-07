@@ -1,0 +1,81 @@
+% SPDX-License-Identifier: Apache-2.0
+\section{The Lowering, Checked}
+\label{sec:x-checked}
+
+A lowering that is only printed is a claim. From this section on, a
+lowered unit is also run, and against the same stimulus the Rust
+simulation had, twice. The build does it: the example is run with
+\code{TXHDL\_VHDL} and \code{TXHDL\_VERILOG} set, so beside its
+trace it writes the unit's VHDL and its Verilog, which
+\code{\#[lower]} renders from the same statements, and a ports file;
+\code{//tools/fst2tb} reads the trace and the ports and writes a
+testbench, in VHDL and again in Verilog, that replays the trace's
+inputs into the entity and asserts, tick by tick, that the entity's
+registers and outputs are what the trace holds; \code{vhdl\_test}
+from \code{rules\_nvc} simulates the VHDL under \code{nvc}, and a
+\code{cc\_test} over \code{rules\_verilator} simulates the Verilog
+under Verilator, nvc built from source and Verilator fetched as a
+prebuilt binary, both hermetically. Each test
+passes only if every comparison held, so both emitters are checked,
+and a defect in either shows as a disagreement in one of the two.
+
+Both testbenches hold the trace as data rather than as code. A cycle
+is a frame: the inputs for its edge, then each value expected after
+it with a bit that says whether to check it. The VHDL testbench keeps
+the frames as hex literals in packages; the Verilog one reads them
+from a file beside it with \code{\$readmemh}, one vector a cycle, and
+one loop applies and checks a vector. A testbench is then the same
+size however long the run is. Written out a statement per cycle, the
+Verilog of the SD host's run was two million lines, which took
+Verilator 11~GiB and twelve minutes to compile and was stopped on the
+smaller CI runner (issue 601); as a loop it takes 25~MiB and under a
+second. A failed comparison names the signal, the tick, the value
+expected and the value found.
+
+The testbench's timing is the model of time, made literal. One tick is
+one nanosecond and the clock rises at even ticks. An input the trace
+holds at tick $2k$ was set before that edge, so it is applied at
+$2k-1$. A register the trace holds at $2k$ took its value at that
+edge, so it is checked at $2k+1$, through a VHDL-2008 external name.
+A wire the Rust process drove at $2k$ was computed from the registers
+as they stood before that edge, and from the inputs of that edge, so
+it is checked at $2k-1$ once those inputs are applied and every wire
+has settled, however deep: the VHDL testbench waits 50 ps after
+applying them and the Verilog one \code{\#0.1}, and the entity's
+continuous assignment then shows the same value. That last rule
+is a fact about the runtime worth knowing: a wire a process drives
+inside its iteration lags the hardware's continuous assignment by the
+process's own step.
+
+The counter of the cheat sheet, the blinky, the sequencer, the ALU,
+the scratchpad, the decoder and the two-process sampler pass.
+A negative control was run once: the counter's adder changed to add
+two makes the test fail at the first tick, so a pass means something.
+
+The stage of Section~\ref{sec:x-stage} passes too, and that closes a
+finding. The runtime's channel was a mailbox: an offer sat until
+taken, and the consumer took it in the same step it was offered, so
+\code{valid} was never high at a tick's end and \code{ready} meant
+the slot was empty, while the lowering's channel was a valid/ready
+handshake held across edges; a trace of one was not a check of the
+other. The runtime's channel is now an elastic buffer of two with the
+handshake registered on both sides, as the runtime document states,
+and the netlist's port is what that buffer shows: the head and the
+room are inputs the testbench applies a step later than a wire, since
+they are registered state, and the take and the offer are outputs
+checked as any wire is, the offer's data only under its valid. The
+change moved the FIFO's, the join's and the arbiter's traces by the
+buffer's latency and changed nothing else about them.
+
+The Verilog check earned its place on its first run. Every unit's
+VHDL had agreed with its trace, and the same units' Verilog, from the
+same statements, did not, twice, in the RISC-V core alone. An unsized
+number in a branch of a conditional inside a concatenation is thirty-two
+bits wide in Verilog, so every field above it moved; and signedness in
+Verilog is decided by the whole expression, so an arithmetic shift
+inside an unsigned conditional chain shifted logically, and one
+\code{srai} came out wrong. Neither is a defect VHDL can have, and
+neither showed until the Verilog was simulated. Both are fixed in the
+emitter, a number sized by the other branch and the shift
+self-determined inside \code{\$unsigned}, and a wire the core had
+named \code{byte}, a keyword in SystemVerilog, was renamed.

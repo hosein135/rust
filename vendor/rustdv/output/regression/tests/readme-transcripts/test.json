@@ -1,0 +1,13 @@
+{
+  "comment": "Every transcript quoted in an example README must be what the simulator actually prints. This is the gate that stops documentation drifting away from code: ch23/ch24/ch26 had stale file:line references and a missing test for months because nothing checked, and the drift was only found on 2026-08-04 when the check was written. Runs all 22 chapter sims plus tinyalu_tb and compares line by line, then sweeps every book-pdf/src chapter and the repository README for transcript lines of their own. Skips without iverilog.",
+  "cmd": [
+    "bash",
+    "output/regression/verify-transcripts.sh"
+  ],
+  "cwd": ".",
+  "skip_if_missing": "iverilog",
+  "expect_exit": 0,
+  "expect_in_output": [
+    "ALL TRANSCRIPTS VERIFIED"
+  ]
+}

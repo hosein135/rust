@@ -1,0 +1,7 @@
+[package]
+name = "ch21_macros"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+linkme = "0.3"

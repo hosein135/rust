@@ -1,0 +1,106 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Programming the board where it is, on another machine, the one
+# .bazelrc names in TXHDL_BOARD_SERVER. The board's JTAG cable and
+# serial bridge are there; Vivado's hw_server
+# runs there, from a bundle this build takes out of the hermetic Vivado
+# and uploads, and an ssh tunnel brings its port here, where the
+# programming target's Vivado connects to it. The serial port is
+# watched the same way, by a script run there over ssh.
+load("@rules_go//go:def.bzl", "go_binary", "go_test")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@rules_vivado//build/vivado:rules.bzl", "vivado_extract")
+
+package(default_visibility = ["//visibility:public"])
+
+# hw_server and the cable libraries, out of the Vivado installation:
+# what the a200t examples bundle, at the same paths.
+vivado_extract(
+    name = "hw_server_files",
+    files = {
+        "bin/hw_server": "bin/unwrapped/lnx64.o/hw_server",
+        "lib/libXil_lmgr11.so": "lib/lnx64.o/libXil_lmgr11.so",
+        "lib/libdabs.so.2": "lib/lnx64.o/libdabs.so.2",
+        "lib/libdftd2xx.so.1": "lib/lnx64.o/libdftd2xx.so.1",
+        "lib/libdjtg.so.2": "lib/lnx64.o/libdjtg.so.2",
+        "lib/libdmgr.so.2": "lib/lnx64.o/libdmgr.so.2",
+        "lib/libdpcomm.so.2": "lib/lnx64.o/libdpcomm.so.2",
+        "lib/libxftdi.so": "lib/lnx64.o/libxftdi.so",
+    },
+    tags = ["manual"],
+)
+
+# Uploads the bundle, starts hw_server on the server, and opens the
+# tunnel; does nothing that is already done.
+#
+#   bazel run //cpu/vreteno/board/remote:hw_server
+sh_binary(
+    name = "hw_server",
+    srcs = ["hw_server.sh"],
+    data = [
+        "hw_server_remote.sh",
+        ":hw_server_files",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+    tags = ["manual"],
+)
+
+# The watcher itself, one static binary for the server.
+go_binary(
+    name = "serial_bin",
+    srcs = ["serial.go"],
+    pure = "on",
+    tags = ["manual"],
+)
+
+# Watches the board's serial port on the server for a while, and may
+# type a reply once the board has said a line: uploads the watcher and
+# runs it there.
+#
+#   bazel run //cpu/vreteno/board/remote:serial -- --seconds=60 --reply=yes
+sh_binary(
+    name = "serial",
+    srcs = ["serial.sh"],
+    data = [
+        ":serial_bin",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+    tags = ["manual"],
+)
+
+# The sender: one static binary for the board's machine, which puts a
+# program into the board's memory through the loader in its boot
+# memory.
+go_binary(
+    name = "load_bin",
+    srcs = ["load.go"],
+    pure = "on",
+    tags = ["manual"],
+)
+
+# The sender against a loader the test plays on a pseudo-terminal:
+# a large image goes through whole and says how far it has got, and a
+# loader that stops is named at its word (HDL/txhdl#784).
+go_test(
+    name = "load_test",
+    size = "small",
+    srcs = [
+        "load.go",
+        "load_test.go",
+    ],
+    pure = "on",
+)
+
+# Uploads the sender and an image and runs it there:
+#
+#   bazel run //cpu/vreteno/board/remote:load -- \
+#       --image=$PWD/bazel-bin/cpu/vreteno/rust/hello_ram_bin.bin
+sh_binary(
+    name = "load",
+    srcs = ["load.sh"],
+    data = [
+        ":load_bin",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+    tags = ["manual"],
+)

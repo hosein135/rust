@@ -1,0 +1,143 @@
+% SPDX-License-Identifier: Apache-2.0
+% covers: AxiWb
+\datasheet{AxiWb}{A bridge from the peripheral end of an AXI4 link to the host lines of a pipelined Wishbone bus.}
+
+\dsfacts{\code{lib/parts/src/bus/wb.rs}}{\code{txhdl\_parts::bus::wb::AxiWb}}%
+{\code{//docs:axi}, \code{//docs:vreteno}}
+
+\subsection*{Function}
+
+A controller written elsewhere often speaks Wishbone rather than AXI.
+\code{AxiWb} puts such a controller on a link. It is a peripheral
+client written as hardware. On one side it holds the channel ends an
+\code{AxiPer} gives a client, as one port, \code{bus}, a
+\code{PerPort} of the four channels: requests on \code{bus\_req} and write beats on
+\code{bus\_w} in, answers on \code{bus\_ans} and read beats on \code{bus\_r} out.
+On the other side it drives the host lines of a pipelined Wishbone
+bus, \code{cyc}, \code{stb}, \code{we}, \code{adr}, \code{dat} and
+\code{sel}, and reads \code{stall}, \code{ack} and the peripheral's
+word, \code{rdat}.
+
+It takes one burst at a time and puts each of its words on the lines
+as its own request, at consecutive word addresses. The DDR3
+controller of Vreteno's board is behind one.
+
+\subsection*{Parameters}
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}lp{0.7\textwidth}@{}}
+\toprule
+Parameter & Meaning \\
+\midrule
+\code{A} & The link's address width, in bits. \\
+\code{I} & The link's identifier width, in bits. \\
+\code{AW} & The width of the Wishbone word address, in bits. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Words are 32 bits with four lanes, fixed in the source. The tables
+below use \code{AxiWb<32, 2, 28>}. There \code{AW} is \code{ddr3::AW},
+28 bits, a gigabyte of words, which was the board's DDR3 memory's word
+address while this bridge was in front of it.
+
+\dstables{AxiWb}
+
+\subsection*{Behaviour}
+
+\code{stage} says where the request is. The source names five values.
+
+\begin{itemize}
+\item \textbf{0, waiting.} A request on \code{bus\_req} is taken when one
+offers. The bridge keeps its identifier and its word address, sets
+\code{wsel} to all four lanes, and latches \code{left}, the count of
+words the burst still has to put on the lines, as \code{len + 1}. A
+read goes to stage 2 at once, and a write to stage 1.
+\item \textbf{1, a write waiting for its beat.} The beat on \code{bus\_w}
+is taken when it offers. Its \code{data} goes to \code{wdat} and its
+\code{strb} to \code{wsel}. Then stage 2.
+\item \textbf{2, offered.} \code{cyc} and \code{stb} are high. A cycle
+with \code{stall} low is the one the peripheral takes the request in,
+and the stage moves to 3.
+\item \textbf{3, taken.} \code{cyc} alone is high until \code{ack}.
+An \code{ack} in the cycle of the take counts too. On \code{ack} the
+stage moves to 4, and a read keeps the word on \code{rdat} in
+\code{wdat}.
+\item \textbf{4, answering.} A read sends a beat on \code{bus\_r}: the
+identifier, \code{wdat}, \code{Okay}, and \code{last} high only on
+the burst's last word. If words remain the stage returns to 2 at the
+next word address with \code{left} one lower; otherwise to 0.
+\item A write is answered once, after its last word. Each
+acknowledgement before that sends the bridge back to stage 1 for the
+next beat, at the next word address. The \code{Answer} of \code{Okay}
+on \code{bus\_ans} is sent from stage 4, and each answer waits for room on
+its channel.
+\item \code{we} is high unless the request is a read. \code{adr},
+\code{dat} and \code{sel} are \code{wadr}, \code{wdat} and \code{wsel}.
+Every line depends only on the bridge's registers, so nothing
+combinational passes from the link to the lines or back.
+\item The Wishbone address is a word address: the burst's byte address
+shifted down by two and cut to \code{AW} bits. A peripheral decoded at
+a region of the link's map sees offsets from the region's base, as
+long as the base lies above those bits. A write at
+\code{0x4000\_0010} lands in word 4.
+\end{itemize}
+
+\subsection*{Verification}
+
+\begin{itemize}
+\item Two tests in \code{bus::wb}, in \code{//lib/parts:parts\_test},
+run the bridge on a link, behind \code{AxiHost} and \code{AxiPer},
+against \code{WbMem}, a simulated Wishbone memory. The first,
+\code{a\_read\_gets\_what\_a\_write\_put}, writes and reads one word.
+The second, \code{slow\_answers\_and\_a\_calibration}, writes and
+reads back 24 words at pseudorandom addresses, against a memory that
+stalls for its first 40 cycles and answers after 5.
+\item \code{ex\_axi\_wb} writes three words and reads them back, against
+a memory that stalls for 10 cycles and answers after 2. The build
+simulates the netlist of \code{AxiWb<32, 2, 28>} against that run under
+nvc and Verilator: \code{//docs:axi\_wb\_sim\_axi\_wb\_tb\_test} and
+\code{//docs:axi\_wb\_vsim\_test}.
+\end{itemize}
+
+\subsection*{Used by}
+
+The example \code{ex\_axi\_wb}, and
+\code{a\_burst\_is\_served\_word\_by\_word} in the module's own
+tests, which writes sixteen words and reads them back as one burst
+each way. Sixteen is what \code{LineFetch} issues by default.
+Until issue~\#1023 put the board's DDR3 memory behind the controller's
+own AXI4 port, \code{Ddr3Per} held this bridge in front of a Wishbone
+wrapper of the controller.
+That test asserts the COUNT of beats and not only their values: a
+bridge that answered one beat would return the right word in it, so
+checking the words alone passes on the fault.
+
+\subsection*{Impact of the single-beat bridge (prior to issue 471)}
+
+This behavior is documented here because joining a burst-issuing client
+to a peripheral that returns fewer beats than requested risks protocol
+failure that neither engine can detect.
+
+\code{LineFetch} decides a burst is finished by its own beat counter
+and never reads the returned beat's \code{last}. Against a bridge
+that answered one beat it took that word and waited for the rest for
+ever, holding \code{running} high: sixty four words became one, and
+the run did not end.
+
+\code{LineStore} fared worse and quietly. A write burst is finished
+by its response, so the bridge answered after one beat while the rest
+of the burst sat in the channel: nine words of sixty four landed and
+the rest of memory was left as it was, with nothing to say why.
+
+\subsection*{Limits}
+
+It serves a burst one request at a time rather than as a pipelined
+run of several. That removes a link round trip per word and not the
+word itself: a burst of sixteen is sixteen Wishbone request and
+acknowledge handshakes, one after another. Issuing several requests
+before their acknowledgements would remove more, and wants somewhere
+to hold answers the link is not ready for, which the bridge does not
+have. It always answers \code{Okay}, and it reads no
+error line from the peripheral. Words are 32 bits with four lanes.
+Address bits above the \code{AW} bits it keeps are dropped.

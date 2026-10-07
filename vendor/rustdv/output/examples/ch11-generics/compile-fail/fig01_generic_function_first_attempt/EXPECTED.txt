@@ -1,0 +1,12 @@
+error[E0369]: binary operation `>` cannot be applied to type `&T`
+ --> src/main.rs:4:17
+  |
+4 |         if item > largest {
+  |            ---- ^ ------- &T
+  |            |
+  |            &T
+  |
+help: consider restricting type parameter `T`
+  |
+1 | fn largest<T: std::cmp::PartialOrd>(list: &[T]) -> &T {
+  |             ++++++++++++++++++++++

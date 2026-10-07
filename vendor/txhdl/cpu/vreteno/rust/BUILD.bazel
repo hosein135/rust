@@ -1,0 +1,1225 @@
+# SPDX-License-Identifier: Apache-2.0
+# Rust compiled for Vreteno itself: a program that runs on the core
+# rather than on the machine the simulation runs on.
+#
+# The toolchain is hermetic. `MODULE.bazel` names the bare-metal
+# RISC-V target beside the host's, so the build fetches that target's
+# standard library by checksum as it fetches everything else, and
+# nothing is installed on the machine. The linker is `rust-lld`, which
+# comes with the toolchain, so there is no cross binutils either.
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+load(":defs.bzl", "vreteno_elf", "vreteno_fastboot", "vreteno_flat", "vreteno_image")
+
+# The icosahedron's lists, which board_test also times Razboj drawing,
+# flat and in tiles (issue 1255).
+exports_files(["ico_list.rs"])
+
+package(default_visibility = ["//visibility:public"])
+
+# The machine Vreteno is, for Bazel's toolchain resolution.
+platform(
+    name = "vreteno",
+    constraint_values = [
+        "@platforms//cpu:riscv32",
+        "@platforms//os:none",
+    ],
+)
+
+# The flags every program for this core is built with. The core is
+# RV32IMAC, and programs are built for RV32IMC, the target the ruleset
+# maps, which runs on it as it is. Optimising for size is not a
+# preference: the instruction memory is 4 KiB, and a debug assertion
+# pulls in `core`'s panic formatting, which does not fit.
+VRETENO_FLAGS = [
+    "-Copt-level=z",
+    "-Cdebug-assertions=no",
+    "-Coverflow-checks=no",
+    "-Cpanic=abort",
+    "-Clinker=rust-lld",
+    "-Clink-arg=-Tcpu/vreteno/rust/vreteno.ld",
+]
+
+# The same, for a program that is loaded into the board's memory and
+# runs there rather than living in the netlist.
+VRETENO_RAM_FLAGS = [
+    "-Copt-level=z",
+    "-Cdebug-assertions=no",
+    "-Coverflow-checks=no",
+    "-Cpanic=abort",
+    "-Clinker=rust-lld",
+    "-Clink-arg=-Tcpu/vreteno/rust/vreteno_ram.ld",
+]
+
+rust_binary(
+    name = "hello",
+    srcs = ["hello.rs"],
+    compile_data = ["vreteno.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_FLAGS,
+    # Built through the transition below, not for this machine.
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/hal:vreteno_hal"],
+)
+
+# The image of that program, as Rust source: the instruction words and
+# the bytes the data memory starts with.
+vreteno_image(
+    name = "hello_image",
+    platform = ":vreteno",
+    program = ":hello",
+)
+
+rust_library(
+    name = "hello_program",
+    srcs = [":hello_image"],
+    crate_name = "hello_program",
+    edition = "2021",
+)
+
+# An icosahedron, worked out on the core and written into memory as a
+# display list for Razboj to fill. Built exactly as the greeting is.
+rust_binary(
+    name = "ico",
+    srcs = ["ico.rs"],
+    compile_data = ["vreteno.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/regs:vreteno_regs"],
+)
+
+vreteno_image(
+    name = "ico_image",
+    platform = ":vreteno",
+    program = ":ico",
+)
+
+rust_library(
+    name = "ico_program",
+    srcs = [":ico_image"],
+    crate_name = "ico_program",
+    edition = "2021",
+)
+
+# A test of the board's DDR3 memory, run by the core: words written
+# across the memory's region, read back, and the verdict on the serial
+# port. Built exactly as the greeting is.
+rust_binary(
+    name = "ddr3",
+    srcs = ["ddr3.rs"],
+    compile_data = ["vreteno.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/regs:vreteno_regs"],
+)
+
+vreteno_image(
+    name = "ddr3_image",
+    platform = ":vreteno",
+    program = ":ddr3",
+)
+
+rust_library(
+    name = "ddr3_program",
+    srcs = [":ddr3_image"],
+    crate_name = "ddr3_program",
+    edition = "2021",
+)
+
+# A frame received by the Ethernet port, read back out of DDR3 by the
+# core, as the Zephyr driver reads one (issue 151). Built exactly as the
+# greeting is.
+rust_binary(
+    name = "ethrx",
+    srcs = ["ethrx.rs"],
+    compile_data = ["vreteno.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/regs:vreteno_regs"],
+)
+
+vreteno_image(
+    name = "ethrx_image",
+    platform = ":vreteno",
+    program = ":ethrx",
+)
+
+rust_library(
+    name = "ethrx_program",
+    srcs = [":ethrx_image"],
+    crate_name = "ethrx_program",
+    edition = "2021",
+)
+
+# A frame the core writes into DDR3 and the Ethernet port fetches onto
+# the wire (issue 151). Built exactly as the greeting is.
+rust_binary(
+    name = "ethtx",
+    srcs = ["ethtx.rs"],
+    compile_data = ["vreteno.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/regs:vreteno_regs"],
+)
+
+vreteno_image(
+    name = "ethtx_image",
+    platform = ":vreteno",
+    program = ":ethtx",
+)
+
+rust_library(
+    name = "ethtx_program",
+    srcs = [":ethtx_image"],
+    crate_name = "ethtx_program",
+    edition = "2021",
+)
+
+# The entropy source read by the core: four words taken and compared,
+# and the verdict on the serial port. Built exactly as the greeting is.
+rust_binary(
+    name = "trng",
+    srcs = ["trng.rs"],
+    compile_data = ["vreteno.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_FLAGS,
+    tags = ["manual"],
+    deps = [
+        "//cpu/vreteno/rust/hal:vreteno_hal",
+        "//cpu/vreteno/rust/regs:vreteno_regs",
+    ],
+)
+
+vreteno_image(
+    name = "trng_image",
+    platform = ":vreteno",
+    program = ":trng",
+)
+
+rust_library(
+    name = "trng_program",
+    srcs = [":trng_image"],
+    crate_name = "trng_program",
+    edition = "2021",
+)
+
+# The JL2121's RGMII delay bits, read from page 3336 the way JLSemi's
+# driver does (issue 869): the page select written, the register read,
+# the page written back. The only writes to the PHY in the tree.
+# Built for the simulation's boot memory, for `board_test`, and for
+# the loader.
+rust_binary(
+    name = "phydelay",
+    srcs = ["phydelay.rs"],
+    compile_data = ["vreteno.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_FLAGS,
+    tags = ["manual"],
+    deps = [
+        "//cpu/vreteno/rust/hal:vreteno_hal",
+        "//cpu/vreteno/rust/regs:vreteno_regs",
+    ],
+)
+
+vreteno_image(
+    name = "phydelay_image",
+    platform = ":vreteno",
+    program = ":phydelay",
+)
+
+rust_library(
+    name = "phydelay_program",
+    srcs = [":phydelay_image"],
+    crate_name = "phydelay_program",
+    edition = "2021",
+)
+
+rust_binary(
+    name = "phydelay_ram",
+    srcs = ["phydelay.rs"],
+    compile_data = ["vreteno_ram.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS,
+    tags = ["manual"],
+    deps = [
+        "//cpu/vreteno/rust/hal:vreteno_hal",
+        "//cpu/vreteno/rust/regs:vreteno_regs",
+    ],
+)
+
+vreteno_flat(
+    name = "phydelay_ram_bin",
+    platform = ":vreteno",
+    program = ":phydelay_ram",
+)
+
+# The Ethernet PHY's management registers read by the core over MDIO
+# (issue 864): the first address that answers, and its 32 registers.
+# Nothing is written to the PHY. Built for the simulation's boot
+# memory, for `board_test`, and for the loader.
+rust_binary(
+    name = "phyregs",
+    srcs = ["phyregs.rs"],
+    compile_data = ["vreteno.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_FLAGS,
+    tags = ["manual"],
+    deps = [
+        "//cpu/vreteno/rust/hal:vreteno_hal",
+        "//cpu/vreteno/rust/regs:vreteno_regs",
+    ],
+)
+
+vreteno_image(
+    name = "phyregs_image",
+    platform = ":vreteno",
+    program = ":phyregs",
+)
+
+rust_library(
+    name = "phyregs_program",
+    srcs = [":phyregs_image"],
+    crate_name = "phyregs_program",
+    edition = "2021",
+)
+
+rust_binary(
+    name = "phyregs_ram",
+    srcs = ["phyregs.rs"],
+    compile_data = ["vreteno_ram.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS,
+    tags = ["manual"],
+    deps = [
+        "//cpu/vreteno/rust/hal:vreteno_hal",
+        "//cpu/vreteno/rust/regs:vreteno_regs",
+    ],
+)
+
+vreteno_flat(
+    name = "phyregs_ram_bin",
+    platform = ":vreteno",
+    program = ":phyregs_ram",
+)
+
+# The card in the SD slot read by the core (issue 153): brought up,
+# its identity and address printed, and block 0 read on one line and
+# on four. Nothing is written to the card. Built for the simulation's
+# boot memory, for `board_test`, and for the loader.
+rust_binary(
+    name = "sdprobe",
+    srcs = ["sdprobe.rs"],
+    compile_data = ["vreteno.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_FLAGS,
+    tags = ["manual"],
+    deps = [
+        "//cpu/vreteno/rust/hal:vreteno_hal",
+        "//cpu/vreteno/rust/regs:vreteno_regs",
+    ],
+)
+
+vreteno_image(
+    name = "sdprobe_image",
+    platform = ":vreteno",
+    program = ":sdprobe",
+)
+
+rust_library(
+    name = "sdprobe_program",
+    srcs = [":sdprobe_image"],
+    crate_name = "sdprobe_program",
+    edition = "2021",
+)
+
+rust_binary(
+    name = "sdprobe_ram",
+    srcs = ["sdprobe.rs"],
+    compile_data = ["vreteno_ram.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS,
+    tags = ["manual"],
+    deps = [
+        "//cpu/vreteno/rust/hal:vreteno_hal",
+        "//cpu/vreteno/rust/regs:vreteno_regs",
+    ],
+)
+
+vreteno_flat(
+    name = "sdprobe_ram_bin",
+    platform = ":vreteno",
+    program = ":sdprobe_ram",
+)
+
+# A load from a hole in the board's map, reported by the HAL's
+# `trap::say_faults` (#1214). Built for the boot memory, for
+# `board_test`.
+rust_binary(
+    name = "faultsay",
+    srcs = ["faultsay.rs"],
+    compile_data = ["vreteno.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/hal:vreteno_hal"],
+)
+
+vreteno_image(
+    name = "faultsay_image",
+    platform = ":vreteno",
+    program = ":faultsay",
+)
+
+rust_library(
+    name = "faultsay_program",
+    srcs = [":faultsay_image"],
+    crate_name = "faultsay_program",
+    edition = "2021",
+)
+
+# The configuration flash read by the core (issue 312): its identity
+# over the master, write enable refused, and the bitstream's sync word
+# found through the window. Nothing is written to the chip. Built for
+# the simulation's boot memory, for `board_test`, and below for the
+# loader.
+rust_binary(
+    name = "flashid",
+    srcs = ["flashid.rs"],
+    compile_data = ["vreteno.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_FLAGS,
+    tags = ["manual"],
+    deps = [
+        "//cpu/vreteno/rust/hal:vreteno_hal",
+        "//cpu/vreteno/rust/regs:vreteno_regs",
+    ],
+)
+
+vreteno_image(
+    name = "flashid_image",
+    platform = ":vreteno",
+    program = ":flashid",
+)
+
+rust_library(
+    name = "flashid_program",
+    srcs = [":flashid_image"],
+    crate_name = "flashid_program",
+    edition = "2021",
+)
+
+rust_binary(
+    name = "flashid_ram",
+    srcs = ["flashid.rs"],
+    compile_data = ["vreteno_ram.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS,
+    tags = ["manual"],
+    deps = [
+        "//cpu/vreteno/rust/hal:vreteno_hal",
+        "//cpu/vreteno/rust/regs:vreteno_regs",
+    ],
+)
+
+vreteno_flat(
+    name = "flashid_ram_bin",
+    platform = ":vreteno",
+    program = ":flashid_ram",
+)
+
+# The cycle counter read twice back to back, from the data memory, and
+# the difference printed eight times (issue 848): #807 shown on the
+# board. Built for the simulation's boot memory, for `board_test`,
+# which pins the difference, and below for the loader.
+rust_binary(
+    name = "steps",
+    srcs = ["steps.rs"],
+    compile_data = ["vreteno.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/hal:vreteno_hal"],
+)
+
+vreteno_image(
+    name = "steps_image",
+    platform = ":vreteno",
+    program = ":steps",
+)
+
+rust_library(
+    name = "steps_program",
+    srcs = [":steps_image"],
+    crate_name = "steps_program",
+    edition = "2021",
+)
+
+rust_binary(
+    name = "steps_ram",
+    srcs = ["steps.rs"],
+    compile_data = ["vreteno_ram.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/hal:vreteno_hal"],
+)
+
+vreteno_flat(
+    name = "steps_ram_bin",
+    platform = ":vreteno",
+    program = ":steps_ram",
+)
+
+
+# The path into DDR3 timed by the core (issue 1023): sixteen loads and
+# sixteen stores, from the data memory, against the DDR3 and against the
+# data memory. Built into the boot memory for //cpu/vreteno:board_test,
+# which checks it says what the simulated board's memory gives, and
+# below for the loader, which is how it runs on the board.
+rust_binary(
+    name = "ddr3bw",
+    srcs = ["ddr3bw.rs"],
+    compile_data = ["vreteno.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/hal:vreteno_hal"],
+)
+
+vreteno_image(
+    name = "ddr3bw_image",
+    platform = ":vreteno",
+    program = ":ddr3bw",
+)
+
+rust_library(
+    name = "ddr3bw_program",
+    srcs = [":ddr3bw_image"],
+    crate_name = "ddr3bw_program",
+    edition = "2021",
+)
+
+rust_binary(
+    name = "ddr3bw_ram",
+    srcs = ["ddr3bw.rs"],
+    compile_data = ["vreteno_ram.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/hal:vreteno_hal"],
+)
+
+vreteno_flat(
+    name = "ddr3bw_ram_bin",
+    platform = ":vreteno",
+    program = ":ddr3bw_ram",
+)
+
+# The instruction cache timed by the core (issue 1320): icache_test's
+# loop from the data memory and from the DDR3, cold and warm. Built into
+# the boot memory for //cpu/vreteno:board_test, and below for the
+# loader, which is how it runs on the board.
+rust_binary(
+    name = "cpi",
+    srcs = ["cpi.rs"],
+    compile_data = ["vreteno.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/hal:vreteno_hal"],
+)
+
+vreteno_image(
+    name = "cpi_image",
+    platform = ":vreteno",
+    program = ":cpi",
+)
+
+rust_library(
+    name = "cpi_program",
+    srcs = [":cpi_image"],
+    crate_name = "cpi_program",
+    edition = "2021",
+)
+
+rust_binary(
+    name = "cpi_ram",
+    srcs = ["cpi.rs"],
+    compile_data = ["vreteno_ram.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/hal:vreteno_hal"],
+)
+
+vreteno_flat(
+    name = "cpi_ram_bin",
+    platform = ":vreteno",
+    program = ":cpi_ram",
+)
+
+# EGL's machine on the board, through the board's model (issue 996):
+# a rectangle drawn, shown and waited for as a swap does, in the boot
+# memory, which `board_test` runs.
+rust_binary(
+    name = "eglboard",
+    srcs = ["eglboard.rs"],
+    compile_data = ["vreteno.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_FLAGS,
+    tags = ["manual"],
+    deps = [
+        "//cpu/vreteno/rust/hal:vreteno_hal",
+        "//gles:machine",
+        "//gles:vreteno",
+    ],
+)
+
+vreteno_image(
+    name = "eglboard_image",
+    platform = ":vreteno",
+    program = ":eglboard",
+)
+
+rust_library(
+    name = "eglboard_program",
+    srcs = [":eglboard_image"],
+    crate_name = "eglboard_program",
+    edition = "2021",
+)
+
+# The same program sent down the wire, for the flagship (issue 996).
+rust_binary(
+    name = "eglboard_ram",
+    srcs = ["eglboard.rs"],
+    compile_data = ["vreteno_ram.ld"],
+    crate_root = "eglboard.rs",
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS,
+    tags = ["manual"],
+    deps = [
+        "//cpu/vreteno/rust/hal:vreteno_hal",
+        "//gles:machine",
+        "//gles:vreteno",
+    ],
+)
+
+vreteno_flat(
+    name = "eglboard_ram_bin",
+    platform = ":vreteno",
+    program = ":eglboard_ram",
+)
+
+# The DDR3's writes, reads and strobes, tested by a program the loader
+# sends, so that the flagship runs it with no second bitstream (issue
+# 1174). Built as a boot image too, which `board_test` runs through
+# the controller's model.
+rust_binary(
+    name = "ddr3ram",
+    srcs = ["ddr3ram.rs"],
+    compile_data = ["vreteno.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/hal:vreteno_hal"],
+)
+
+vreteno_image(
+    name = "ddr3ram_image",
+    platform = ":vreteno",
+    program = ":ddr3ram",
+)
+
+rust_library(
+    name = "ddr3ram_program",
+    srcs = [":ddr3ram_image"],
+    crate_name = "ddr3ram_program",
+    edition = "2021",
+)
+
+rust_binary(
+    name = "ddr3ram_ram",
+    srcs = ["ddr3ram.rs"],
+    compile_data = ["vreteno_ram.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/hal:vreteno_hal"],
+)
+
+vreteno_flat(
+    name = "ddr3ram_ram_bin",
+    platform = ":vreteno",
+    program = ":ddr3ram_ram",
+)
+
+# The same test, built for the board: `--cfg=board_run` adds the header
+# line and a dot every ten seconds around the test, which a simulation
+# would pay for in simulated time and which the tests that read the
+# whole of a run's output would have to state.
+rust_binary(
+    name = "ddr3_board",
+    srcs = ["ddr3.rs"],
+    compile_data = ["vreteno.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_FLAGS + ["--cfg=board_run"],
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/regs:vreteno_regs"],
+)
+
+vreteno_image(
+    name = "ddr3_board_image",
+    platform = ":vreteno",
+    program = ":ddr3_board",
+)
+
+rust_library(
+    name = "ddr3_board_program",
+    srcs = [":ddr3_board_image"],
+    crate_name = "ddr3_board_program",
+    edition = "2021",
+)
+
+# A program that breathes an LED with the pulse width modulator, for
+# the board. Built for the board only: there is nothing for a
+# simulation to see in a light that fades over two seconds.
+rust_binary(
+    name = "fade",
+    srcs = ["fade.rs"],
+    compile_data = ["vreteno.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/regs:vreteno_regs"],
+)
+
+vreteno_image(
+    name = "fade_image",
+    platform = ":vreteno",
+    program = ":fade",
+)
+
+rust_library(
+    name = "fade_program",
+    srcs = [":fade_image"],
+    crate_name = "fade_program",
+    edition = "2021",
+)
+
+# For gdb to load through OpenOCD and stop at a breakpoint (issue 872):
+# the sum of 0 to 9, kept in `SUM` and passed to `reached`. Linked for
+# the DDR3, and given as an ELF, since gdb's `load` reads one.
+rust_binary(
+    name = "gdbprobe",
+    srcs = ["gdbprobe.rs"],
+    compile_data = ["vreteno_ram.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/hal:vreteno_hal"],
+)
+
+vreteno_elf(
+    name = "gdbprobe_elf",
+    platform = ":vreteno",
+    program = ":gdbprobe",
+)
+
+vreteno_flat(
+    name = "gdbprobe_ram_bin",
+    platform = ":vreteno",
+    program = ":gdbprobe",
+)
+
+# The greeting again, linked for the memory the loader puts a program
+# into, and flattened into the image the sender streams. This is what
+# the loop looks like once nothing has to be resynthesised: build this,
+# send it, watch it run.
+rust_binary(
+    name = "hello_ram",
+    srcs = ["hello.rs"],
+    compile_data = ["vreteno_ram.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/hal:vreteno_hal"],
+)
+
+vreteno_flat(
+    name = "hello_ram_bin",
+    platform = ":vreteno",
+    program = ":hello_ram",
+)
+
+# The same, padded for stock `fastboot boot`, which refuses a file
+# shorter than a boot image header (issue 799).
+vreteno_fastboot(
+    name = "hello_fastboot",
+    flat = ":hello_ram_bin",
+)
+
+# The entropy source measured, for the loader: the test above, then
+# 4096 raw words and 4096 words of the extractor's output up the serial
+# line, which is what a host estimates the source's bias and entropy
+# from (issue 458). Linked for the memory and flattened, since the
+# measurement is a program sent down the wire and not a bitstream.
+rust_binary(
+    name = "trng_ram",
+    srcs = ["trng.rs"],
+    compile_data = ["vreteno_ram.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS + ["--cfg=board_run"],
+    tags = ["manual"],
+    deps = [
+        "//cpu/vreteno/rust/hal:vreteno_hal",
+        "//cpu/vreteno/rust/regs:vreteno_regs",
+    ],
+)
+
+vreteno_flat(
+    name = "trng_ram_bin",
+    platform = ":vreteno",
+    program = ":trng_ram",
+)
+
+# A turning icosahedron on the board's HDMI output, drawn by Razboj,
+# double buffered through the scanout, with the logo in a corner
+# (issue 986). Linked for the memory rather than the boot memory, and
+# flattened, so the loader sends it down the wire: the picture changes
+# in a second and the bitstream underneath it does not move.
+rust_binary(
+    name = "ico_hdmi",
+    srcs = [
+        "ico_hdmi.rs",
+        "ico_list.rs",
+    ],
+    compile_data = ["vreteno_ram.ld"],
+    crate_root = "ico_hdmi.rs",
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS,
+    tags = ["manual"],
+    deps = [
+        "//cpu/vreteno/rust/hal:vreteno_hal",
+        "//cpu/vreteno/rust/regs:vreteno_regs",
+        "//lib/logo:txhdl_logo",
+    ],
+)
+
+vreteno_flat(
+    name = "ico_hdmi_bin",
+    platform = ":vreteno",
+    program = ":ico_hdmi",
+)
+
+# The same program with its lists written through the GL ES library
+# (issue 995), sent down the wire the same way.
+rust_binary(
+    name = "ico_gl_hdmi",
+    srcs = [
+        "ico_gl.rs",
+        "ico_hdmi.rs",
+        "ico_list.rs",
+    ],
+    compile_data = ["vreteno_ram.ld"],
+    crate_root = "ico_hdmi.rs",
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS + ["--cfg=gl"],
+    tags = ["manual"],
+    deps = [
+        "//cpu/vreteno/rust/hal:vreteno_hal",
+        "//cpu/vreteno/rust/regs:vreteno_regs",
+        "//gles",
+        "//gpu/razboj:tile",
+        "//lib/logo:txhdl_logo",
+    ],
+)
+
+vreteno_flat(
+    name = "ico_gl_hdmi_bin",
+    platform = ":vreteno",
+    program = ":ico_gl_hdmi",
+)
+
+# The icosahedron's display lists (issue 986), the part of ico_hdmi
+# with no hardware in it, rendered on the host through Razboj's model:
+# the faces tile the silhouette once, they are the front faces, and
+# clearing only last time's box leaves each frame as a whole clear
+# would.
+rust_test(
+    name = "ico_list_test",
+    srcs = [
+        "ico_list.rs",
+        "ico_list_test.rs",
+    ],
+    crate_root = "ico_list_test.rs",
+    edition = "2021",
+    deps = [
+        "//gpu/razboj",
+        "//lib/logo:txhdl_logo",
+    ],
+)
+
+# The same icosahedron through the GL ES library (issue 995), drawn on
+# the host through Razboj's model and held to the hand-written one:
+# the same faces, their colours within 2, and the pictures differing
+# only on edges.
+rust_test(
+    name = "ico_gl_test",
+    srcs = [
+        "ico_gl.rs",
+        "ico_gl_test.rs",
+        "ico_list.rs",
+    ],
+    crate_root = "ico_gl_test.rs",
+    edition = "2021",
+    deps = [
+        "//gles",
+        "//gpu/razboj",
+    ],
+)
+
+# One frame of ico_hdmi worked out on the host, as a PPM: the list
+# rendered through Razboj's model with the logo laid in, to hold a board
+# recording against (issues 986 and 1213).
+rust_binary(
+    name = "ico_frame",
+    srcs = [
+        "ico_frame.rs",
+        "ico_list.rs",
+    ],
+    crate_root = "ico_frame.rs",
+    edition = "2021",
+    deps = [
+        "//gpu/razboj",
+        "//lib/logo:txhdl_logo",
+    ],
+)
+
+# The video scanout under load on the flagship (issue 151): a frame
+# painted into the DDR3 and shown from there, and the scanout's
+# underflow bit read on an idle bus and then while the core copies in
+# the DDR3 and the Ethernet port sends. Sent down the wire like the
+# icosahedron.
+rust_binary(
+    name = "scanprobe_ram",
+    srcs = ["scanprobe.rs"],
+    compile_data = ["vreteno_ram.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS,
+    tags = ["manual"],
+    deps = [
+        "//cpu/vreteno/rust/hal:vreteno_hal",
+        "//cpu/vreteno/rust/regs:vreteno_regs",
+        "//lib/logo:txhdl_logo",
+    ],
+)
+
+vreteno_flat(
+    name = "scanprobe_ram_bin",
+    platform = ":vreteno",
+    program = ":scanprobe_ram",
+)
+
+# What a full frame costs the core to update (issue 151): the video
+# peripheral's framebuffer painted a register write a pixel, against a
+# frame painted into the DDR3 and shown through the scanout, both timed
+# with the cycle counter. Sent down the wire like the icosahedron.
+rust_binary(
+    name = "fbtime_ram",
+    srcs = ["fbtime.rs"],
+    compile_data = ["vreteno_ram.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/hal:vreteno_hal"],
+)
+
+vreteno_flat(
+    name = "fbtime_ram_bin",
+    platform = ":vreteno",
+    program = ":fbtime_ram",
+)
+
+# Razboj on the flagship (issue 1169): a list of a backdrop and three
+# shapes written into the DDR3, the doorbell rung, the pixels read back,
+# and the picture shown through the scanout. Sent down the wire like the
+# icosahedron. Not run on the simulated board: its full-screen clear is
+# over a million cycles there, and board_test's
+# razboj_draws_a_list_rung_on_the_doorbell covers the same path.
+rust_binary(
+    name = "razprobe_ram",
+    srcs = [
+        "razprobe.rs",
+        "razprobe_list.rs",
+    ],
+    compile_data = ["vreteno_ram.ld"],
+    crate_root = "razprobe.rs",
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS,
+    tags = ["manual"],
+    deps = [
+        "//cpu/vreteno/rust/hal:vreteno_hal",
+        "//cpu/vreteno/rust/regs:vreteno_regs",
+    ],
+)
+
+vreteno_flat(
+    name = "razprobe_ram_bin",
+    platform = ":vreteno",
+    program = ":razprobe_ram",
+)
+
+# Gouraud shading on the board (issue 989): a shaded triangle drawn by
+# Razboj, and every pixel of the screen read back by the core and held
+# to what the list says, worked out as Razboj's model works it out.
+rust_binary(
+    name = "shadeprobe_ram",
+    srcs = [
+        "shadeprobe.rs",
+        "shadeprobe_list.rs",
+    ],
+    compile_data = ["vreteno_ram.ld"],
+    crate_root = "shadeprobe.rs",
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/hal:vreteno_hal"],
+)
+
+vreteno_flat(
+    name = "shadeprobe_ram_bin",
+    platform = ":vreteno",
+    program = ":shadeprobe_ram",
+)
+
+# The list shadeprobe writes, against Razboj's encoder and its model.
+rust_test(
+    name = "shadeprobe_list_test",
+    srcs = [
+        "shadeprobe_list.rs",
+        "shadeprobe_list_test.rs",
+    ],
+    crate_root = "shadeprobe_list_test.rs",
+    edition = "2021",
+    deps = ["//gpu/razboj"],
+)
+
+# The list razprobe writes, rendered on the host through Razboj's
+# model: every pixel the program checks holds what it expects there.
+rust_test(
+    name = "razprobe_list_test",
+    srcs = [
+        "razprobe_list.rs",
+        "razprobe_list_test.rs",
+    ],
+    crate_root = "razprobe_list_test.rs",
+    edition = "2021",
+    deps = ["//gpu/razboj"],
+)
+
+# A word to the remote peripheral and back: the last hop of #335 seen
+# from the core, with a program on another machine answering the
+# frames. Sent down the wire like the icosahedron.
+rust_binary(
+    name = "remote_ram",
+    srcs = ["remote.rs"],
+    compile_data = ["vreteno_ram.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/hal:vreteno_hal"],
+)
+
+vreteno_flat(
+    name = "remote_ram_bin",
+    platform = ":vreteno",
+    program = ":remote_ram",
+)
+
+# The loader that lives in the boot memory and takes a program off the
+# serial port. Built for the board and for the runs that check it.
+rust_binary(
+    name = "boot",
+    srcs = ["boot.rs"],
+    compile_data = ["vreteno.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/regs:vreteno_regs"],
+)
+
+vreteno_image(
+    name = "boot_image",
+    platform = ":vreteno",
+    program = ":boot",
+)
+
+rust_library(
+    name = "boot_program",
+    srcs = [":boot_image"],
+    crate_name = "boot_program",
+    edition = "2021",
+)
+
+# Input by interrupt: the serial port's receive interrupt through the
+# interrupt controller, one interrupt per byte, run on the board's
+# design. Built exactly as the greeting is.
+rust_binary(
+    name = "irq",
+    srcs = ["irq.rs"],
+    compile_data = ["vreteno.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/hal:vreteno_hal"],
+)
+
+vreteno_image(
+    name = "irq_image",
+    platform = ":vreteno",
+    program = ":irq",
+)
+
+rust_library(
+    name = "irq_program",
+    srcs = [":irq_image"],
+    crate_name = "irq_program",
+    edition = "2021",
+)
+
+# The trap dispatcher at work: an environment call handled and resumed
+# past, and a timer interrupt taken, through the crate rather than a
+# vector written by hand. Built exactly as the greeting is.
+rust_binary(
+    name = "traps",
+    srcs = ["traps.rs"],
+    compile_data = ["vreteno.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/hal:vreteno_hal"],
+)
+
+vreteno_image(
+    name = "traps_image",
+    platform = ":vreteno",
+    program = ":traps",
+)
+
+rust_library(
+    name = "traps_program",
+    srcs = [":traps_image"],
+    crate_name = "traps_program",
+    edition = "2021",
+)
+
+# The programs whose peripheral addresses `//cpu/vreteno:board_programs_test`
+# holds to the board's map. They are built `#[cfg(board_run)]`, so
+# nothing else compiles those constants, and a wrong one shows only
+# when it runs, as a bus error trap (issues 415 and 417).
+filegroup(
+    name = "addressed_sources",
+    srcs = [
+        "boot.rs",
+        "ddr3.rs",
+        "fade.rs",
+    ],
+)
+
+# What the document lists: the program as written, and the script
+# that says where each of its sections may go.
+filegroup(
+    name = "sources",
+    srcs = [
+        "ico.rs",
+        "ico_hdmi.rs",
+        "ico_list.rs",
+        "remote.rs",
+        "hello.rs",
+        "irq.rs",
+        "traps.rs",
+        "vreteno.ld",
+        "vreteno_ram.ld",
+    ],
+)
+
+# The two Ethernet programs above, linked for the memory the loader puts
+# a program into and flattened, so that each is sent down the wire to a
+# board rather than built into a bitstream: the receive path and the
+# transmit path of the flagship's port, each checked on its own (#786).
+rust_binary(
+    name = "ethrx_ram",
+    srcs = ["ethrx.rs"],
+    compile_data = ["vreteno_ram.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS,
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/regs:vreteno_regs"],
+)
+
+vreteno_flat(
+    name = "ethrx_ram_bin",
+    platform = ":vreteno",
+    program = ":ethrx_ram",
+)
+
+rust_binary(
+    name = "ethtx_ram",
+    srcs = ["ethtx.rs"],
+    compile_data = ["vreteno_ram.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS + ["--cfg=board_run"],
+    tags = ["manual"],
+    deps = ["//cpu/vreteno/rust/regs:vreteno_regs"],
+)
+
+vreteno_flat(
+    name = "ethtx_ram_bin",
+    platform = ":vreteno",
+    program = ":ethtx_ram",
+)
+
+# The Ethernet port's throughput, through the slots and against the
+# core's own copy of each frame, for the loader (#1038).
+rust_binary(
+    name = "ethperf_ram",
+    srcs = ["ethperf.rs"],
+    compile_data = ["vreteno_ram.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS,
+    tags = ["manual"],
+    deps = [
+        "//cpu/vreteno/rust/hal:vreteno_hal",
+        "//cpu/vreteno/rust/regs:vreteno_regs",
+    ],
+)
+
+vreteno_flat(
+    name = "ethperf_ram_bin",
+    platform = ":vreteno",
+    program = ":ethperf_ram",
+)
+
+# The Ethernet port's receive interrupt taken by the core, for the
+# loader (#786).
+rust_binary(
+    name = "ethirq_ram",
+    srcs = ["ethirq.rs"],
+    compile_data = ["vreteno_ram.ld"],
+    edition = "2021",
+    rustc_flags = VRETENO_RAM_FLAGS,
+    tags = ["manual"],
+    deps = [
+        "//cpu/vreteno/rust/hal:vreteno_hal",
+        "//cpu/vreteno/rust/regs:vreteno_regs",
+    ],
+)
+
+vreteno_flat(
+    name = "ethirq_ram_bin",
+    platform = ":vreteno",
+    program = ":ethirq_ram",
+)

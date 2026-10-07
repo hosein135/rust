@@ -1,0 +1,21 @@
+% SPDX-License-Identifier: Apache-2.0
+\section{An Asynchronous FIFO}
+\label{sec:x-fifo}
+
+The producer port is in one clock and the consumer port in another,
+and the two stand in a stated relation: the write clock has period 4,
+the read clock period 6 and phase 2, in ticks, the unit the design
+shares.
+The FIFO between them is \code{ChanCdc} from \code{//lib/parts}, providing
+the dedicated crossing path for transactions across asynchronous clock domains
+(issue 1017). A dual-clock storage array of four words is written on the
+producer clock and read on the consumer clock. Write and read pointers are
+Gray-coded and transferred to the destination domain through two-stage
+flip-flop synchronizers; Gray-code sequencing ensures safe domain transitions.
+The channel handshake enforces backpressure directly: the producer stalls
+when the channel is not ready, the consumer waits for valid data words, and
+the trace confirms that the producer idles whenever the FIFO fills.
+
+\lstinputlisting[caption={\code{ex\_fifo.rs}. Run with \code{bazel run //lib/examples:ex\_fifo}.},label={lst:x-fifo}]{lib/examples/ex_fifo.rs}
+
+\lstinputlisting[style=ascii,caption={What \code{ex\_fifo} printed when the build ran it.},label={lst:x-fifo-out}]{out_fifo.txt}

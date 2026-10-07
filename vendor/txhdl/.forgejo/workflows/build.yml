@@ -1,0 +1,272 @@
+# SPDX-License-Identifier: Apache-2.0
+# Build and test on every pull request, and the mainline branches at most
+# once an hour.
+#
+# Building everything is most of the test: every document target renders a PDF,
+# and a document that does not render fails the build.
+#
+# A push to dev or main no longer starts a run of its own: merges come in
+# bursts, and a run for each of them queued behind the others on the
+# runners. Instead the hourly run below builds each mainline branch whose
+# tip moved in the hour before it, once, at its newest commit; an hour with
+# no push builds nothing. A run by hand (workflow_dispatch) builds both
+# branches whatever their age.
+name: build
+
+on:
+  pull_request:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+jobs:
+  # Which of dev and main to build this hour, as a JSON list for the
+  # matrix below: a branch is listed when its tip's commit is under an
+  # hour old (a merge commit is dated when it is made), or always when the
+  # run was started by hand. Not run for pull requests.
+  pushed:
+    if: github.event_name != 'pull_request'
+    runs-on: docker
+    outputs:
+      branches: ${{ steps.which.outputs.branches }}
+    steps:
+      - name: Which mainline branches moved in the last hour
+        id: which
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          command -v git >/dev/null 2>&1 || {
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends ca-certificates git
+          }
+          url="https://ci:${GITHUB_TOKEN}@git.hdlfactory.com/${GITHUB_REPOSITORY}.git"
+          now=$(date +%s)
+          list=""
+          for b in dev main; do
+            d=$(mktemp -d)
+            git -C "$d" init -q
+            if git -C "$d" fetch -q --depth=1 "$url" "refs/heads/$b" 2>/dev/null; then
+              t=$(git -C "$d" log -1 --format=%ct FETCH_HEAD)
+              age=$((now - t))
+              echo "$b: tip $(git -C "$d" rev-parse --short FETCH_HEAD), ${age} s old"
+              # 3660 rather than 3600, so a cron run that starts a little
+              # late still covers the whole hour since the last one.
+              if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || [ "$age" -lt 3660 ]; then
+                list="${list:+$list,}\"$b\""
+              fi
+            fi
+          done
+          echo "branches=[$list]" >> "$GITHUB_OUTPUT"
+          echo "building: [$list]"
+
+  build:
+    needs: pushed
+    # Runs for a pull request (where `pushed` is skipped), and on the
+    # hourly or hand-started run when a branch is listed.
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || (needs.pushed.result == 'success' && needs.pushed.outputs.branches != '[]')) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The empty ref checks out what the pull request names.
+        branch: ${{ fromJSON(github.event_name == 'pull_request' && '[""]' || needs.pushed.outputs.branches) }}
+    runs-on: docker
+    steps:
+      # Every run records how long its steps took and how much Bazel ran
+      # (#940): each step below writes the time it ended, and the last
+      # step turns the marks into wall times. A step that `uses:` an
+      # action cannot write its own, so a mark follows it.
+      - name: Mark the start
+        run: echo "start $(date +%s)" > /tmp/ci-times
+
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          ref: ${{ matrix.branch }}
+
+      # On the hourly run GITHUB_SHA and GITHUB_REF_NAME name the default
+      # branch, not the one checked out, so the log and the record below
+      # name what was built from these.
+      - name: Mark the checkout
+        run: |
+          if [ -n "${{ matrix.branch }}" ]; then
+            echo "BUILD_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+            echo "BUILD_REF=${{ matrix.branch }}" >> "$GITHUB_ENV"
+          fi
+          echo "checkout $(date +%s)" >> /tmp/ci-times
+
+      # Nothing else is installed here. Every other tool this build needs
+      # comes from MODULE.bazel, TeX and the C and C++ toolchain among
+      # them (issue 782).
+      #
+      # Do not replace this with a setup-bazel action. Those resolve the
+      # `bazelbuild` organization through the API of the instance they run
+      # on, which here is git.hdlfactory.com, and fail with
+      # `GetUserByName ... does not exist`.
+      - name: Install Bazelisk (pinned)
+        run: |
+          set -eux
+          { command -v curl && command -v git; } >/dev/null 2>&1 || {
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends ca-certificates curl git
+          }
+          curl -fsSL -o /usr/local/bin/bazel \
+            https://github.com/bazelbuild/bazelisk/releases/download/v1.29.0/bazelisk-linux-amd64
+          echo "5a408715e932c0250d28bd84555f12edbf70117de42f9181691c736eacc4a992  /usr/local/bin/bazel" | sha256sum -c
+          chmod +x /usr/local/bin/bazel
+          echo "bazelisk $(date +%s)" >> /tmp/ci-times
+
+      # Only Bazelisk's download of Bazel itself is cached here, keyed on
+      # the version it fetches. Everything a build needs again is already
+      # shared on the runner, mounted from /data/cache/bazel and named in
+      # /etc/bazel.bazelrc: the disk cache holds every action's outputs and
+      # the repository cache the downloads, and the repositories that
+      # declare themselves reproducible (#938).
+      #
+      # Until #939 this step also tarred the whole of ~/.cache/bazel, the
+      # output base with its build outputs and sandbox litter, 2.3 to 4 GB,
+      # and that made a job slower, not faster. Measured on eph4 at
+      # 6a35c05, in this job's image with the runner's mounts: a fresh
+      # output base built //... in 136 s and 148 s, and the same build with
+      # the tarball restored took 28 s plus 237 s and 52 s plus 121 s,
+      # because Bazel checks every restored output against the action
+      # cache; run 1544's record had the restore alone at 129 s. Saving it
+      # is also where run 1521 sat (#943). Keeping only `external` and the
+      # action cache is no better: that build fails, the action cache
+      # vouching for outputs that are not there.
+      #
+      # Restored here and saved by its own step at the end, so that both
+      # are steps the run's record can time (#940). The save keeps the
+      # combined action's rule: only when the key missed, and only when
+      # the job succeeded.
+      - name: Restore the Bazelisk cache
+        id: cache
+        uses: https://code.forgejo.org/actions/cache/restore@v4
+        with:
+          path: ~/.cache/bazelisk
+          key: bazelisk-${{ hashFiles('.bazelversion') }}
+
+      - name: Mark the cache restore
+        run: echo "cache_restore $(date +%s)" >> /tmp/ci-times
+
+      # `pipefail`, or the step's status is `tee`'s, which is 0: a build that
+      # failed would pass here and turn the run red only in the test step
+      # below, with its error inside that step's output (#538).
+      - name: Build everything
+        run: |
+          set -o pipefail
+          trap 'echo "build $(date +%s)" >> /tmp/ci-times' EXIT
+          bazel build --config=ci //... 2>&1 | tee -a /tmp/ci-bazel.log
+
+      # Bazel exits 4 when testing is requested and no test target exists,
+      # which is the state until the specification's examples become a test
+      # corpus. Every other non-zero exit still fails the job, and a test
+      # added later runs here without touching this file.
+      - name: Test everything
+        run: |
+          set -o pipefail
+          trap 'echo "test $(date +%s)" >> /tmp/ci-times' EXIT
+          bazel test --config=ci //... --test_output=errors 2>&1 | tee -a /tmp/ci-bazel.log || {
+            status=$?
+            [ "$status" -eq 4 ] || exit "$status"
+            echo "no test targets yet; build is the only gate"
+          }
+
+      - name: Save the Bazelisk cache
+        if: success() && steps.cache.outputs.cache-hit != 'true'
+        uses: https://code.forgejo.org/actions/cache/save@v4
+        with:
+          path: ~/.cache/bazelisk
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - name: Mark the cache save
+        if: always()
+        run: echo "cache_save $(date +%s)" >> /tmp/ci-times
+
+      # `fj` cannot read Actions logs and the API's log routes answer 404
+      # even with a token, so a failing run exports its own. It lands on the
+      # `ci-logs` branch, readable by anyone who can clone:
+      #
+      #   git fetch origin ci-logs && git show origin/ci-logs:<file>
+      #
+      # #466. The branch is fetched rather than re-initialised, so a run can
+      # be compared with the one before it; most of what was wanted on 737
+      # was seeing how it differed from 733.
+      - name: Export the log on failure
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "=== run ${GITHUB_RUN_NUMBER} on ${BUILD_SHA:-$GITHUB_SHA} (${GITHUB_EVENT_NAME}) ==="
+            echo "=== df -h ==="; df -h / /data/cache/bazel 2>/dev/null | sort -u
+            echo "=== free -m ==="; free -m
+            echo "=== bazel log tail ==="
+            tail -c 60000 /tmp/ci-bazel.log 2>/dev/null || echo "(no bazel log)"
+          } > /tmp/ci-tail.log 2>&1 || echo "(capture failed)" >> /tmp/ci-tail.log
+          d=$(mktemp -d)
+          url="https://ci:${GITHUB_TOKEN}@git.hdlfactory.com/${GITHUB_REPOSITORY}.git"
+          # Add to the branch when it exists; start it when it does not.
+          if git -C "$d" clone -q --depth 1 --branch ci-logs "$url" . 2>/dev/null; then
+            :
+          else
+            git -C "$d" init -q -b ci-logs
+            git -C "$d" remote add origin "$url"
+          fi
+          cp /tmp/ci-tail.log \
+            "$d/run-${GITHUB_RUN_NUMBER}-$(date -u +%Y%m%dT%H%M%S)-$(echo "${BUILD_SHA:-$GITHUB_SHA}" | cut -c1-8).log"
+          git -C "$d" add -A
+          git -C "$d" -c user.name=ci -c user.email=ci@invalid \
+            commit -qm "ci log for run ${GITHUB_RUN_NUMBER} (${BUILD_SHA:-$GITHUB_SHA})"
+          git -C "$d" push -q origin ci-logs
+
+      # Every run, passing or not, leaves a short record on `ci-stats`
+      # (#940): its number, commit and outcome, each step's wall time in
+      # seconds from the marks above, and Bazel's own summary lines from
+      # build and test, which say how many actions ran and how many were
+      # cache hits. One file a run, so two records never collide; failures
+      # still export their log to `ci-logs` above.
+      #
+      #   git fetch origin ci-stats && git show origin/ci-stats:<file>
+      - name: Record the run
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUNNER_CTX: ${{ runner.name }}
+        run: |
+          echo "log_export $(date +%s)" >> /tmp/ci-times
+          {
+            echo "run ${GITHUB_RUN_NUMBER} on ${BUILD_SHA:-$GITHUB_SHA} (${GITHUB_EVENT_NAME}, ${BUILD_REF:-$GITHUB_REF_NAME}): ${{ job.status }}"
+            # Which runner took the run, and whether it gave the job the
+            # shared Bazel caches, so a record says which machine its numbers
+            # are of (#940). Forgejo fills neither the runner context nor
+            # RUNNER_NAME (run 1566), so the names of the variables that
+            # mention a runner are listed too, without their values, and the
+            # system rc's disk cache line says whether the caches are there.
+            echo "runner: ${RUNNER_CTX:-${RUNNER_NAME:-unknown}} (host $(hostname))"
+            echo "runner variables: $(env | cut -d= -f1 | grep -i runner | sort | tr '\n' ' ')"
+            echo "disk cache: $(grep -h -- '--disk_cache' /etc/bazel.bazelrc 2>/dev/null | head -1 || true)"
+            echo "cache key hit: ${{ steps.cache.outputs.cache-hit }}"
+            echo "=== seconds, by step ==="
+            awk 'NR > 1 { printf "%-14s %6d\n", $1, $2 - t } { t = $2 }' /tmp/ci-times
+            echo "=== bazel ==="
+            grep -E 'INFO: [0-9,]+ processes|INFO: Elapsed time|Executed [0-9]+ out of [0-9]+ test' \
+              /tmp/ci-bazel.log 2>/dev/null || echo "(no bazel log)"
+          } > /tmp/ci-record.txt 2>&1 || echo "(record incomplete)" >> /tmp/ci-record.txt
+          cat /tmp/ci-record.txt
+          d=$(mktemp -d)
+          url="https://ci:${GITHUB_TOKEN}@git.hdlfactory.com/${GITHUB_REPOSITORY}.git"
+          if git -C "$d" clone -q --depth 1 --branch ci-stats "$url" . 2>/dev/null; then
+            :
+          else
+            git -C "$d" init -q -b ci-stats
+            git -C "$d" remote add origin "$url"
+          fi
+          cp /tmp/ci-record.txt \
+            "$d/run-${GITHUB_RUN_NUMBER}-$(date -u +%Y%m%dT%H%M%S)-$(echo "${BUILD_SHA:-$GITHUB_SHA}" | cut -c1-8).txt"
+          git -C "$d" add -A
+          git -C "$d" -c user.name=ci -c user.email=ci@invalid \
+            commit -qm "ci record for run ${GITHUB_RUN_NUMBER} (${BUILD_SHA:-$GITHUB_SHA})"
+          git -C "$d" push -q origin ci-stats

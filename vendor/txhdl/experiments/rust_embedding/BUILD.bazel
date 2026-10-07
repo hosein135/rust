@@ -1,0 +1,125 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Compiled probes for docs/rust-embedding.md. Each target answers one
+# question, against the runtime library at //lib. A probe that does not
+# build is an answer, not a defect: those are tagged `manual`, stay out of
+# //..., and their error messages are the evidence.
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+DEPS = ["//lib:txhdl"]
+MACROS = ["//lib:txhdl_macros"]
+
+# Expected to compile.
+[
+    rust_library(
+        name = name,
+        srcs = [name + ".rs"],
+        edition = "2021",
+        deps = DEPS,
+        proc_macro_deps = MACROS,
+    )
+    for name in [
+        "probe_comp",
+        "probe_config",
+        "probe_derive",
+        "probe_design",
+        "probe_domain",
+        "probe_funcs",
+        "probe_hierarchy",
+        "probe_case",
+        "probe_if",
+        "probe_interface_macro",
+        "probe_interface_proc",
+        "probe_item_order",
+        "probe_nested_config",
+        "probe_ports",
+        "probe_processes",
+        "probe_signal_split",
+        "probe_slice",
+        "probe_infer",
+        "probe_macro_in_macro",
+        "probe_values",
+        "probe_shadow",
+        "probe_shadow_generic",
+        "probe_attr_order",
+        # Refused until issue 497, escaped since: `next_rw`, `out_rw`.
+        "probe_reserved_field",
+        "probe_reserved_let",
+        # An address map as a trait constant, read by index (issue 593).
+        "probe_assoc_const",
+    ]
+]
+
+# A design is a program:  bazel run //experiments/rust_embedding:probe_main -- asic
+# The document includes this probe as its listing of an interface.
+exports_files(["probe_interface_proc.rs"])
+
+rust_binary(
+    name = "probe_main",
+    srcs = ["probe_main.rs"],
+    edition = "2021",
+    deps = DEPS,
+)
+
+# Expected to fail. Each comment says why, and the error it gives.
+[
+    rust_library(
+        name = name,
+        srcs = [name + ".rs"],
+        edition = "2021",
+        deps = DEPS,
+        proc_macro_deps = MACROS,
+        tags = ["manual"],
+    )
+    for name in [
+        "probe_widths",                # generic parameters in const ops
+        "probe_attr_block",            # E0658: attributes on expressions
+        "probe_slice_dyn",             # E0435: run-time width is the type
+        "probe_processes_mut",         # E0499: two &mut self
+        "probe_two_drivers",           # E0382: Out is not Clone
+        "probe_ports_bad",             # E0599: In has no set
+        "probe_domain_cross",          # E0308: domains do not unify
+        "probe_interface_incomplete",  # the macro's own message
+        "probe_interface_twodrivers",  # the macro's own message
+        "probe_when_bad",              # the macro's own message
+        "probe_case_bad",              # the macro's own message
+        "probe_case_binding",          # E0425: a pattern tests, it does not bind
+        "probe_infer_bad",             # E0284: a width nothing fixes
+        "probe_infer_lower",           # the macro's own message
+        "probe_wide",                  # E0080: over 128 bits in one limb
+        "probe_regs_signal",           # the macro's own message
+        "probe_tuple_let",             # the macro's own message
+        "probe_lit_signal",            # the macro's own message
+        "probe_send_bare",             # the macro's own message (issue 882)
+    ]
+]
+
+# Expected to compile, on nightly only:
+#   --@rules_rust//rust/toolchain/channel=nightly
+rust_library(
+    name = "probe_widths_nightly",
+    srcs = ["probe_widths_nightly.rs"],
+    edition = "2021",
+    deps = DEPS,
+    tags = ["manual"],
+)
+
+# Issue 503: a defaulted const parameter for a value's storage, and
+# whether the default reaches an expression path. Standalone, so it
+# answers the Rust question alone.
+rust_library(
+    name = "probe_limbs",
+    srcs = ["probe_limbs.rs"],
+    edition = "2021",
+)
+
+# Expected to fail: E0277, `[Cell; N]: Default` is not satisfied for a
+# generic `N` (issue 594).
+rust_library(
+    name = "probe_array_default",
+    srcs = ["probe_array_default.rs"],
+    edition = "2021",
+    tags = ["manual"],
+)

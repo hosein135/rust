@@ -102,6 +102,105 @@ pub fn find_first_verilog(root: &Path) -> Option<PathBuf> {
     files.into_iter().next()
 }
 
+/// The bundled Rust full-adder sample, if this tree has one.
+pub fn locate_full_adder_sample() -> Option<PathBuf> {
+    let samples = locate_samples_dir()?;
+    let nested = samples.join("full_adder");
+    if nested.join("Cargo.toml").is_file() && nested.join("src").join("adder.rs").is_file() {
+        Some(nested)
+    } else {
+        None
+    }
+}
+
+pub fn is_rust_source(path: &Path) -> bool {
+    ext_is(path, &["rs"])
+}
+
+pub fn is_rust_testbench(path: &Path) -> bool {
+    is_rust_source(path) && is_tb_stem(path)
+}
+
+/// A folder whose sources are Rust (a Cargo package with a `*_tb.rs`).
+pub fn is_rust_project(root: &Path) -> bool {
+    root.join("Cargo.toml").is_file() && collect_rust_files(root).iter().any(|p| is_rust_testbench(p))
+}
+
+/// Files to open when a folder is loaded: the Rust design then its testbench,
+/// or the first Verilog source when the folder is a Verilog project.
+pub fn initial_editor_files(root: &Path) -> Vec<PathBuf> {
+    if is_rust_project(root) {
+        let mut hdl = Vec::new();
+        let mut tb = Vec::new();
+        for path in collect_rust_files(root) {
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if name == "lib.rs" || name == "main.rs" {
+                continue;
+            }
+            if is_rust_testbench(&path) {
+                tb.push(path);
+            } else {
+                hdl.push(path);
+            }
+        }
+        hdl.sort();
+        tb.sort();
+        tb.extend(hdl);
+        if !tb.is_empty() {
+            return tb;
+        }
+    }
+    find_first_verilog(root).into_iter().collect()
+}
+
+fn collect_rust_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_rust(dir, &mut files);
+    files.sort();
+    files
+}
+
+fn collect_rust(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if should_skip(&name) || name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            collect_rust(&path, out);
+        } else if is_rust_source(&path) {
+            out.push(path);
+        }
+    }
+}
+
+fn is_tb_stem(path: &Path) -> bool {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    stem.ends_with("_tb")
+        || stem.starts_with("tb_")
+        || stem.ends_with("_testbench")
+        || stem.ends_with("_test")
+        || stem.contains("testbench")
+}
+
+fn ext_is(path: &Path, exts: &[&str]) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|s| {
+            let lower = s.to_ascii_lowercase();
+            exts.iter().any(|ext| lower == *ext)
+        })
+        .unwrap_or(false)
+}
+
 /// Compile units for simulation: `.v` / `.sv` only (headers are included).
 pub fn collect_hdl_sources(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();

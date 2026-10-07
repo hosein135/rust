@@ -26,6 +26,13 @@ const KEYWORDS: &[&str] = &[
     "export", "virtual", "static", "const", "unique", "priority", "assert", "property",
 ];
 
+const RUST_KEYWORDS: &[&str] = &[
+    "as", "async", "await", "break", "const", "continue", "crate", "else", "enum", "extern",
+    "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut",
+    "pub", "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true",
+    "type", "unsafe", "use", "where", "while",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
     Comment,
@@ -74,6 +81,7 @@ struct ParseState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub enabled: bool,
+    pub rust: bool,
 }
 
 #[derive(Debug)]
@@ -120,7 +128,7 @@ impl highlighter::Highlighter for VerilogHighlighter {
             .last()
             .unwrap_or(&ParseState::default());
 
-        let spans = highlight_line(line, &mut state);
+        let spans = highlight_line(line, &mut state, self.settings.rust);
 
         self.snapshots.push(state);
         self.current_line += 1;
@@ -133,7 +141,7 @@ impl highlighter::Highlighter for VerilogHighlighter {
     }
 }
 
-fn highlight_line(line: &str, state: &mut ParseState) -> Vec<(Range<usize>, Highlight)> {
+fn highlight_line(line: &str, state: &mut ParseState, rust: bool) -> Vec<(Range<usize>, Highlight)> {
     let mut spans = Vec::new();
     let bytes = line.as_bytes();
     let mut i = 0;
@@ -195,7 +203,7 @@ fn highlight_line(line: &str, state: &mut ParseState) -> Vec<(Range<usize>, High
             continue;
         }
 
-        if b == b'`' {
+        if b == b'`' && !rust {
             let start = i;
             i += 1;
             while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
@@ -205,7 +213,7 @@ fn highlight_line(line: &str, state: &mut ParseState) -> Vec<(Range<usize>, High
             continue;
         }
 
-        if b == b'$' {
+        if b == b'$' && !rust {
             let start = i;
             i += 1;
             while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
@@ -215,7 +223,7 @@ fn highlight_line(line: &str, state: &mut ParseState) -> Vec<(Range<usize>, High
             continue;
         }
 
-        if b == b'\'' && bytes.get(i + 1).is_some_and(|c| c.is_ascii_digit()) {
+        if !rust && b == b'\'' && bytes.get(i + 1).is_some_and(|c| c.is_ascii_digit()) {
             let start = i;
             i += 2;
             while i < bytes.len()
@@ -241,7 +249,7 @@ fn highlight_line(line: &str, state: &mut ParseState) -> Vec<(Range<usize>, High
             continue;
         }
 
-        if b == b'\'' && bytes.get(i + 1).is_some_and(|c| c.is_ascii_alphabetic()) {
+        if !rust && b == b'\'' && bytes.get(i + 1).is_some_and(|c| c.is_ascii_alphabetic()) {
             let start = i;
             i += 2;
             while i < bytes.len()
@@ -253,6 +261,20 @@ fn highlight_line(line: &str, state: &mut ParseState) -> Vec<(Range<usize>, High
             continue;
         }
 
+        if rust && b == b'#' {
+            let start = i;
+            i += 1;
+            if bytes.get(i) == Some(&b'[') {
+                i += 1;
+            }
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b':')
+            {
+                i += 1;
+            }
+            push_span(&mut spans, start, i, TokenKind::Directive);
+            continue;
+        }
+
         if b.is_ascii_alphabetic() || b == b'_' {
             let start = i;
             i += 1;
@@ -260,7 +282,7 @@ fn highlight_line(line: &str, state: &mut ParseState) -> Vec<(Range<usize>, High
                 i += 1;
             }
             let word = &line[start..i];
-            let kind = if is_keyword(word) {
+            let kind = if is_keyword(word, rust) {
                 TokenKind::Keyword
             } else {
                 i = start + word.len();
@@ -302,8 +324,12 @@ fn merge_spans(spans: Vec<(Range<usize>, Highlight)>) -> Vec<(Range<usize>, High
     merged
 }
 
-fn is_keyword(word: &str) -> bool {
-    KEYWORDS.contains(&word)
+fn is_keyword(word: &str, rust: bool) -> bool {
+    if rust {
+        RUST_KEYWORDS.contains(&word)
+    } else {
+        KEYWORDS.contains(&word)
+    }
 }
 
 fn is_operator_byte(b: u8) -> bool {
@@ -320,6 +346,12 @@ pub fn syntax_enabled_for_path(path: &Path) -> bool {
             .and_then(|e| e.to_str())
             .map(|s| s.to_ascii_lowercase())
             .as_deref(),
-        Some("v" | "sv" | "vh" | "svh" | "vl")
+        Some("v" | "sv" | "vh" | "svh" | "vl" | "rs")
     )
+}
+
+pub fn rust_syntax_for_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|s| s.eq_ignore_ascii_case("rs"))
 }

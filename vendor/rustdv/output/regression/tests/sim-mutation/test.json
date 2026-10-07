@@ -1,0 +1,9 @@
+{
+  "comment": "Mutation test (test-plan §3.2): corrupt the TinyALU's XOR to OR and require the scoreboards to fail, then require them to pass again on the real RTL. A scoreboard that cannot fail is not a scoreboard. Skips without iverilog.",
+  "cmd": ["bash", "output/regression/tests/sim-mutation/mutate.sh"],
+  "cwd": ".",
+  "skip_if_missing": "iverilog",
+  "expect_exit": 0,
+  "timeout": 600,
+  "expect_in_output": ["MUTATION: CAUGHT"]
+}

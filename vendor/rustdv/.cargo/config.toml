@@ -1,0 +1,12 @@
+# Intentionally no Linux-side linker flags (see STATUS.md D9: the
+# --unresolved-symbols route corrupted aarch64 PLT relocations; the
+# rustdv-vpi-stubs dev-dependency covers test binaries instead).
+#
+# macOS: the testbench cdylib references vpi_* symbols the simulator
+# provides at load time. Mach-O linkers reject undefined symbols unless
+# told to resolve them dynamically (the same flags cocotb uses on Macs).
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]

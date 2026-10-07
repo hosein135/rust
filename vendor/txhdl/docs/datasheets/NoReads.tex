@@ -1,0 +1,60 @@
+% SPDX-License-Identifier: Apache-2.0
+% covers: NoReads
+\datasheet{NoReads}{The read-data channel terminator for a host client that only performs writes.}
+
+\dsfacts{\code{lib/parts/src/dma.rs}}{\code{txhdl\_parts::dma::NoReads}}%
+{\code{//docs:datasheets}}
+
+\subsection*{Function}
+
+This component forms the complementary sink to \code{NoBeats}. A DMA store engine
+never reads, so its host read-data channel has no receiver. Because board-level
+interconnects wire every instantiated channel to a destination endpoint,
+\code{NoReads} terminates that channel and consumes no data.
+
+\subsection*{Parameters}
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}lp{0.7\textwidth}@{}}
+\toprule
+Parameter & Meaning \\
+\midrule
+\code{I} & The host identifier width: the response type is \code{R<32, I>}.
+It specifies no default because the derive macro rejects one (issue 1044). \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The board instantiates two instances: \code{NoReads<2>} for the Ethernet DMA store
+engine, and \code{NoReads<1>} for the SD host engine whose shared host
+allocates one bit of transaction identifier. The tables list \code{NoReads<2>}.
+
+\dstables{NoReads}
+
+\subsection*{Behaviour}
+
+\begin{itemize}
+\item It never accepts a response beat. In the synthesized netlist, its ready signal
+remains permanently deasserted.
+\item Deasserting ready introduces no interconnect stall because the client never transmits
+read requests on the address channel. A client that issues no reads receives no responses.
+\item The \code{idle} signal represents its single register, which remains unset as in
+\code{NoBeats}.
+\end{itemize}
+
+\subsection*{Verification}
+
+The block has no standalone testbench. It executes as part of the board
+synthesis netlist in \code{cpu/vreteno/tests/board.rs}.
+
+\subsection*{Used by}
+
+\code{Board}, twice: as \code{snoreads} (\code{NoReads<2>}) on the read-data channel
+of the Ethernet store engine host \code{shost}, and as \code{sdnoreads} (\code{NoReads<1>})
+on the SD host engine interconnect \code{sdshost}.
+
+\subsection*{Limits}
+
+A host whose client issues read transactions must not connect to \code{NoReads}.
+The first returned response beat would stall indefinitely in the channel, blocking
+all subsequent bus traffic.

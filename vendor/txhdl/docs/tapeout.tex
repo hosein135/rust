@@ -1,0 +1,466 @@
+% SPDX-License-Identifier: Apache-2.0
+%
+% Vreteno through an open ASIC flow. Built by //docs:tapeout. Every
+% listing is included from the tree and every number comes from a run.
+\documentclass[journal,9pt]{IEEEtran}
+
+\newcommand{\listingsize}{\fontsize{6}{7}\selectfont}
+\input{housestyle}
+
+\InputIfFileExists{buildstamp.tex}{}{}
+\providecommand{\buildstamp}{Draft build (outside the Bazel flow).}
+
+% The numbers the prose quotes, written by the run that produced them.
+\input{asic_counts.tex}
+
+% A script of the flow, highlighted for its own vocabulary: the
+% comment character is the hash, and the commands are the steps.
+\lstdefinestyle{script}{%
+  style=txhdl,
+  morecomment=[l]{\#},
+  morekeywords={set,expr,proc,foreach,source,puts,format,open,close,
+    read_verilog,hierarchy,synth,opt,dfflibmap,abc,setundef,splitnets,
+    opt_clean,hilomap,insbuf,tee,stat,write_verilog,read_lef,
+    read_liberty,read_sdc,link_design,initialize_floorplan,place_pins,
+    tapcell,pdngen,global_placement,detailed_placement,check_placement,
+    clock_tree_synthesis,set_propagated_clock,repair_design,
+    repair_clock_nets,repair_timing,global_route,detailed_route,
+    filler_placement,estimate_parasitics,write_def,create_clock,
+    set_input_delay,set_output_delay,set_driving_cell,set_load,
+    set_max_fanout,set_clock_uncertainty,set_thread_count,get_ports,
+    get_clocks,all_inputs,all_outputs,current_design,lsearch,metric,
+    report_design_area,report_worst_slack,report_tns,report_checks,
+    report_power,report_check_types,report_clock_skew},
+}
+
+\title{A Tapeout Prep in TxHDL: Vreteno on an Open 45\,nm Node}
+
+\author{Filip Filmar and Dragiša Janković%
+\thanks{Both authors are independent. Filip Filmar is the
+corresponding author, at f@hdlfactory.com; Dragiša Janković is
+reached at linkedin.com/in/dragisa-jankovic.}%
+\thanks{This document examines the trajectory of a design between
+synthesis and photomask generation. The target processor is the Vreteno
+core described in~\cite{vreteno}, instantiated from the lowered Verilog
+emitted by TxHDL. Every listing is included verbatim from the project
+repository \code{HDL/txhdl} at build time; the companion
+index~\cite{cover} catalogs the documentation suite.}%
+\thanks{The authors used a large language model, Claude, as an
+assistant in exploring the concepts and in writing and constructing
+the documents and the programs; every commit of the repository says
+so and carries the prompts that led to it, verbatim.}%
+\thanks{\buildstamp}}
+
+\markboth{A Tapeout Prep in TxHDL}{Filmar and Janković: A Tapeout Prep in TxHDL}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+A design that has been simulated, lowered, verified against its execution
+trace, and synthesized onto an FPGA has still never taken physical shape
+on silicon. This paper takes the Vreteno core's structural Verilog—the
+exact netlist targeted to hardware in its FPGA build—maps it onto an open
+45\,nm standard-cell library using Yosys, and floorplans, places, routes,
+and times it with OpenROAD. The result is a die \asicdie\,$\mu$m square
+holding \asiccells{} cells that meets a \asicperiod\,ns clock with
+\asicslack\,ns of setup slack and routes with zero DRC violations.
+Both toolchains are pinned by cryptographic checksum and unpacked
+directly into the build sandbox, requiring no pre-installed EDA packages
+on the host. This preparation stops short of a tapeout; the closing
+section catalogs what physical fabrication would still demand.
+\end{abstract}
+
+\section{What This Is}
+\label{sec:t-what}
+
+An FPGA answers a pragmatic question about a design: does it fit, and
+how fast does it run, on a specific commercial chip. An ASIC flow
+demands things an FPGA never asks for. There are no prefabricated block
+RAMs for memories and no dedicated DSP blocks for arithmetic; both must
+be synthesized out of raw gates. There is no configuration bitstream to
+initialize registers at power-on; a register that was initialized in
+elaboration but lacks an explicit hardware reset powers up in an
+undefined state. And there is no pre-existing routing fabric: every wire
+must be drawn in metal, and its physical length is an unyielding delay.
+
+The Vreteno core has already cleared the FPGA bar~\cite{vreteno}. It runs
+on an Alinx AX7A200B development board at 100\,MHz, and its observed
+behavior on hardware matches its cycle-accurate simulation bit for
+bit. This paper puts that same netlist (as tagged at commit
+\code{2c812d3} on 17 September 2026) through an open physical ASIC flow,
+reporting the gate count, floorplan, and timing closure achieved.
+
+None of this constitutes a tapeout. No commercial fab operates a process
+line corresponding to this library, no photomask was manufactured, and
+the rigorous signoff decks demanded by a foundry are absent here.
+Section~\ref{sec:t-not} catalogs what remains missing, one requirement
+at a time: presenting a layout plot without declaring the verification
+gap would claim more than has been achieved.
+
+\section{The Node}
+\label{sec:t-node}
+
+Nangate45 is an open standard-cell library targeting a notional 45\,nm
+technology node. It provides Liberty (\code{.lib}) timing models for
+each cell, LEF abstractions defining cell bounding boxes and pin
+geometries, and a technology LEF specifying the design rules, routing
+pitches, and wire widths across ten metal layers. It is the reference
+library distributed alongside OpenROAD under Apache~2.0. The TxHDL build
+fetches the six library files by cryptographic checksum at a pinned
+revision, preserving license compliance alongside reproducibility.
+
+It is not a foundry PDK. No physical wafer was ever fabricated from it,
+its timing figures reflect plausible 45\,nm predictive models rather
+than silicon measurements, and it includes no design rule deck that a fab
+would sign off on. Yet those attributes make it the ideal vehicle for an
+open reference flow: every algorithmic step is genuine, every reported
+metric has physical meaning, and no non-disclosure agreement prevents
+publishing the inputs, scripts, and results in a public repository.
+
+What the node lacks is a memory compiler. A commercial foundry kit ships
+with software generators that produce dense SRAM macros of whatever width
+and depth are required. Nangate45 provides only empty mock macros of
+fixed dimensions for placement experimentation, and an empty macro holds
+no data. Section~\ref{sec:t-cells} details what the core's memories
+became instead—yielding the most instructive architectural lesson of
+this run.
+
+\section{The Tools, and How They Are Pinned}
+\label{sec:t-tools}
+
+Every toolchain dependency in this repository is fetched by cryptographic
+checksum and unpacked into the build sandbox; nothing is assumed to be
+installed on the host system. The ASIC toolchain adheres strictly to this
+discipline. Achieving hermeticity is uniquely demanding here because
+Yosys and OpenROAD are distributed as Debian packages, which declare
+shared library dependencies dynamically rather than bundling them.
+
+The build resolves the complete dependency closure in advance.
+\code{//tools/debclosure} inspects an upstream distribution's package
+index, walks the dependency tree starting from the required binaries,
+and writes an immutable lockfile. Each entry records the package name,
+exact version, payload size, SHA-256 digest, and dual retrieval URLs.
+The first URL points to the live Debian mirror—fast, but ephemeral across
+distribution updates; the second points to \code{snapshot.debian.org}—slow,
+but permanently immutable. A fetcher that tries the live mirror before
+falling back to the snapshot achieves maximum download speed while
+guaranteeing bit-for-bit reproducibility years into the future.
+
+Two such lockfiles are maintained in the tree. Yosys 0.52 and its ten
+shared-library dependencies comprise eleven packages totaling
+13\,MB. OpenROAD—pinned to the final binary release published by the
+project—spans 52\,MB in isolation, but its transitive closure demands
+131 auxiliary packages totaling an additional 75\,MB. Roughly two-thirds
+of that footprint comprises Qt and the associated Mesa, LLVM, X11, and
+ICU runtime libraries that Qt pulls in, which the executable dynamically
+links regardless of whether an interactive GUI is invoked. Alongside
+OpenROAD sits the external linear-programming solver utilized by its
+analytical placer, which the upstream package expects in its runtime
+search path without bundling.
+
+All package extraction is performed natively by Bazel. Because a
+\code{.deb} package is an \code{ar} archive containing a \code{tar.xz}
+payload, Bazel's internal decompressors extract both layers in sequence.
+The repository rule in \code{//third\_party/debs} arranges the unpacked
+artifacts into a unified directory tree against which the EDA tools
+execute, isolated with their private shared libraries. The entire flow
+runs without \code{dpkg}, without root privileges, without container
+runtimes, and without consulting host system libraries.
+
+\section{From Verilog to Cells}
+\label{sec:t-cells}
+
+Listing~\ref{lst:t-synth} shows the complete Yosys synthesis script. The
+build interpolates the template placeholders delimited by \code{@},
+adhering to the command sequence codified by the OpenROAD flow scripts.
+
+\lstinputlisting[style=script, caption={Vreteno onto standard
+cells.}, label={lst:t-synth}]{cpu/vreteno/asic/synth.ys}
+
+Six of these commands perform critical structural transformations.
+First, \code{dfflibmap} must execute before \code{abc}: sequential state
+elements must be bound to library flip-flops prior to combinational
+optimization, as the technology mapper cannot infer sequential cells.
+Next, \code{setundef} assigns explicit binary levels to uninitialized or
+don't-care nets, and \code{splitnets} decomposes multibit buses into
+individual scalar wires—an essential flattening step, as gate-level
+standard-cell netlists admit no vector abstractions. Then \code{hilomap}
+substitutes literal logic constants (\code{1'b0} and \code{1'b1}) with
+explicit tie-off cells (\code{TIEL} and \code{TIEH}); the mapper will
+not select these autonomously because the cell library flags them with
+the \code{dont\_use} attribute. Finally, \code{insbuf} inserts active
+driver buffers on feedthrough ports connecting an input directly to an
+output; in a physical layout, every driven wire requires an active cell
+driver.
+
+The ordering of these passes is deceptively unforgiving. Moving buffer
+insertion ahead of bus splitting caused Yosys to instantiate buffers
+across every constituent wire of every bus: 3,800 redundant cells that
+served no electrical purpose, bloating the design by twenty percent.
+This bloat generated no tool warnings; it was uncovered entirely
+through manual post-synthesis cell accounting.
+
+The resulting structural netlist comprises \asiccells{} standard cells
+interconnected across \asicnets{} nets, of which \asicflops{} are
+sequential flip-flops.
+
+\subsection{The Memories}
+
+This inventory contrasts sharply with Vreteno's footprint on the
+Artix-7 FPGA: 2,151 lookup tables, 489 flip-flops, two block RAM tiles,
+and four DSP48 arithmetic slices~\cite{vreteno}. The threefold expansion
+in flip-flop count stems entirely from the register file. On the FPGA,
+the 32-entry dual-read, single-write register file is mapped onto twelve
+distributed RAM (LUTRAM) primitives, exploiting specialized fabric
+features engineered for shallow multi-ported memories. On standard cells
+without an SRAM macro, thirty-two 32-bit registers require 1,024
+discrete D-type flip-flops. Combined with pipeline registers, CSRs, and
+control logic, the ASIC count reaches \asicflops{} flip-flops, whereas
+the board required only 489 because its register file was not built from
+flip-flops at all.
+
+The instruction memory underwent an inverse transformation. On the FPGA,
+it occupies two 32-bit $\times$ 1024-word block RAM tiles, providing
+concurrent dual-word fetches so that 16-bit compressed instructions
+spanning a 32-bit word boundary can be decoded in a single cycle. On the
+ASIC, lacking block RAM and an SRAM compiler, the read-only instruction
+store resolves to pure combinational logic: because the program is static
+and known at elaboration, synthesis collapses the memory into a massive
+mask ROM. Its gate count is an exact function of binary entropy—a
+different program produces a different gate count and a different
+physical area. This distinction is vital to state explicitly: the
+silicon area reported below measures this core executing this exact
+benchmark binary, rather than a generic programmable microarchitecture.
+
+The multiplier exemplifies a third trade-off. The four dedicated DSP48
+slices utilized on the FPGA are replaced by an array multiplier
+synthesized entirely from discrete standard cells.
+
+\section{From Cells to a Layout}
+\label{sec:t-pnr}
+
+Listing~\ref{lst:t-sdc} specifies the timing constraints applied during
+place-and-route. We constrain the clock period to 3\,ns (333\,MHz)—over
+three times the FPGA board target (100\,MHz)—reflecting the inherently
+faster intrinsic delays of 45\,nm standard cells over 28\,nm FPGA lookup
+tables. Specifying an aggressive target gives meaning to downstream
+timing slack: every picosecond of margin reflects real design
+headroom. Primary I/O ports are timed assuming an external chip of
+identical performance: input arrival delays and output load budgets are
+each allocated 20\% of the clock period ($0.6$\,ns). Leaving boundary
+ports unconstrained is the conventional recipe for timing reports that
+are deceptively clean and practically meaningless.
+
+\lstinputlisting[style=script, caption={What the core is asked to
+meet.}, label={lst:t-sdc}]{cpu/vreteno/asic/vreteno.sdc}
+
+The physical layout flow, executed by \code{cpu/vreteno/asic/pnr.tcl},
+progresses in six sequential stages. First, floorplanning establishes a
+square die boundary with standard-cell rows and routing tracks, placing
+external I/O pins along the perimeter on upper metal layers clear of the
+core. Next, well-tap cells are inserted every 120\,$\mu$m along cell rows
+and at row boundaries to prevent latch-up, followed by power-grid
+synthesis (PDN) providing horizontal standard-cell supply rails and
+orthogonal straps on higher metal layers. Global placement then spreads
+cells across the core to minimize wire length, followed by timing-driven
+cell resizing to repair transition-time and fanout violations, and
+legalization into continuous rows. Clock tree synthesis (CTS) constructs
+a balanced buffer tree delivering clock edges to all \asicflops{}
+flip-flops with minimal skew, after which localized placement refinement
+shortens clock nets. Global and detailed routing assign signals to
+metal tracks and vias while satisfying geometric design rules, followed
+by post-route timing repair to heal delays introduced by real wire
+parasitics. Last of all, non-functional filler cells are packed into
+remaining row gaps to ensure substrate and well continuity across the
+core.
+
+\begin{figure*}[t]
+\centering
+\input{asicmap.tex}
+\caption{The placed core, represented as a grid of \asicbins{} bins per
+side across the die. On the left, cell density across all standard
+cells prior to filler insertion: the pale border marks the clearance
+margin between core rows and the die boundary. On the right, sequential
+flip-flop density alone, normalized against the peak bin
+(\asicffpeak\,\% of bin area); flip-flops comprise roughly a tenth of
+total cells, so against a fully occupied square the panel would appear
+as a uniform pale wash. The architectural state exhibits distinct
+spatial geometry: regions devoid of flip-flops consist entirely of
+combinational logic—dominated by the mask ROM encoding the program—while
+dense flip-flop clusters reveal the register file and pipeline stage
+registers.}
+\label{fig:t-map}
+\end{figure*}
+
+\section{What the Run Says}
+\label{sec:t-results}
+
+Table~\ref{tab:t-results} summarizes the final physical design metrics.
+Every datum in the table was emitted directly by OpenROAD into
+machine-readable files and referenced in the LaTeX source via generated
+macros, ensuring the narrative remains strictly synchronized with tool
+outputs.
+
+\begin{table}[htbp]
+\caption{Vreteno on Nangate45, after routing.}
+\label{tab:t-results}
+\centering
+\begin{tabular}{@{}lr@{}}
+\toprule
+Cells, after mapping & \asiccells{} \\
+Nets & \asicnets{} \\
+Flip-flops & \asicflops{} \\
+Instances placed, before filler & \asicinstances{} \\
+\addlinespace
+Die & \asicdie{} $\times$ \asicdie\,$\mu$m \\
+Cell area & \asicarea\,$\mu$m$^2$ \\
+Core filled by cells & \asicutil\,\% \\
+\addlinespace
+Clock & \asicperiod\,ns (\asicfreq\,MHz) \\
+Worst setup slack & \asicslack\,ns \\
+Worst hold slack & \asicholdslack\,ns \\
+Total negative slack & \asictns\,ns \\
+\addlinespace
+Routing violations & \asicdrc{} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Timing closure is achieved with a tight setup margin: \asicslack\,ns of
+slack on a \asicperiod\,ns clock cycle. Total Negative Slack (TNS) is
+\asictns\,ns, demonstrating that the design contains no timing
+violations across any path. Hold timing is likewise satisfied across all
+register-to-register transfers. This distinction is critical: a setup
+timing violation produces a chip that must run at reduced frequency,
+whereas a hold violation produces silicon that fails catastrophically at
+any operating speed.
+
+Detailed routing concludes with \asicdrc{} design rule violations. In
+physical verification, zero is the only acceptable outcome: an ASIC with
+unrouted nets or short circuits is an unmanufacturable artifact.
+
+Core utilization settles at \asicutil\,\%, an intentionally modest
+figure. The initial floorplan dimensions were computed directly from
+pre-placement cell area, and subsequent timing optimization inserted
+repeaters and upsized gates that grew total area by roughly 25\%. While a
+production ASIC pipeline would iteratively compress the core boundary to
+minimize silicon cost, this reference flow prioritizes robust, zero-DRC
+routing over aggressive silicon utilization.
+
+\section{Where This Sits in the Build}
+\label{sec:t-build}
+
+Two Bazel targets govern this flow. The first,
+\code{//cpu/vreteno/asic:vreteno\_cells}, executes logic synthesis and
+technology mapping with Yosys. It completes in roughly ten seconds and is
+included in the default build suite; any commit that introduces an HDL
+construct incompatible with standard cells breaks the build immediately
+rather than surfacing months later during tapeout.
+
+The second target, \code{//cpu/vreteno/asic:vreteno\_pnr}, executes the
+full OpenROAD place-and-route flow. Because detailed routing requires
+twenty minutes of compute, the target is tagged \code{manual} (consistent
+with our Vivado FPGA bitstream targets), keeping routine \code{bazel
+test //...} runs fast enough for pre-commit verification.
+
+Decoupling the 20-minute physical layout run from document compilation
+poses a provenance challenge: how can a fast document build quote exact
+layout metrics without manual transcription? The problem is identical to
+tracking project timeline data, and it is resolved identically. The
+physical run produces two compact text artifacts: the scalar timing
+metrics and a spatial cell-density histogram. Both are checked into
+source control. At document build time, \code{//tools/denmap} compiles
+these text tables into LaTeX macros and generates the TikZ density plot
+in Fig.~\ref{fig:t-map}. The final 40\,MB routed DEF remains an
+uncommitted artifact in the build cache. As a result, no figure is a
+bitmap pasted by hand, no quantitative claim can diverge from EDA
+output, and updating any statistic requires executing the physical run
+and checking in its emitted metrics.
+
+\section{What a Tapeout Would Still Want}
+\label{sec:t-not}
+
+This flow terminates with a clean, routed design that closes timing
+under nominal conditions. A genuine silicon tapeout begins there.
+
+\emph{Foundry-certified physical verification.} Nangate45 provides
+neither certified design rule decks nor calibrated device models. The
+zero-DRC metric achieved here reflects the router's internal geometric
+checks rather than independent signoff. Full physical verification
+requires DRC and Layout-Versus-Schematic (LVS) validation using
+foundry-supplied decks (such as KLayout or Calibre). On an open foundry
+PDK with fabrication backing—such as SkyWater 130\,nm or
+GlobalFoundries GF180MCU—these decks exist and would run directly
+against the emitted layout.
+
+\emph{A writable instruction store.} Implemented as a mask ROM,
+Vreteno's program is frozen into silicon at fabrication. A general-purpose
+microprocessor demands programmable execution memory, requiring either
+an SRAM macro generated by a memory compiler or a boot ROM paired with a
+serial interface (UART or SPI) to load code into memory before releasing
+core reset. Vreteno already incorporates the bus interface needed to
+attach such a loader.
+
+\emph{I/O pad ring and ESD protection.} The core's \asiccells{} cells
+currently terminate at perimeter pins on the core boundary—suitable for
+macro integration in a larger SoC, but insufficient for a standalone
+packaged die. A fabricated chip requires a pad ring: I/O pads with
+level shifters, high-current output drivers, electrostatic discharge
+(ESD) protection networks, bond or bump arrays, and independent I/O
+supply rings.
+
+\emph{Design for testability (DFT) and scan insertion.} The design
+incorporates no scan chains; every sequential element is an ordinary
+flip-flop. A manufactured part could be clocked functionally but not
+shifted through scan vectors, rendering internal manufacturing defects
+impossible to isolate. Inserting scan flip-flops and test-enable pins
+is a standard synthesis transformation, representing the dividing line
+between silicon that happens to run and silicon whose integrity can be
+proven through automatic test pattern generation (ATPG).
+
+\emph{Explicit power-on reset architecture.} Vreteno explicitly resets
+its pipeline registers, CSRs, performance counters, and debug registers,
+leaving its 32-entry register file uninitialized. On an FPGA, the
+global configuration bitstream clears all storage elements at startup.
+On silicon, unreset flip-flops power up in random states. While RISC-V
+architectural semantics tolerate undefined values in registers
+$x1$--$x31$ prior to software initialization, register $x0$ must
+strictly evaluate to zero. Vreteno safeguards $x0$ by hardwiring reads
+to zero rather than fetching from the storage array. Nonetheless,
+physical signoff mandates explicit power-on-reset sequencing: an initial
+value in Verilog is a simulation convenience, not a physical circuit.
+
+\emph{Multi-corner, multi-mode (MCMM) timing signoff.} This run evaluated
+a single operational point: typical process, nominal voltage, and
+ambient room temperature (TT/1.1\,V/25\,$^\circ$C). Production signoff
+requires analyzing PVT corners across the operating envelope: the slow
+corner (SS, low voltage, high temperature) to guarantee setup timing at
+target frequency, and the fast corner (FF, high voltage, sub-zero
+temperature) to prevent catastrophic hold-time violations.
+
+\emph{Parasitic extraction (PEX).} Wire delays in this run were modeled
+using OpenROAD's internal resistance-capacitance estimations. Final
+signoff demands rigorous 2.5D or 3D parasitic extraction from the
+finished layout to generate a standard parasitic exchange format (SPEF)
+file, followed by static timing analysis against extracted parasitics.
+
+Each of these requirements is a known engineering task rather than an
+architectural uncertainty. The physical flow demonstrated here
+establishes the automated foundation onto which those signoff steps
+attach.
+
+
+\begin{thebibliography}{9}
+
+\bibitem{vreteno}
+F.~Filmar and D.~Janković, ``Vreteno: an RV32IMAC core in TxHDL,''
+project repository \code{HDL/txhdl}, \code{//docs:vreteno}, 2026.
+
+\bibitem{cover}
+F.~Filmar and D.~Janković, ``TxHDL documents,'' project repository
+\code{HDL/txhdl}, \code{//docs:cover}, 2026.
+
+\end{thebibliography}
+
+\end{document}

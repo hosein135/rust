@@ -1,0 +1,131 @@
+% SPDX-License-Identifier: Apache-2.0
+% covers: I2cInit
+\datasheet{I2cInit}{The I2C master that resets and configures an HDMI encoder chip.}
+
+\dsfacts{\code{lib/parts/src/hdmi.rs}}{\code{txhdl\_parts::hdmi::I2cInit}}%
+{\code{//docs:hdmi}}
+
+\subsection*{Function}
+
+\code{I2cInit} holds the chip's reset low on \code{nreset}, releases
+it, waits, and then writes a table of register values as I2C
+transactions. The table is the SiI9134's configuration,
+\code{SII9134\_WRITES}, with two entries. The unit drives the two
+open-drain lines through \code{scl\_low} and \code{sda\_low}, and reads
+the data line back on \code{sda\_in}. \code{done} rises when the table
+is written, and \code{failed} is high when the chip did not acknowledge
+a byte.
+
+The unit has no bus. It writes this table, one transaction per entry.
+\code{//docs:hdmi} and the source both state that no document the part
+was written from gives the chip's registers. The values are
+unconfirmed until checked against the SiI9134's documentation or the
+board vendor's example.
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}llllp{0.4\textwidth}@{}}
+\toprule
+Entry & Address & Register & Value & Meaning, unconfirmed \\
+\midrule
+0 & \code{0x72} & \code{0x08} & \code{0x35} & System control: out of
+power down, with the input bus as the board wires it. \\
+1 & \code{0x7a} & \code{0x2f} & \code{0x00} & The output as DVI: no
+HDMI packets, only the picture. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The address is the chip's I2C address as eight bits, write bit
+included.
+
+\subsection*{Parameters}
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}lp{0.7\textwidth}@{}}
+\toprule
+Parameter & Meaning \\
+\midrule
+\code{DIV} & Cycles in a quarter of an I2C bit. A bit is four
+quarters. \\
+\code{HOLD} & Cycles the reset is held low, and cycles the unit waits
+after releasing it. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The tables below are for \code{I2cInit<63, 2520000>}, the master of
+\code{hdmi/src/netlist.rs}. Its doc comment states that a quarter of 63
+cycles at 25.2~MHz makes a bit at 100~kHz, and that 2\,520\,000 cycles
+are a tenth of a second.
+
+\dstables{I2cInit}
+
+\subsection*{Behaviour}
+
+The unit is two processes. The quarter clock counts \code{tick} from 0
+to \code{DIV} less one and round again, every cycle, and drives
+\code{done} from \code{written} and \code{failed} from \code{nak}. The
+other is the whole job written as the sequence it is: the reset held,
+the reset released, then a transaction per entry, a quarter of a bit
+per wait. The lowering numbers its waits into a state register the unit
+does not declare, \code{at\_wait}, keeps its loops' counts in
+\code{for0} to \code{for5}, and holds the three lines it drives
+between states in \code{nreset\_held}, \code{scl\_low\_held} and
+\code{sda\_low\_held}; all are in the tables above. \code{byte} is
+\code{byte\_rw} in the netlist, since SystemVerilog reserves the word.
+
+\begin{itemize}
+\item \code{nreset} is low for \code{HOLD} cycles, then high, and the
+unit waits \code{HOLD} cycles more before the first transaction.
+\item A transaction is the start, the address, the register and the
+value, each a byte followed by its acknowledge, and the stop, every
+step a whole number of quarters of \code{DIV} cycles.
+\item At the start the data line falls while the clock is high, then
+the clock falls. At the stop the clock rises while the data line is
+low, then the data line rises.
+\item In a data bit the data line is set while the clock is low, and
+the clock is high through the two middle quarters, so the data changes
+only while the clock is low. Bytes go out most significant bit first,
+from \code{shift}.
+\item In an acknowledge the unit releases the data line, and reads
+\code{sda\_in} at the end of the clock's high half, as it pulls the
+clock low again. A high line sets \code{nak}, which \code{failed}
+follows. Nothing clears \code{nak}.
+\item \code{scl\_low} or \code{sda\_low} high pulls its line low.
+\item After the stop of the last entry, \code{written} is set,
+\code{done} rises a cycle later, and the sequence waits for ever.
+\end{itemize}
+
+\subsection*{Verification}
+
+\begin{itemize}
+\item \code{the\_chip\_is\_configured\_over\_i2c}, in
+\code{//lib/parts:parts\_test}, runs \code{I2cInit<3, 5>} against
+\code{I2cDevice}, a model of a device that acknowledges every byte and
+records what it was sent. It checks that \code{done} rises, that
+\code{failed} stays low, that the reset is released at cycle 5, and
+that the device received \code{SII9134\_WRITES}.
+\item \code{ex\_hdmi} runs \code{I2cInit<4, 10>} against the same model
+and asserts the same table, \code{done}, and \code{failed} low.
+\item The build simulates that unit's netlist against the run under
+nvc and Verilator: \code{//docs:hdmi\_sim\_hdmi\_i2c\_hdmi\_i2c\_tb\_test}
+and \code{//docs:hdmi\_vsim\_hdmi\_i2c\_test}.
+\end{itemize}
+
+\subsection*{Used by}
+
+The example \code{ex\_hdmi}. The demonstration for the AX7A200B:
+\code{//hdmi:netlist} writes the Verilog of \code{hdmi\_i2c}, and
+\code{hdmi/board/hdmi\_demo.v} instantiates it with open-drain pads on
+the chip's I2C lines and \code{done} and \code{failed} on LEDs.
+\code{//hdmi:demo\_synth} and \code{//hdmi:demo\_pnr} put the design
+through Vivado to a bitstream. \code{//docs:hdmi} states that it has
+not yet run on the board.
+
+\subsection*{Limits}
+
+There is one table, and its values are unconfirmed. The unit keeps
+writing after a byte is not acknowledged, and it writes the table once.
+It has no input for the clock line. \code{tick} is 16 bits wide, so
+\code{DIV} is at most 65\,536; the counters of the two holds are as
+wide as \code{HOLD} needs, 22 bits in the tables.

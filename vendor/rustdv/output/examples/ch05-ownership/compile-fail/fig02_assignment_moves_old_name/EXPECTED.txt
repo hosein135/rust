@@ -1,0 +1,15 @@
+error[E0382]: borrow of moved value: `a`
+ --> src/main.rs:4:15
+  |
+2 |     let a = String::from("ADD 5 3");
+  |         - move occurs because `a` has type `String`, which does not
+  |           implement the `Copy` trait
+3 |     let b = a;
+  |             - value moved here
+4 |     println!("{a}");
+  |               ^^^ value borrowed here after move
+  |
+help: consider cloning the value if the performance cost is acceptable
+  |
+3 |     let b = a.clone();
+  |              ++++++++

@@ -1,0 +1,7 @@
+error[E0308]: mismatched types
+ --> src/main.rs:4:24
+  |
+4 |     match nice_div(3, "zero") {
+  |           -------- ^^^^^^ expected `u32`, found `&str`
+  |           |
+  |           arguments to this function are incorrect

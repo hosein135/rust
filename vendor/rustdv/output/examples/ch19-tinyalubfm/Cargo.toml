@@ -1,0 +1,12 @@
+[package]
+name = "ch19_tinyalubfm"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/ch19_tinyalubfm.rs"
+
+[dependencies]
+rustdv = { path = "../../../rustdv" }
+tinyalu_utils = { path = "../tinyalu-utils" }

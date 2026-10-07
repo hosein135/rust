@@ -1,0 +1,4 @@
+before: Mary [97, 82] / Mary [97, 82]
+-- add a grade through the copy --
+after:  Mary [97, 82, 100] / Mary [97, 82, 100]
+handles to the one list: 2

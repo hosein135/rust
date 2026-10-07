@@ -1,0 +1,11 @@
+[package]
+name = "ch15_async_await_executor"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/ch15_async_await_executor.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+rustdv = { path = "../../../rustdv" }

@@ -1,0 +1,6 @@
+[package]
+name = "ch07_structs_enums_methods_fig08"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]

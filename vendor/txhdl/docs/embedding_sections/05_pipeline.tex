@@ -1,0 +1,115 @@
+% SPDX-License-Identifier: Apache-2.0
+\section{A Pipeline Is an Async Function}
+\label{sec:e-pipeline}
+
+A pipeline and a sequence are one construct driven two ways.
+
+A sequence runs one invocation to completion before starting the next. A
+pipeline starts a new invocation every cycle, so several are in flight at
+once, each at a different point in the body. Nothing about the body
+differs. The difference is the rate at which invocations start, and that
+belongs at the call site.
+
+\begin{lstlisting}[caption={A pipeline, a sequence and a parallel process, all at once. Nobody placed the stage boundary: it is where an operator with latency is awaited.},label={lst:pipeline}]
+use crate::pipeline::{add, mul};
+
+async fn mac(a: U<32>, b: U<32>, prev: U<64>) -> U<64> {
+    let p = mul(a, b).await;   // the multiplier's latency
+    add(prev, p).await         // and the adder's
+}
+\end{lstlisting}
+
+\subsection{Nobody places the stage boundary}
+
+An earlier draft of this listing wrote \code{tick().await} to say where
+the register goes. That was wrong, and wrong in a way the project has
+already ruled on: the eighth thesis~\cite{theses} asks the language to
+stop making a designer place registers by hand, and a hand-placed tick is
+exactly that under a new name.
+
+Operators that have latency are \code{async} instead, and they live in
+\code{crate::pipeline}, because each of them is a pipeline stage the
+moment it is awaited. Combinational operators live in
+\code{crate::funcs}, so the module a design imports from already says
+whether the operation can cost time. A multiply takes as long as the
+mapping decides, so
+\code{mul} is awaited and the caller never learns the number. An adder is
+the same: \code{add} is awaited too, because whether an addition costs a
+cycle is a question about the adder and the clock, not about the design.
+
+\subsection{Why there is no \code{impl Add}}
+
+Writing \code{prev + p} would be shorter, and it is not offered.
+
+An operator has to return a value. An operation whose latency the mapping
+decides cannot, so \code{+} could only be provided for the zero-latency
+case, and a design that wrote it would have chosen a combinational adder
+without saying so. The shorter spelling would be the one that quietly
+makes the decision the language exists to defer.
+
+The objection to this is verbosity, and it rests on a misreading.
+\code{.await} is not a claim that a cycle is spent. It is a refusal to
+decide here. An adder the mapping gives zero latency is still awaited:
+the netlist makes it a wire, and the design that awaited it did not
+pay for the question. The run does not follow the mapping, and its
+\code{add} spends one cycle.
+
+The pipeline's depth then follows from the operators the design used. Two
+multiplies in sequence give two boundaries, and rebinding \code{mul} to a
+single-cycle implementation removes them, without an edit to
+Listing~\ref{lst:pipeline}.
+
+Three constructs go, and one of them takes a compiler pass with it.
+
+\subsection{The pipe declaration disappears}
+
+LHDL's \code{pipe} declared a value that crosses a stage boundary, so that
+live-range analysis would know to hold it. TxHDL had the same notion under
+a different name.
+
+In an async function, a local that is live across an \code{.await} is held
+in the state machine the compiler generates, because that is what an async
+function is. \code{p} in Listing~\ref{lst:pipeline} crosses the await inside
+\code{mul} and needs no declaration. The analysis the \code{pipe} keyword existed to feed
+is one that \code{rustc} performs already.
+
+\subsection{What this does not settle}
+
+Three things, and none of them is free.
+
+\begin{itemize}
+  \item \term{Named stages are gone.} A boundary is an await, not a named
+        block. A name becomes a comment.
+  \item \term{The initiation interval moves to the call site.} It was
+        implied by the choice of keyword and is now an argument where the
+        body is driven. That is a fair trade and not a saving.
+  \item \term{Resource sharing has to be proved.} A real pipeline shares
+        one multiplier across every item in flight, while several
+        concurrent invocations each appear to want their own. They are the
+        same code at the same await index, so the lowering can share them.
+        That is a claim about the compiler being written, not about Rust,
+        and it is the largest piece of unfinished work in this proposal.
+\end{itemize}
+
+One thing improves. TxHDL had a \code{stall} statement for a stage that
+cannot proceed. A stall is now an await that has not completed, which is
+the mechanism rather than a construct layered on top of it.
+
+\code{mac} does not loop, and should not. It is an operation, invoked
+once per item; the unit that calls it is what loops, per
+Section~\ref{sec:e-regread}, and awaiting \code{mac} inside that loop is
+what makes each call one item in flight.
+
+\subsection{It has been run}
+
+The claim above was written before anything ran it. The runtime now
+has \code{pipeline::drive}, which starts an invocation of an
+\code{async fn} at every edge at which an input is offered and polls
+every invocation in flight as a process of its own, and the examples
+document runs a two-await \code{mac} through it. At every edge from
+the second, one invocation is in its multiplier and another in its
+adder; from the third, a result lands every cycle. The stage boundaries
+were the awaits, and nobody placed them. Resource sharing, the item
+above that had to be proved, is still not: the prototype gives each
+invocation its own multiplier, and it is the lowering that would share
+one.

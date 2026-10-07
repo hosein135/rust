@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+
+config SOC_VRETENO
+	select RISCV
+	select RISCV_PRIVILEGED
+	# The platform-level interrupt controller: without this the
+	# architecture's irq_enable and priority setting never reach it,
+	# so a device on the controller never interrupts, and the first
+	# that needed to, the Ethernet port, answered nothing (#786).
+	select RISCV_HAS_PLIC
+	select RISCV_ISA_RV32I
+	select RISCV_ISA_EXT_M
+	select RISCV_ISA_EXT_A
+	select RISCV_ISA_EXT_C
+	select RISCV_ISA_EXT_ZICSR
+	select ATOMIC_OPERATIONS_BUILTIN
+	select INCLUDE_RESET_VECTOR
+
+# The core is RV32IMAC and `misa` says so (issue 1010), so the A
+# extension is selected and the atomic operations are the compiler's
+# builtins, its `amo` and `lr`/`sc` instructions. That is a statement
+# about the hardware: before issue 1010 the same image trapped on its
+# first atomic, and the C ones stood in.

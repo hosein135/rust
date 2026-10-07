@@ -1,0 +1,262 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+# The toolchain is pinned in rust-toolchain.toml because this repository's
+# regression compares exact compiler output — book-sync checks listings, and
+# the compile-fail cases assert specific error codes (E0277, E0308, E0382,
+# E0599). A floating `stable` changes diagnostics and breaks them while the
+# code is perfectly correct.
+#
+# `dtolnay/rust-toolchain@stable` used to be used here, and it exports
+# RUSTUP_TOOLCHAIN, which takes precedence over rust-toolchain.toml — so CI
+# silently ignored the pin and eventually failed on
+# custom/compile-fail-methodology. The channel is now read *from* the file, so
+# the pin has exactly one home and CI cannot drift from a developer's machine.
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read the pinned toolchain
+        id: pin
+        run: |
+          channel=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          if [ -z "$channel" ]; then
+            echo "::error::could not read [toolchain] channel from rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "pinned toolchain: $channel"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.pin.outputs.channel }}
+          components: rustfmt
+
+      - name: Confirm the pin took effect
+        run: |
+          want='${{ steps.pin.outputs.channel }}'
+          got=$(rustc --version | awk '{print $2}')
+          echo "rust-toolchain.toml wants $want; rustc reports $got"
+          if [ "$got" != "$want" ]; then
+            echo "::error::CI is running rustc $got but the repository pins $want."
+            echo "::error::Compile-fail error codes and book-sync listings are compared exactly, so they will drift."
+            exit 1
+          fi
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read the pinned toolchain
+        id: pin
+        run: |
+          channel=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          if [ -z "$channel" ]; then
+            echo "::error::could not read [toolchain] channel from rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "pinned toolchain: $channel"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.pin.outputs.channel }}
+          components: clippy
+
+      - name: Confirm the pin took effect
+        run: |
+          want='${{ steps.pin.outputs.channel }}'
+          got=$(rustc --version | awk '{print $2}')
+          echo "rust-toolchain.toml wants $want; rustc reports $got"
+          if [ "$got" != "$want" ]; then
+            echo "::error::CI is running rustc $got but the repository pins $want."
+            echo "::error::Compile-fail error codes and book-sync listings are compared exactly, so they will drift."
+            exit 1
+          fi
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # Book-sync + all figure examples (build, run vs goldens, compile-fail,
+  # unit tests). Simulator tests auto-skip here (no iverilog installed).
+  regress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read the pinned toolchain
+        id: pin
+        run: |
+          channel=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          if [ -z "$channel" ]; then
+            echo "::error::could not read [toolchain] channel from rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "pinned toolchain: $channel"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.pin.outputs.channel }}
+
+      - name: Confirm the pin took effect
+        run: |
+          want='${{ steps.pin.outputs.channel }}'
+          got=$(rustc --version | awk '{print $2}')
+          echo "rust-toolchain.toml wants $want; rustc reports $got"
+          if [ "$got" != "$want" ]; then
+            echo "::error::CI is running rustc $got but the repository pins $want."
+            echo "::error::Compile-fail error codes and book-sync listings are compared exactly, so they will drift."
+            exit 1
+          fi
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: output/examples
+
+      - name: Run regression suite
+        run: |
+          set -o pipefail
+          python3 output/regression/regress.py 2>&1 | tee regress.log
+
+      - name: Show the failing detail
+        if: failure()
+        run: |
+          echo "=== last 300 lines of the regression log ==="
+          tail -n 300 regress.log || true
+          echo
+          echo "=== compile-fail cases, re-run verbosely ==="
+          bash rustdv/framework-tests/compile-fail/run.sh || true
+
+      - name: Upload regression log
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: regress-log
+          path: regress.log
+          if-no-files-found: ignore
+
+  # Free-simulator validation. Linux and macOS run every Icarus and Verilator
+  # simulator entry. Commercial simulators cannot run in public CI.
+  sim-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            filter: sim
+          - os: macos-latest
+            filter: sim
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read the pinned toolchain
+        id: pin
+        run: |
+          channel=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.pin.outputs.channel }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            rustdv
+            output/examples
+
+      - name: Install simulator build dependencies
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends \
+              autoconf flex bison gperf help2man pkg-config libfl-dev \
+              zlib1g-dev liblz4-dev curl ca-certificates
+          else
+            brew install autoconf flex bison gperf help2man pkg-config lz4
+            echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+            echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Cache Icarus 13.0
+        id: icarus-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/iverilog-13.0
+          key: iverilog-13.0-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Build pinned Icarus
+        if: steps.icarus-cache.outputs.cache-hit != 'true'
+        run: bash ci/install-iverilog.sh "$RUNNER_TEMP/iverilog-13.0"
+
+      - name: Select and verify pinned Icarus
+        run: |
+          echo "$RUNNER_TEMP/iverilog-13.0/bin" >> "$GITHUB_PATH"
+          got="$("$RUNNER_TEMP/iverilog-13.0/bin/iverilog" -V 2>/dev/null | sed -n 's/^Icarus Verilog version \([^ ]*\).*/\1/p')"
+          test "$got" = 13.0 || {
+            echo "::error::expected Icarus 13.0, got $got"
+            exit 1
+          }
+
+      - name: Cache Verilator 5.050
+        id: verilator-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/verilator-5.050
+          key: verilator-5.050-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Build pinned Verilator
+        if: steps.verilator-cache.outputs.cache-hit != 'true'
+        run: bash ci/install-verilator.sh "$RUNNER_TEMP/verilator-5.050"
+
+      - name: Select and verify pinned Verilator
+        run: |
+          echo "$RUNNER_TEMP/verilator-5.050/bin" >> "$GITHUB_PATH"
+          got="$($RUNNER_TEMP/verilator-5.050/bin/verilator --version | awk '{print $2}')"
+          test "$got" = 5.050 || {
+            echo "::error::expected Verilator 5.050, got $got"
+            exit 1
+          }
+
+      - name: Run simulator smoke tests
+        run: |
+          set -o pipefail
+          python3 output/regression/regress.py --suite custom --filter '${{ matrix.filter }}' 2>&1 | tee sim.log
+
+      - name: Show the failing detail
+        if: failure()
+        run: |
+          echo "=== last 300 lines of the regression log ==="
+          tail -n 300 sim.log || true
+          echo
+          echo "=== verilator version on this runner ==="
+          verilator --version || true
+          echo
+          echo "=== verilator smoke, re-run directly for its own output ==="
+          bash sim/run_smoke.sh verilator || true
+          echo
+          echo "=== rustdv TinyALU, re-run directly ==="
+          bash sim/run_rustdv.sh release verilator || true
+
+      - name: Upload simulator log
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sim-log-${{ runner.os }}
+          path: sim.log
+          if-no-files-found: ignore

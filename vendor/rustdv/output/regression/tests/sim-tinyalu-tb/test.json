@@ -1,0 +1,14 @@
+{
+  "comment": "The shipped TinyALU testbench (rustdv/tinyalu_tb) on Icarus. This is the framework's own end-to-end example — the one the Interlude and chapter 40 present — and until 2026-07-29 nothing in the suite ran it: `cargo test --workspace` proved it compiled, and the claim that it passes rested on somebody running sim/run_rustdv.sh by hand. Skips without iverilog.",
+  "cmd": ["bash", "sim/run_rustdv.sh", "release"],
+  "cwd": ".",
+  "skip_if_missing": "iverilog",
+  "expect_exit": 0,
+  "timeout": 600,
+  "expect_in_output": [
+    "REGRESSION: PASS",
+    "scoreboard: 20 compared, 0 mismatches",
+    "scoreboard: 4 compared, 0 mismatches",
+    "coverage: Add=5 And=5 Mul=5 Xor=5"
+  ]
+}

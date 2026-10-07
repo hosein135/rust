@@ -1,0 +1,12 @@
+[package]
+name = "ch26_logging"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+# Crate root named after the crate, not lib.rs (D29).
+path = "src/ch26_logging.rs"
+
+[dependencies]
+rustdv = { path = "../../../rustdv" }

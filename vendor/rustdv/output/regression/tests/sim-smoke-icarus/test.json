@@ -1,0 +1,8 @@
+{
+  "comment": "TinyALU smoke test on Icarus Verilog. Skips on machines without iverilog; runs in CI.",
+  "cmd": ["bash", "sim/run_smoke.sh", "icarus"],
+  "cwd": ".",
+  "skip_if_missing": "iverilog",
+  "expect_exit": 0,
+  "expect_in_output": ["SMOKE: PASS"]
+}

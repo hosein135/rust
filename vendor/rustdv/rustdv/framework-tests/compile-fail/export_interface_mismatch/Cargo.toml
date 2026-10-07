@@ -1,0 +1,13 @@
+[package]
+name = "cf_export_interface_mismatch"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/cf_export_interface_mismatch.rs"
+
+[dependencies]
+rustdv = { path = "../../.." }
+
+[workspace]

@@ -1,0 +1,452 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The Zephyr port of this machine: a SoC, a board, a device tree and
+# the drivers, arranged as a Zephyr module so that a Zephyr of the
+# reader's choosing builds against it.
+#
+# Bazel builds images against it too, with nothing from the system
+# (issue 390): `zephyr_image` in `defs.bzl` fetches Zephyr 4.1.0 and
+# runs its own CMake and Kconfig with this repository's toolchain, and
+# the tests below read the configuration each build generated. The
+# port is also held to the hardware by
+# `//cpu/vreteno:zephyr_port_test`, which reads the files below at
+# compile time and checks their addresses against the design's own
+# constants. `README.md` says what each target is.
+
+load("@bazel_lib//lib:write_source_files.bzl", "write_source_files")
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load(":defs.bzl", "analyses_under_python_test", "zephyr_image")
+
+package(default_visibility = ["//visibility:public"])
+
+# Every file of the port, as the module CMake is pointed at.
+filegroup(
+    name = "module",
+    srcs = glob(["**"]),
+)
+
+# `hello_world` for this board, built by this repository's own
+# toolchain rather than by a reader following the README above.
+zephyr_image(
+    name = "hello_world",
+    board = "ax7a200b",
+    module = ":module",
+    sample = "samples/hello_world",
+)
+
+# What the image proves. Not that it exists, which this port showed to
+# be worth almost nothing, but that the configuration the build
+# generated is this machine's.
+# The same sample with a network stack, which is what compiles the
+# Ethernet driver. Without it `ETH_VRETENO` is off, nothing hands
+# `eth_vreteno.c` to a compiler, and the driver is checked only as
+# text: the state `uart_vreteno.c` was in when it kept an implicit
+# declaration of `sys_read32`.
+# From a workspace that depends on TxHDL the default Python is the
+# root module's, not this one's 3.12; the image still analyses, since
+# the rule takes Zephyr's packages at 3.12 itself (issue 1001).
+analyses_under_python_test(
+    name = "other_python_test",
+    python_version = "3.11",
+    target = ":hello_world",
+)
+
+zephyr_image(
+    name = "hello_world_net",
+    board = "ax7a200b",
+    conf = "net.conf",
+    module = ":module",
+    sample = "samples/hello_world",
+)
+
+filegroup(
+    name = "hello_world_net_config",
+    srcs = [":hello_world_net"],
+    output_group = "config",
+)
+
+sh_test(
+    name = "eth_config_test",
+    srcs = ["eth_config_test.sh"],
+    args = ["$(location :hello_world_net_config)"],
+    data = [":hello_world_net_config"],
+)
+
+filegroup(
+    name = "hello_world_config",
+    srcs = [":hello_world"],
+    output_group = "config",
+)
+
+sh_test(
+    name = "config_test",
+    srcs = ["config_test.sh"],
+    args = ["$(location :hello_world_config)"],
+    data = [":hello_world_config"],
+)
+
+filegroup(
+    name = "hello_world_elf",
+    srcs = [":hello_world"],
+    output_group = "elf",
+)
+
+# The image names no path of the machine that built it, so that two
+# builds of one tree agree byte for byte (issue 711).
+sh_test(
+    name = "paths_test",
+    srcs = ["paths_test.sh"],
+    args = [
+        "$(location :hello_world_elf)",
+        "$(location :hello_world_config)",
+    ],
+    data = [
+        ":hello_world_config",
+        ":hello_world_elf",
+    ],
+)
+
+# The files the port test reads, so that editing any of them reruns
+# the check rather than leaving it stale.
+filegroup(
+    name = "port_sources",
+    srcs = [
+        "dts/riscv/hdlfactory/vreteno.dtsi",
+        "soc/hdlfactory/vreteno/Kconfig",
+        "soc/hdlfactory/vreteno/soc.h",
+        "drivers/ethernet/eth_vreteno.c",
+        "drivers/ethernet/Kconfig.vreteno",
+        "drivers/entropy/entropy_vreteno.c",
+        "drivers/entropy/Kconfig.vreteno",
+        "boards/hdlfactory/ax7a200b/ax7a200b_defconfig",
+    ],
+)
+
+# Every file of the port, for a document to list or an archive to
+# take.
+filegroup(
+    name = "sources",
+    srcs = glob([
+        "**/*.c",
+        "**/*.dts",
+        "**/*.dtsi",
+        "**/*.yaml",
+        "**/*.yml",
+        "**/*.txt",
+        "**/Kconfig*",
+        "**/*_defconfig",
+    ]),
+)
+
+# The fastboot server for the board (issue 143), built by the same
+# toolchain: the core below on a Zephyr TCP socket, and what `boot`
+# does with a staged program. What it proves off the board is that it
+# builds against this port with a network stack; the port and the
+# jump are the board's to show.
+zephyr_image(
+    name = "fastboot",
+    app = "fastboot/app",
+    board = "ax7a200b",
+    module = ":module",
+)
+
+# The entropy driver's conditioned output on the serial port, in the
+# format //tools/trngstat reads (issue 780): sent with the serial loader
+# as fastboot is, its capture is the board's check of the conditioner.
+zephyr_image(
+    name = "entropy",
+    app = "entropy/app",
+    board = "ax7a200b",
+    module = ":module",
+)
+
+# EGL and GL ES 1.1 on Razboj (issue 996): a turning, lit fan of
+# triangles, double buffered and swapped on the vertical blanking, with
+# the GL library, EGL and the board's machine as one static library
+# built for the core, and the stubs written from Khronos's headers.
+# Sent with the serial loader as fastboot is; what the build proves off
+# the board is that it compiles and links against this port.
+zephyr_image(
+    name = "gles",
+    app = "gles/app",
+    board = "ax7a200b",
+    extra = [
+        "//gles:capi_stubs",
+        "//gles:egl_stubs",
+        "//gles:zephyr_lib",
+        "//third_party/khronos:headers",
+    ],
+    module = ":module",
+)
+
+# The same with the network stack logging at debug, for the board when
+# a frame goes missing (#786).
+zephyr_image(
+    name = "fastboot_debug",
+    app = "fastboot/app",
+    board = "ax7a200b",
+    conf = "fastboot/debug.conf",
+    module = ":module",
+    tags = ["manual"],
+)
+
+# The same with the cycles of a download counted and said on the console
+# when the connection closes, for finding where a segment's time goes on
+# the board (issue 1230).
+zephyr_image(
+    name = "fastboot_profile",
+    app = "fastboot/app",
+    board = "ax7a200b",
+    conf = "fastboot/profile.conf",
+    module = ":module",
+    tags = ["manual"],
+)
+
+# The fastboot server on the machine model, booted to its listening
+# line (issue 1386): the image as the board takes it, its data copied
+# to the core's own memory, and its drivers, the entropy source among
+# them, on the model's devices.
+sh_test(
+    name = "fastboot_model_test",
+    srcs = ["fastboot/model_test.sh"],
+    args = [
+        "$(rootpath //cpu/vreteno:machine)",
+        "$(rootpaths :fastboot)",
+    ],
+    data = [
+        ":fastboot",
+        "//cpu/vreteno:machine",
+    ],
+)
+
+# A download to the fastboot server on the machine model (issue 1390):
+# 256 KiB from a fastboot client on smoltcp, on the far end of the
+# model's cable, staged and checked byte for byte, with the steps a byte,
+# the retransmits and the port's dropped frames said in the log.
+sh_test(
+    name = "fastboot_download_model_test",
+    srcs = ["fastboot/model_download_test.sh"],
+    args = [
+        "$(rootpath //cpu/vreteno:machine)",
+        "$(rootpaths :fastboot)",
+    ],
+    data = [
+        ":fastboot",
+        "//cpu/vreteno:machine",
+    ],
+)
+
+# Fastboot over TCP, the device's side, with no transport in it
+# (issue 143). The same C is what the Zephyr server runs on the board
+# and what the host harness below runs, so a test against the harness
+# is a test of the board's code.
+cc_library(
+    name = "fastboot_core",
+    srcs = ["fastboot/fastboot.c"],
+    hdrs = ["fastboot/fastboot.h"],
+    copts = ["-std=c11"],
+    includes = ["fastboot"],
+)
+
+# The core fed one session in pieces from one byte to all of it,
+# since a wire splits a message where loopback does not.
+cc_test(
+    name = "fastboot_core_test",
+    srcs = ["fastboot/core_test.c"],
+    copts = ["-std=c11"],
+    deps = [":fastboot_core"],
+)
+
+# The entropy driver's conditioner (issue 780), built for the host
+# against Mbed TLS's SHA-256 alone, so that it can be tested here.
+cc_library(
+    name = "vreteno_condition",
+    srcs = ["drivers/entropy/vreteno_condition.c"],
+    hdrs = ["drivers/entropy/vreteno_condition.h"],
+    copts = ["-std=c11"],
+    includes = ["drivers/entropy"],
+    deps = ["@zephyr_mbedtls//:sha256"],
+)
+
+# The hash is SHA-256 over the words low byte first, against digests
+# taken with `sha256sum`, and a health test tripped part way through a
+# gathering refuses all of it.
+cc_test(
+    name = "condition_test",
+    srcs = ["tests/condition_test.c"],
+    copts = ["-std=c11"],
+    deps = [":vreteno_condition"],
+)
+
+# A source shaped like the board's, its dependence at lags 5, 19 and
+# 22: trngstat fails its extractor words as they come and passes them
+# through the conditioner.
+cc_binary(
+    name = "condition_model",
+    srcs = ["tests/condition_model.c"],
+    copts = ["-std=c11"],
+    deps = [":vreteno_condition"],
+)
+
+sh_test(
+    name = "condition_model_test",
+    srcs = ["tests/condition_model_test.sh"],
+    args = [
+        "$(rootpath :condition_model)",
+        "$(rootpath //tools/trngstat)",
+    ],
+    data = [
+        ":condition_model",
+        "//tools/trngstat",
+    ],
+)
+
+# What the board's server takes, `max-download-size`, from the server's
+# own sources: the staging area's size in its overlay, less the page
+# `jump.S` runs from (issue 1080). The harness and its test read this,
+# so neither can promise more than the board takes; `//tools/bootimg`
+# reads the same two files.
+genrule(
+    name = "fastboot_limits",
+    srcs = [
+        "fastboot/app/boards/ax7a200b.overlay",
+        "fastboot/app/src/main.c",
+    ],
+    outs = [
+        "fastboot/fb_limits.h",
+        "fastboot/fb_limits.txt",
+    ],
+    cmd = """
+size=$$(sed -n 's/^[[:space:]]*reg = <0x[0-9a-fA-F]* \\(0x[0-9a-fA-F]*\\)>;.*/\\1/p' \\
+    $(location fastboot/app/boards/ax7a200b.overlay))
+page=$$(sed -n 's/^#define JUMP_PAGE \\([0-9]*\\).*/\\1/p' \\
+    $(location fastboot/app/src/main.c))
+if [ -z "$$size" ] || [ -z "$$page" ]; then
+    echo "fastboot_limits: no staging size or JUMP_PAGE in the server's sources" >&2
+    exit 1
+fi
+max=$$(( size - page ))
+printf '/* Generated from the server overlay and main.c (issue 1080). */\\n#define FB_MAX_DOWNLOAD 0x%08xu\\n' "$$max" >$(location fastboot/fb_limits.h)
+printf '0x%08x\\n' "$$max" >$(location fastboot/fb_limits.txt)
+""",
+)
+
+# The core on a host socket.
+cc_binary(
+    name = "fastboot_host",
+    srcs = [
+        "fastboot/fb_limits.h",
+        "fastboot/host_main.c",
+    ],
+    copts = [
+        "-std=c11",
+        "-D_DEFAULT_SOURCE",
+    ],
+    deps = [":fastboot_core"],
+)
+
+# Stock `fastboot` from Android's platform tools, pinned in
+# `multitool.lock.json`, boots an image through the harness: the test
+# that the choice of fastboot was made for, with no client written
+# here. It also refuses `hello_ram_bin`, shorter than a boot image
+# header, and boots it padded (issue 799).
+sh_test(
+    name = "fastboot_test",
+    srcs = ["fastboot/fastboot_test.sh"],
+    args = [
+        "$(rootpath :fastboot_host)",
+        "$(rootpath @multitool//tools/fastboot)",
+        "$(rootpath //cpu/vreteno/rust:hello_ram_bin)",
+        "$(rootpath //cpu/vreteno/rust:hello_fastboot)",
+        "$(rootpath fastboot/fb_limits.txt)",
+    ],
+    data = [
+        "fastboot/fb_limits.txt",
+        ":fastboot_host",
+        "@multitool//tools/fastboot",
+        "//cpu/vreteno/rust:hello_fastboot",
+        "//cpu/vreteno/rust:hello_ram_bin",
+    ],
+)
+
+# The copy-and-jump `boot` ends in, for the core's model to run.
+exports_files([
+    "fastboot/app/boards/ax7a200b.overlay",
+    "fastboot/app/src/jump.S",
+    "fastboot/app/src/main.c",
+])
+
+# The register headers the drivers include, one per map the parts
+# declare with `regmap!` (issue 709). They are committed, since a
+# reader's `west build` of this module runs no Bazel.
+#
+# REG_MAPS names every map //tools/regmap lists. Each header is
+# written from its map by a genrule, and write_source_files keeps the
+# committed copy equal to it (issue 1179): its test fails on a header
+# that differs or is missing, and
+#
+#   bazel run //zephyr:regs_update
+#
+# writes them all again. :regs_maps_test holds REG_MAPS to the maps
+# regmap lists and to the headers on disk, so a map declared in the
+# parts and not named here fails rather than going unchecked.
+REG_MAPS = [
+    "doorbell",
+    "eth",
+    "ethslots",
+    "gpio",
+    "hdmi",
+    "i2c",
+    "mdio",
+    "pwm",
+    "scan",
+    "sd",
+    "spi",
+    "syscon",
+    "timer",
+    "tracer",
+    "trng",
+    "uart",
+    "wdog",
+]
+
+[
+    genrule(
+        name = "regs_" + m,
+        outs = ["regs_gen/%s.h" % m],
+        cmd = "$(execpath //tools/regmap) %s c > $@" % m,
+        tools = ["//tools/regmap"],
+    )
+    for m in REG_MAPS
+]
+
+write_source_files(
+    name = "regs_update",
+    # A map just added to REG_MAPS has no header yet, and this target
+    # is what writes it, so a missing file is the diff test's to
+    # report rather than a reason not to build.
+    check_that_out_file_exists = False,
+    files = {
+        "include/vreteno/regs/%s.h" % m: ":regs_" + m
+        for m in REG_MAPS
+    },
+    suggested_update_target = "//zephyr:regs_update",
+)
+
+sh_test(
+    name = "regs_maps_test",
+    srcs = ["regs_maps_test.sh"],
+    args = [
+        "$(rootpath //tools/regmap)",
+        "zephyr/include/vreteno/regs",
+    ] + REG_MAPS,
+    data = [
+        "//tools/regmap",
+    ] + glob(
+        ["include/vreteno/regs/*.h"],
+        allow_empty = True,
+    ),
+)

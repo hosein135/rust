@@ -1,0 +1,36 @@
+# Cargo build artifacts — the examples workspace plus one target/ per
+# compile-fail mini-crate (21 in all). Regenerable with `cargo build`;
+# this is where .fingerprint, deps/, and incremental/ live.
+target/
+
+# mdbook build output — regenerate with `mdbook build book-pdf`
+book-pdf/book/
+
+# check.sh scratch output
+output/examples/build.log
+
+# ch26's file-handler figure writes its log beside the run (Figure 5)
+output/examples/rustdv_ch26_log.txt
+
+# simulator build products
+sim/build/
+
+# Python bytecode cache (regress.py)
+__pycache__/
+
+# macOS
+.DS_Store
+
+# scratch space (delete this line if you want tmp/ tracked)
+tmp/
+
+# Path B offline toolchain drop (large tarballs, never commit)
+toolchain-drop/
+
+# Personal/private project instructions — local only, never commit
+CLAUDE.local.md
+
+# Reference sources (cocotb, pyuvm, SV UVM, the book example repos, specs)
+# live outside the repo in ../rustdv-reference. They are research material,
+# not part of the product, and some are third-party or licensed documents.
+reference/

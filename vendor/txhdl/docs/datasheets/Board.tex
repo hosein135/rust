@@ -1,0 +1,342 @@
+% SPDX-License-Identifier: Apache-2.0
+% covers: Board
+\datasheet{Board}{The Vreteno machine for the Alinx AX7A200B, as one lowered unit of units.}
+
+\dsfacts{\code{cpu/vreteno/src/board.rs}}{\code{vreteno32::board::Board}}%
+{\code{//docs:vreteno}}
+
+\subsection*{Function}
+
+\code{Board} is everything that computes on the board, written as a
+unit of units so that \code{\#[lower]} makes its netlist as one module
+holding the rest. It holds seven hosts, an arbiter that puts them onto
+one link, a router of eight, and the peripherals behind its eight
+ports. The hosts are the core's tracker; Vivado's JTAG-to-AXI master
+on the board's top (issue 241), whose pins arrive under \code{jtag\_}
+and are joined by an \code{AxiPins}, sharing one host through
+\code{jarb} with the bridge of the RISC-V debug transport (issue 154);
+the Ethernet port's two engines, each behind an \code{AxiHost} of its
+own (issue 151); the video scanout's fetch (issue 151); and the SD card
+host's two engines, sharing one host through \code{sdarb} (issue 912);
+and Razboj's rasteriser behind \code{rhost} (issue 985).
+The arbiter is an \code{Arbiter7<32, 32, 4, 2, 5, 0>}, so the
+peripheral side of the bus allocates five bits of identifier, two for a
+host's own and three for the port, which is room for eight hosts
+(issue 1022). The debug transport, \code{dtm}, runs on the cable's
+clock behind the top's \code{BSCANE2}, and \code{dreq} and
+\code{dans} transfer its accesses across to the board's clock and back.
+The data memory and the timer each sit behind an \code{AxiPer}. Ten
+small peripherals share the page at \code{0x3000} behind the AXI-Lite
+bridge \code{LiteBridge<10, ..>}, a sixteenth of the page each: the
+serial port at
+\code{0x3000}, the pulse width modulator at \code{0x3100}, whatever a
+board hangs on the slot at \code{0x3200}, the remote peripheral at
+\code{0x3300}, the Ethernet port's registers at \code{0x3400}, the
+entropy source at \code{0x3500} (issue 458), the configuration
+flash's SPI master at \code{0x3600} (issue 312), the Ethernet PHY's
+management interface at \code{0x3700} (issue 864), the SD card host
+at \code{0x3800} (issue 153), and Razboj's doorbell at \code{0x3900}
+(issue 985). The DDR3 memory takes the router's port
+with no tracker in front, and holds AMD's MIG controller with its own
+AXI4 port as a foreign module, which makes the design's clock from the
+board's. The interrupt
+controller, \code{Plic3}, and the debug module, \code{Dm}, each sit
+behind a \code{LiteBridge<1, ..>} of their own; the module's lines go to
+the core's halt and resume requests and its register access, and take
+the core's debug mode and the word read (issue 154).
+
+The configuration flash, the chip that holds the bitstream, is reached
+twice (issue 312): through that SPI master, \code{spi}, for commands,
+and through \code{flashwin}, a \code{FlashWin<FLASH\_DIV, 5>} behind
+its own \code{AxiPer}, where an ordinary read of the 16~MiB from
+\code{0x2000\_0000} is answered with what the flash holds.
+\code{cfgflash}, a \code{CfgFlash<1>}, stands between both and the
+chip: it reaches the clock pin through \code{STARTUPE2}, waits for the
+end of configuration, holds the window in reset until then, and
+refuses write enable from the master.
+
+\code{run.rs} wires the same parts for a simulation. \code{Board} is
+that wiring as a unit, so a board top has to supply only the clocks,
+the resets and the pins. The top for the AX7A200B is
+\code{cpu/vreteno/board/vreteno\_board.v}.
+
+\subsection*{Parameters}
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}lp{0.7\textwidth}@{}}
+\toprule
+Parameter & Meaning \\
+\midrule
+\code{DIV} & The serial port's cycles per bit, as \code{Uart<DIV>}.
+The tables use 868, the value \code{board\_netlist board} writes for
+115200 baud at 100~MHz. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\code{board\_netlist} lowers \code{Board<868>} for the board and
+\code{Board<16>} for simulation. \code{//cpu/vreteno:board\_test}
+runs \code{Board<4>}.
+
+\subsection*{Address map}
+
+\code{BoardRouter} is \code{Router<8, BoardMap, 32, 32, 4, 5>}, and
+\code{BoardMap} beside it in \code{board.rs} states the map. A
+peripheral gets an address when the address under the mask equals the
+base, the first range that matches deciding.
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}lllp{0.35\textwidth}@{}}
+\toprule
+Base & Mask & Child & Behind \\
+\midrule
+\code{0x0000\_0000} & \code{0xffff\_f000} & \code{rom}, \code{Rom<5>} &
+\code{prom}, \code{AxiPer}: the boot memory, readable and not writable \\
+\code{0x1000} & \code{0xffff\_f000} & \code{dmem}, \code{Dmem<5>} &
+\code{pdmem}, \code{AxiPer} \\
+\code{0x0200\_0000} & \code{0xffff\_0000} & \code{timer},
+\code{Timer<5>} & \code{ptimer}, \code{AxiPer} \\
+\code{0x3000} & \code{0xffff\_f000} & \code{uart}, \code{Uart<DIV>} &
+\code{puart}, \code{LiteBridge<10, ..>} at \code{0x3000} \\
+& \code{0xffff\_ff00} & \code{pwm}, \code{Pwm} &
+the same bridge, at \code{0x3100} \\
+& \code{0xffff\_ff00} & the board's, on its own clock &
+the same bridge, at \code{0x3200} \\
+& \code{0xffff\_ff00} & \code{remote},
+\code{Remote<REMOTE\_WAIT>} & the same bridge, at \code{0x3300} \\
+& \code{0xffff\_ff00} & \code{eth}, \code{EthSlots} &
+the same bridge, at \code{0x3400} \\
+& \code{0xffff\_ff00} & \code{entropy}, \code{Entropy} &
+the same bridge, at \code{0x3500} \\
+& \code{0xffff\_ff00} & \code{spi}, \code{Spi} &
+the same bridge, at \code{0x3600} \\
+& \code{0xffff\_ff00} & \code{mdio}, \code{Mdio} &
+the same bridge, at \code{0x3700} \\
+& \code{0xffff\_ff00} & \code{sd}, \code{Sd} &
+the same bridge, at \code{0x3800} \\
+& \code{0xffff\_ff00} & \code{doorbell}, \code{Doorbell} &
+the same bridge, at \code{0x3900} \\
+\code{0x4000\_0000} & \code{0xc000\_0000} & \code{ddr3},
+\code{Ddr3Per} & nothing: the router's port goes to it \\
+\code{0x0c00\_0000} & \code{0xfc00\_0000} & \code{plic},
+\code{Plic3<0>} & \code{pplic}, \code{LiteBridge<1, ..>} at
+\code{0x0c00\_0000} \\
+\code{0x1000\_0000} & \code{0xffff\_0000} & \code{dmod}, \code{Dm} &
+\code{pdm}, \code{LiteBridge<1, ..>} at \code{0x1000\_0000}; not nearer the
+interrupt controller, whose 64~MiB window the router would match first \\
+\code{0x2000\_0000} & \code{0xff00\_0000} & \code{flashwin},
+\code{FlashWin<FLASH\_DIV, 5>} & \code{pflash}, \code{AxiPer}: the
+configuration flash, read only \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The router answers a burst that matches no range with \code{DecErr}.
+The boot memory is on the bus at zero as well (issue 268), readable and
+not writable; the core fetches from its own copy below \code{0x1000}
+and from the bus above it.
+
+\dstables{Board}
+
+\subsection*{Behaviour}
+
+\begin{itemize}
+\item The core's tracker is \code{AxiHost<32, 32, 4, 2, 4>}: 32-bit
+addresses and words, four lanes, two-bit identifiers, four of them.
+\item \code{rst} goes to the core, the timer, the serial port and the
+interrupt controller. The DDR3 controller has its own reset,
+\code{sys\_rst}, active high, and hands back \code{ui\_rst}, high
+until the clock it makes is good.
+\item The interrupt controller's source 1 is the serial port's
+interrupt line, its source 2 is \code{irq}, and its source 3 is the
+Ethernet port's arrival; all three ask while high.
+Its line is the core's external interrupt. The timer's line goes to
+the core's \code{tirq}.
+\item Of the core's outputs, only \code{halt} is a port. \code{instr}
+and the \code{Writeback} go nowhere; \code{dbg} and \code{dbg\_rdata}
+go to the debug module, whose requests and register access come back
+to the core.
+\item The join runs the timer before the core, since the core reads
+the timer's line in the same step, and the serial port before the
+interrupt controller before the core, for the same reason. \code{Ddr3Per} runs its controller
+before its pins part for the same reason.
+\item \code{calib} and the memory's pins are \code{Ddr3Per}'s,
+brought out as the unit's own ports.
+\item The slot at \code{0x3200} does not reach a field. It leaves as
+five channel ports, \code{vaw}, \code{var} and \code{vw} out and
+\code{vb} and \code{vr} back, because what sits there runs on a clock
+of its own and the crossing is the board top's business. A board with
+nothing there ties them off, and a program that touched \code{0x3200}
+on such a board would wait for ever.
+\item The remote peripheral at \code{0x3300} is the other way about:
+\code{remote} and \code{link} are fields, because both run on the
+core's clock. What leaves the unit is the frame stream, \code{net\_tx}
+out and \code{net\_rx} in, a byte and a last bit each, which is what
+the MAC speaks, and which the link shares with the Ethernet port
+through \code{share}. \code{REMOTE\_DEV} is 1 and \code{REMOTE\_WAIT} is
+100 million cycles, one second at 100~MHz (issue 397), after which an
+unanswered transaction is \code{SLVERR} on the bus.
+\item \textbf{The Ethernet port moves frames itself.} \code{eth} is
+the register map; behind it the fetch engine reads a frame out of its
+transmit slot and \code{FrameOut} turns the words into bytes, and on
+the way in \code{FrameLen} finds the frame's length again,
+\code{FrameIn} packs its bytes into words and the store engine writes
+them into a receive slot. The slots are in the DDR3 memory from
+\code{0x4100\_0000}. Frames the driver has not acknowledged wait in
+order, at most one a slot, and while both slots hold one \code{eth}
+tells \code{fin}, which drops the next frame and counts it for
+\code{rx\_errors} (issue 1313). \code{NoBeats} and \code{NoReads} hold the
+direction of each engine's host that the engine never uses.
+\item \textbf{The wire is shared by EtherType.} \code{share}, an
+\code{EthShare<0x88b5>}, sends the remote peripheral's frames to its
+link and every other frame to the Ethernet port, and merges the two
+users' frames onto \code{net\_tx} a frame at a time.
+\item The join runs the receive side, \code{share}, \code{flen} and
+\code{fin}, before the register block, because the block reads the
+slot and length they drive in the same step; and the store engine and
+the sending side after it, because they read what it drives. With the
+receive side after the block, the block read last step's slot, and
+the board test caught it as a frame of the right length whose every
+byte read back zero. \code{fin} reads the block's \code{rx\_full} a
+step late in the Rust run for the same reason; that can only drop a
+frame that starts in the cycle after an acknowledgement freed a slot,
+which the netlist would store, and never lands one on a slot still
+held.
+\item \textbf{The scanout fetches its own lines.} \code{scan}, a
+\code{ScanFetch<32, 16, 640>}, takes each line request that arrives on
+\code{scan\_req} from the pixel clock and starts \code{vfetch}, a
+\code{LineFetch} behind \code{vhost}, whose words leave on
+\code{scan\_words} for the line pair. The crossings are the board
+top's, as the video slot's are. \code{vnobeats} holds the write side
+the fetch never uses.
+\item \textbf{The SD card host moves blocks through memory.}
+\code{sdstore} and \code{sdfetch}, each behind a host of its own with
+one bit of identifier, share the arbiter's sixth port through
+\code{sdarb}, an \code{Arbiter2<32, 32, 4, 1, 2, 0>}. One command is a
+read or a write and never both, and the host starts no command until
+the last one's engine has finished, so the two never offer at once
+and the nest costs neither a turn; the host checks that their busy
+lines are never high together. \code{sdnoreads} and \code{sdnobeats}
+hold the directions they never use.
+\item \textbf{Razboj draws into the frame the scanout shows.}
+\code{raster}, a \code{Raster<32, 2, 10, 480, 0x4200\_0000,
+0x4280\_0000, 0x3900>} behind \code{rhost}, takes the arbiter's seventh
+port. It reads its display list at \code{0x4280\_0000} and writes
+rows of 1024 pixels from \code{0x4200\_0000}, the scanout's stride. Its
+count is \code{doorbell}'s register on the tenth slot, which drives the
+rasteriser's \code{ring} while the count is not zero, so an idle
+rasteriser reads nothing; the join runs the rasteriser before the
+doorbell, which reads its \code{idle} line.
+\item The join runs the SPI master and the window before
+\code{cfgflash}, since the pins read the lines both drive in the same
+step. The flash's data out, \code{fl\_miso}, goes to both directly. The
+flash's select and data in leave as \code{fl\_cs\_n} and
+\code{fl\_mosi}; \code{fl\_cclk} is the startup block's model of the
+clock pin, which a board leaves open, and \code{fl\_refused} says the
+pins refused write enable. The master's interrupt is not wired.
+\item \code{board\_netlist} puts a program in the core's
+\code{imem} and in the data memory's \code{lane0} to \code{lane3} of
+the netlist, since nothing on the machine loads them at run time.
+\end{itemize}
+
+The top, \code{vreteno\_board.v}, does the following around the
+lowered \code{board}:
+
+\begin{itemize}
+\item It hands the board's 200~MHz differential clock to the memory
+controller on \code{sys\_clk}, which makes the design's 100~MHz,
+\code{ui\_clk}, from it; the board has no clock generator of its own.
+\item The controller's reset, \code{sys\_rst}, is a pulse at power-on
+counted on the board's clock and nothing else. The core's reset
+follows the button, \code{ui\_rst} being low and \code{calib}, through
+two flip-flops on the design's clock.
+\item It ties \code{irq} low.
+\item It puts the flash's select and data on the configuration pins
+FCS\_B, D00 and D01, and holds D02 and D03, the chip's write protect
+and hold, high. The clock, CCLK, is reached through \code{STARTUPE2}
+inside the netlist.
+\item Its four LEDs, lit when driven low, show the modulator's first
+channel or the core halted, the serial line driven at least once, the
+memory calibrated, and a heartbeat from bit 25 of a counter, which
+says the controller's clock is good.
+\end{itemize}
+
+\subsection*{Verification}
+
+\begin{itemize}
+\item \code{//cpu/vreteno:board\_test} runs \code{Board<4>} in
+Rust. \code{the\_greeting\_runs\_on\_the\_board} must print
+\code{hello from rust} and halt within 8000 cycles.
+\code{the\_memory\_test\_runs\_on\_the\_board} must print
+\code{ddr3 ok} and halt within 40000 cycles.
+\code{input\_comes\_by\_interrupt\_one\_byte\_each} runs a program
+that takes four typed bytes through the interrupt controller, one
+interrupt each, and must print \code{got ping in 4 interrupts} and
+halt within 20000 cycles.
+\code{a\_frame\_received\_lands\_in\_memory\_and\_the\_core\_reads\_it\_back}
+puts a frame of 21 bytes on \code{net\_rx}, and the core must print its
+length and every byte from the slot it landed in.
+\code{two\_frames\_written\_to\_memory\_leave\_the\_port\_as\_written\_in\_order}
+has the core write two frames of 23 and 18 bytes and ask for both back
+to back, and the bytes that leave on \code{net\_tx} must be the two
+frames, whole and in order.
+\code{the\_entropy\_source\_answers\_on\_the\_board} must print
+\code{trng ok}, place every pair of raw windows and find the run it
+joins whole among the model's samples, within 120000 cycles.
+\code{the\_configuration\_flash\_answers\_on\_the\_board} gives the
+board a flash model holding a bitstream's first bytes; the core must
+print the chip's identity, a clear write enable latch and where the
+sync word is, and the chip must have taken no write enable.
+The same target also runs the boot memory, the remote peripheral, the
+loader and the debug module through the board.
+\code{the\_netlist\_holds\_the\_controller} checks that the Verilog
+has the top, the core and the DDR3's pins part as modules,
+instantiates \code{ddr3\_axi32} and \code{ring\_osc} without writing
+either, and has
+the \code{dq} pads.
+\item \code{//cpu/vreteno/board/sim:board\_test} simulates the top, the
+netlist of \code{//cpu/vreteno:board\_sim\_v}, the controller and two
+Micron models under Vivado's simulator. It is manual.
+\code{//docs:vreteno} reports that in that run the core says
+\code{ddr3 ok} on the serial port and halts.
+\item \code{//cpu/vreteno:vreteno\_board\_synth} and
+\code{//cpu/vreteno:vreteno\_board\_pnr} synthesise, place and route
+the design with the board's pins. Both are manual.
+\code{//docs:vreteno} reports that every timing constraint is met, with
+0.307~ns worst setup slack and 0.033~ns worst hold slack, and 12\,296
+LUTs, 11\,209 flip-flops, five block RAM tiles and four DSP blocks, for
+the board at eed5b7f, with the configuration flash and the entropy
+source's capture buffer; it has not been measured since.
+\item \code{//cpu/vreteno:vreteno\_board\_prog} and
+\code{//cpu/vreteno:vreteno\_board\_flash} program the FPGA and the
+QSPI flash. Both are manual.
+\code{//cpu/vreteno:vreteno\_board\_fits\_test}, also manual, checks
+that the routed bitstream ends before \code{0x00A0\_0000}, where
+programs begin in the flash.
+\end{itemize}
+
+No waveform target simulates \code{Board}'s netlist against a trace.
+
+\subsection*{Used by}
+
+\code{//cpu/vreteno:board\_netlist}, whose genrules
+\code{//cpu/vreteno:board\_v} and \code{//cpu/vreteno:board\_sim\_v}
+write the netlist, and \code{vreteno\_board.v}, which instantiates it
+as \code{board}. The test \code{cpu/vreteno/tests/board.rs}.
+
+\subsection*{Limits}
+
+\code{//docs:vreteno} reports the design with the DDR3 memory and MIG
+run on the board on September 28, 2026, written into the part over
+JTAG, and saying \code{ddr3 ok}; the run from the flash after a power
+cycle is owed (issue 188). It reports the configuration flash read on
+the board as well: the identity, write enable refused and the
+bitstream through the window. The program is fixed in the netlist. The board top ties \code{irq} low, so on the
+board the interrupt controller's second source never asks.
+
+The arbiter's ports are the core on 0, \code{jarb} on 1, the Ethernet
+port's fetch engine on 2 and its store engine on 3, the scanout's fetch
+on 4, \code{sdarb} on 5 and Razboj's rasteriser on 6. It takes turns,
+so with every host offering each wins one turn in seven. Three bits of
+port number leave room for an eighth host, which raises the count and
+widens nothing past the arbiter.

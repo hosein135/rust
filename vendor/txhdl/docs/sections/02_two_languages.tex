@@ -1,0 +1,142 @@
+% SPDX-License-Identifier: Apache-2.0
+\section{What Each Language Is}
+\label{sec:two-languages}
+
+\subsection{LHDL: dataflow, and time as an implementation detail}
+
+LHDL starts from twelve theses. The eighth is the one that shapes the
+language: at the design level there should be no notion of combinational
+versus sequential logic. The designer writes dataflow and never counts
+cycles, and the compiler decides where registers go.
+
+The mechanism is the \term{tag}. A tag names a synchronisation domain.
+Operations sharing a tag are aligned by the compiler through longest path
+analysis, which inserts bridge registers into the shorter paths. Adding
+\code{with handshake} makes the domain elastic: the compiler replaces
+flip-flops with skid buffers and wires ready and valid across the whole
+domain. Adding \code{capacity=32} makes the compiler generate a scoreboard
+that tracks up to 32 transactions in flight and asserts backpressure when
+full.
+
+The organising idea is the \term{three facets}. The design facet states
+logic and contracts and is timeless. The implementation facet maps logic
+onto fabric and handles retiming. The configuration facet binds
+implementations into sockets, sets generic parameters, maps tags onto
+physical clocks, and links foreign code. Changing the target fabric edits
+the configuration facet and leaves the design facet untouched.
+
+Reuse runs through \term{interfaces} with \term{modports}. An interface
+declares fields, and a modport names a role and gives each field a direction
+for that role. A module, a pipeline or a state machine can implement an
+interface.
+
+Verification is delegated. LHDL adds no non-synthesisable subset. The
+configuration facet instead binds an interface to a foreign implementation
+in Go, Rust or C++, and the compiler generates a gRPC bridge and bit-exact
+software structs.
+
+\subsection{TxHDL: transactions, and time written down}
+
+TxHDL starts elsewhere. Communication between modules happens through
+transactions over buses, never through raw signals. Inside a module one
+sequential flow is easy to reason about, while modules run in parallel.
+Variables become registers based on how they are used.
+
+The mechanism is \code{await}. A sequence blocks until a transaction
+arrives, until a condition holds, or for a stated number of cycles.
+\code{select} waits on several events and takes the first. A timeout bounds
+the wait. A protocol that takes 40 cycles reads as 40 lines of straight
+code rather than as a state enumeration.
+
+Communication runs through \term{buses} made of \term{channels}, each with
+implicit valid and ready handshaking. A channel marked \code{tagged by id}
+matches responses to requests out of order, and a \code{then} clause
+registers a callback that fires when the matching response arrives.
+
+Typing is \term{structural}. Two transactions with the same fields are
+compatible whatever their names, and a transaction with extra fields can be
+sent where fewer are expected.
+
+Verification is native. Assertions, assumptions, cover points and
+properties are in the language, and properties use temporal operators.
+
+\subsection{The asymmetry}
+
+Four of the seven concerns in Figure~\ref{fig:asymmetry} are worked out on
+both sides. The three that are not decide the merge, and each is thin on a
+different side.
+
+LHDL has no way to write a protocol body. Its state machine is a hand
+written state enumeration, which is the form \code{await} exists to remove.
+TxHDL has no way to assemble a system. Its top level offers instances,
+connections and an address-decoding bus, and there is no interface, no late
+binding, no configuration facet, no way to wrap legacy Verilog and no way to
+swap an implementation.
+
+\begin{figure*}[t]
+\centering
+\begin{tikzpicture}[
+    node distance=4mm and 10mm,
+    row/.style={font=\footnotesize\bfseries,align=right,text width=26mm},
+    cell/.style={box,text width=52mm,align=left},
+    % Two channels, not one. An IEEE article gets printed and photocopied,
+    % and a 3 per cent grey difference does not survive that. A worked-out
+    % mechanism is shaded and solid; one that is only named is unshaded and
+    % dashed, so the distinction reads even with the fill gone.
+    thin/.style={cell,fill=white,draw=framegray,dashed},
+    thick/.style={cell,fill=cellshade,draw=black},
+  ]
+
+  \node[font=\footnotesize\bfseries] (hl) at (0,0) {LHDL};
+  \node[font=\footnotesize\bfseries,right=62mm of hl] (ht) {TxHDL};
+  \node[row,left=10mm of hl] (h0) {};
+
+  \node[row] (r1) at ($(h0)+(0,-9mm)$) {system\\assembly};
+  \node[thick,right=10mm of r1] (l1)
+    {three facets; \code{config} and \code{bind}; domain to clock mapping};
+  \node[thin,right=10mm of l1] (t1)
+    {\code{instance}, \code{connect}; address-decode bus};
+
+  \node[row,below=of r1] (r2) {contracts};
+  \node[thick,right=10mm of r2] (l2)
+    {\code{interface} plus \code{modport}; \code{implements}};
+  \node[thick,right=10mm of l2] (t2)
+    {structural typing on transaction fields};
+
+  \node[row,below=of r2] (r3) {inter-module\\communication};
+  \node[thick,right=10mm of r3] (l3)
+    {tags, chaining, fork and join; elastic buffers; scoreboards};
+  \node[thick,right=10mm of l3] (t3)
+    {\code{bus} plus \code{channel}; valid and ready; callbacks};
+
+  \node[row,below=of r3] (r4) {intra-module\\behaviour};
+  \node[thin,right=10mm of r4] (l4)
+    {\code{pipeline} plus \code{stage}; \code{state} blocks};
+  \node[thick,right=10mm of l4] (t4)
+    {\code{seq}, \code{await}, \code{select}; \code{comb}, \code{wire},
+     \code{always}};
+
+  \node[row,below=of r4] (r5) {types};
+  \node[thick,right=10mm of r5] (l5)
+    {\code{u32}, \code{uint<W>}};
+  \node[thick,right=10mm of l5] (t5)
+    {\code{u<N>}, \code{i<N>}, \code{bits<N>}, arrays, enums};
+
+  \node[row,below=of r5] (r6) {verification};
+  \node[thick,right=10mm of r6] (l6)
+    {foreign function interface; gRPC co-simulation};
+  \node[thick,right=10mm of l6] (t6)
+    {\code{assert}, \code{assume}, \code{cover}, \code{property}};
+
+  \node[row,below=of r6] (r7) {grammar};
+  \node[thick,right=10mm of r7] (l7) {full EBNF, LL(1) claimed};
+  \node[thin,right=10mm of l7] (t7) {none};
+
+\end{tikzpicture}
+\caption{Where each language is detailed. A shaded cell is a worked-out
+mechanism; an unshaded one is named and not specified. Four rows are worked
+out on both sides. The three that are not, system assembly, intra-module
+behaviour and the grammar, are the ones that make the merge possible: each
+is thin on one side and thick on the other, and the thin side differs.}
+\label{fig:asymmetry}
+\end{figure*}

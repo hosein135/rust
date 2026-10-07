@@ -1,0 +1,16 @@
+{
+  "name": "rustdv — Rust for RTL Verification",
+  "build": {
+    "dockerfile": "../docker/Dockerfile",
+    "context": ".."
+  },
+  "postCreateCommand": "python3 output/regression/regress.py --suite book-sync",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "mshr-h.veriloghdl"
+      ]
+    }
+  }
+}

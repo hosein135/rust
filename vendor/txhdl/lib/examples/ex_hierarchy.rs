@@ -1,0 +1,69 @@
+// SPDX-License-Identifier: Apache-2.0
+//! A unit that contains units. Submodules and the wire between them are
+//! fields; each child is handed its end when `run` is called. The
+//! children are disjoint fields, so both may be borrowed mutably at once.
+use txhdl::comp::{
+    join2, join_all, signal, Clock, DefaultClock, In, Out, Reg, Unit,
+};
+use txhdl::types::U;
+
+pub struct Producer {
+    pub n: Reg<U<32>>,
+}
+pub struct Consumer {
+    pub total: Reg<U<32>>,
+}
+pub struct Pe {
+    pub acc: Reg<U<32>>,
+}
+
+impl Unit<(), Out<U<32>>> for Producer {
+    async fn run(&mut self, _i: (), out: Out<U<32>>) {
+        loop {
+            DefaultClock::rising().await; // the wait
+            out.set(self.n); // a read at that edge, onto a wire
+            self.n.set(self.n + 1);
+        }
+    }
+}
+
+impl Unit<In<U<32>>, ()> for Consumer {
+    async fn run(&mut self, inp: In<U<32>>, _o: ()) {
+        loop {
+            DefaultClock::rising().await;
+            self.total.set(self.total + inp.get());
+        }
+    }
+}
+
+impl Unit<U<32>, ()> for Pe {
+    async fn run(&mut self, i: U<32>, _o: ()) {
+        loop {
+            DefaultClock::rising().await;
+            self.acc.set(self.acc + i);
+        }
+    }
+}
+
+pub struct Top {
+    pub producer: Producer,
+    pub consumer: Consumer,
+    pub pes: [Pe; 4],
+}
+
+impl Unit<(), ()> for Top {
+    async fn run(&mut self, _i: (), _o: ()) {
+        let (tx, rx) = signal::<U<32>, _>();
+        // Every child loops, so every child is joined at once.
+        join2(
+            join2(self.producer.run((), tx), self.consumer.run(rx, ())),
+            join_all(
+                self.pes
+                    .iter_mut()
+                    .enumerate()
+                    .map(|(i, pe)| pe.run(i.into(), ())),
+            ),
+        )
+        .await;
+    }
+}

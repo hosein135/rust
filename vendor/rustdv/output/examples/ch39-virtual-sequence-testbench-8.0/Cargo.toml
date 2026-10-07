@@ -1,0 +1,12 @@
+[package]
+name = "ch39_virtual_sequence_testbench_8_0"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/ch39_virtual_sequence_testbench_8_0.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+rustdv = { path = "../../../rustdv" }
+tinyalu_utils = { path = "../tinyalu-utils" }

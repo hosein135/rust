@@ -1,0 +1,2 @@
+a measured delay is not equal to itself: NaN == NaN? false
+ops seen: 4

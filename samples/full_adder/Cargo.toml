@@ -1,0 +1,14 @@
+[package]
+name = "full_adder"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "TxHDL one-bit full adder and its rustdv testbench"
+
+[dependencies]
+rustdv = { path = "../../vendor/rustdv/rustdv" }
+txhdl = { path = "../../vendor/txhdl/lib" }
+
+[dev-dependencies]
+rustdv-vpi-stubs = { path = "../../vendor/rustdv/rustdv/rustdv-vpi-stubs" }

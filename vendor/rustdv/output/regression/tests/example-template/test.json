@@ -1,0 +1,7 @@
+{
+  "comment": "Template custom test — copy this directory, rename it, edit, and delete the 'disabled' line. Fields: cmd (required, argv list), cwd (relative to repo root; defaults to this directory), expect_exit (default 0), expect_in_output (substrings that must appear in stdout+stderr), golden (filename in this directory; compare stdout against it, record with --bless), unordered (ignore line order in golden compare), timeout (seconds, default 300).",
+  "disabled": true,
+  "cmd": ["cargo", "test", "-p", "rustdv", "--quiet"],
+  "cwd": "rustdv",
+  "expect_exit": 0
+}

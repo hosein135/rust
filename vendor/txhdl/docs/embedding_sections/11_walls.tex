@@ -1,0 +1,239 @@
+% SPDX-License-Identifier: Apache-2.0
+\section{What Rust Cannot Do}
+\label{sec:e-walls}
+
+One wall is left, and it is the one a separate parser was buying.
+
+\subsection{Control flow on a signal}
+
+A signal is a node in a graph. It has no value while the Rust program
+runs, so it cannot be a condition.
+
+\begin{lstlisting}[caption={The wall. A signal has no value while the program runs, so it cannot be a condition.},label={lst:wall}]
+if cond { a } else { b }   // cond must be a bool.
+                           // A signal is not a bool.
+\end{lstlisting}
+
+\code{if} and \code{match} take a \code{bool} and a pattern, and neither
+can be overloaded. Control flow on a signal needs another spelling.
+
+\subsubsection{The name is not \code{if\_!}}
+
+The obvious macro name is \code{if\_!}, and it should be rejected for a
+better reason than the trailing underscore. \code{if} branches: one arm
+runs and the other does not. This does not branch. Both arms exist in the
+hardware at once and a multiplexer picks between them, so area is paid for
+both and a side effect in the arm not chosen still has to be suppressed. A
+reader who brings Rust's \code{if} semantics to a construct named after it
+is misled about the one thing that matters most.
+
+\code{when!} is what Chisel~\cite{bachrach2012} and SpinalHDL call
+it, so the engineers who will read it already know what it means, and
+it claims nothing it does not do. Its body became the drives of one
+struct, the struct named once, when every drive it predicated turned
+out to be a drive of a field of \code{self}; and the same body with
+the struct first, \code{with!(self <= \{ .. \})}, is the table of a
+unit's drives, each entry under its own condition. Two orders of one
+block, chosen by what the line is about: the condition, or the unit.
+
+\subsubsection{Two forms, and where the limit is}
+
+An expression needs no macro at all. \code{mux} is the operation, and a
+function says so.
+
+\begin{lstlisting}[caption={The expression form is a function. There is nothing to predicate.},label={lst:mux}]
+let chosen = mux(reset, U::new(0), count);
+\end{lstlisting}
+
+A statement form has to predicate whatever is written inside it, and that
+is what real logic needs.
+
+\begin{lstlisting}[caption={The statement form, condition first. The struct is named once; each entry is a field becoming a value, and the entries after \code{else} are under the condition's failure. The same block with the struct first is \code{with!(self <= \{ enable ? \{ .. \} else \{ .. \} \})}.},label={lst:when}]
+when!(enable => self {
+    count: self.count + 1,
+    flag: Bit::One,
+} else {
+    count: 0,
+    flag: Bit::Zero,
+});
+\end{lstlisting}
+
+Probe~10 compiles both. In \code{with!} the arrow is \code{<=},
+VHDL's signal assignment, because it points into the struct and says
+that its fields become these values; an entry is written as a struct
+literal writes a field, \code{name: value}, and a memory word,
+\code{m.at(i)}, is a field like any other. Both are procedural
+macros of necessity. The first version was \code{macro\_rules!} and spelled
+the arrow \code{=>}, not by choice: an \code{expr} fragment may be
+followed only by \code{=>}, \code{,} or \code{;}, so neither
+\code{lhs <= rhs} nor \code{c ? ..} can be matched declaratively at
+all. That is the third place \code{macro\_rules!} ran out, after the
+two in Section~\ref{sec:e-wiring}, and each time the reason was the
+same: a declarative macro matches a grammar, and the grammar it can
+match is not the one the design wants to write.
+
+The procedural version splits the block on commas and each entry on
+its first colon, so the left side may be any path into the struct,
+and refuses an entry that has none:
+
+\begin{lstlisting}[style=ascii,caption={A drive without a colon. The macro's own message, not a type error three expansions later.},label={lst:when-err}]
+error: expected `field: value`, `c ? field: value` or `c ? { .. }`
+\end{lstlisting}
+
+What it still does not do is reach inside an arbitrary block and rewrite
+the statements it finds there. That is the difference between predicating
+a list of drives and reinterpreting a plain \code{if}, and it is the
+elaboration decision of Section~\ref{sec:e-elaboration} rather than a
+macro's.
+
+\subsubsection{\code{if}, after all}
+
+The wall is real for an elaborator and not for this runtime. The
+runtime runs the design, so when the loop body runs a condition has a
+value: a compare is a \code{bool}, a bit is one through
+\code{to\_bool}. A plain \code{if} over it, with the drives under it
+written as \code{set}, is Rust, and its meaning is the predicated
+drive's: a \code{set} under a condition that fails does not happen.
+Nothing is rewritten; the lowering reads the \code{if}, its
+\code{else if} and its \code{else} as the priority chain \code{case!}
+makes, and an arm may hold a \code{let}, a \code{with!}, a
+\code{case!} or another \code{if}. What the macro keeps is the
+struct named once, and the guarantee that a block is a list of
+drives; what \code{if} adds is \code{else if}, and a \code{send}
+under a condition, which is a statement and not a drive. An \code{if}
+that yields a value, and a \code{match}, lower too since issue 496, to
+the chain \code{mux} and \code{select!} make. One thing stays out, for
+the reason above: an output driven under a condition, which is a wire
+and takes a \code{mux} outside the chain.
+The examples document has one~\cite{examples}.
+
+\subsubsection{Many arms}
+\label{sec:e-case}
+
+A group has two arms. A state machine has one per state, and
+\code{match} is the Rust spelling, so it hits the same wall as
+\code{if} for the same reason. \code{case!} is the group with many
+arms, and it keeps \code{match}'s one rule that matters: the first arm
+that matches wins.
+
+\begin{lstlisting}[caption={\code{case!} on a state register. The arms are Rust patterns, guards and alternatives included, and the first match wins, so the guarded arm sits above the plain one for the same state. The full sequencer is \code{ex\_case.rs} in the examples document~\cite{examples}.},label={lst:case}]
+DefaultClock::rising().await;
+case!(self.state.get() => {
+    State::Idle if go.to_bool() => { self.state <= State::Load },
+    State::Load => { self.count <= 3; self.state <= State::Run },
+    State::Run if self.count == 0 => { self.state <= State::Done },
+    State::Run => { self.count <= self.count - 1 },
+    State::Done | State::Idle => { self.state <= State::Idle },
+});
+\end{lstlisting}
+
+Every arm exists in the hardware at once, as with \code{with!}. The
+ordering lowers to a priority chain: the predicate of an arm is its
+pattern and the failure of every arm above it, and the macro emits
+exactly that, one predicated drive per statement and a running
+\emph{done} bit. Each pattern is tested with \code{matches!}, so
+anything Rust accepts as a pattern is accepted here, with one limit that
+compiling found. A pattern may test and may not bind: \code{matches!}
+scopes its bindings to itself, and the arm's body is outside it, so
+\code{Op::Load(v)} leaves \code{v} undefined in the body. Probe~10e
+keeps that error. A payload is read from the value by a function
+instead, which is also how the hardware does it: the field is a slice of
+the register, and the pattern is the decoder on the rest.
+
+A statement without an arrow, \code{register <= value} being an
+arm's form, is refused with the macro's own message, as an entry
+without a colon is in Listing~\ref{lst:when-err}.
+
+\subsubsection{Many values}
+\label{sec:e-select}
+
+\code{with!} and \code{case!} select among driving assignments. A datapath also
+selects among data values, such as an ALU selecting output based on function
+code, where a native \code{match} on a dynamic signal would trigger an evaluation
+error. The \code{select!} macro provides value-level selection: the first matching
+pattern determines the result, patterns may include conditional guards, and the
+terminal arm provides a default fallback. This macro expands directly to a Rust
+\code{match} expression; its name reflects its hardware implementation as a
+priority multiplexer tree during lowering. The \code{mux} helper handles binary
+selection. Both \code{case!} and \code{select!} accept integer literals as match
+patterns, enabling opcodes to be decoded directly as documented in architecture
+manuals. The Vreteno core~\cite{vreteno} uses \code{select!} and \code{mux} for
+datapath values, and \code{case!}, \code{with!}, and \code{when!} for register
+drives.
+
+\subsection{Bit slicing}
+
+\code{w[0..8]} cannot work, because \code{Index} returns a reference to
+something that already exists and a slice of a signal is a new node. It
+becomes \code{w.slice::<0, 8>()}.
+
+The bounds do not all have to be literals, and the rule is not the one a
+first reading suggests.
+
+\begin{table}[H]
+\caption{What a slice bound may be. The width is the type, so it is the
+one that cannot vary.}
+\label{tab:slice}
+\centering
+\footnotesize
+\begin{tabular}{@{}lll@{}}
+\toprule
+Form & Offset & Width \\
+\midrule
+\code{w.slice::<0, 8>()}        & literal          & literal \\
+\code{w.slice::<LO, LEN>()}     & const parameter  & const parameter \\
+\code{w.slice\_at::<8>(i)}      & \textbf{run time} & static \\
+\code{w.slice\_var(i, n)}       & run time         & \textbf{rejected} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A generic function may slice without knowing the numbers, because a const
+generic parameter is a compile-time value and not a literal. An offset may
+be a run-time value, which synthesises to a barrel shifter feeding a
+fixed-width slice.
+
+A width may not. The width is the type, and a type cannot depend on a
+value that exists only at run time: probe~11b gives
+\code{error[E0435]: attempt to use a non-constant value in a constant}.
+That is not a Rust limitation to work around. A signal whose bit width is
+decided at run time is not a thing hardware has, so the compiler is
+refusing to express something that could not be built.
+
+\section{What the Embedding Costs}
+\label{sec:e-costs}
+
+\subsection{Structural typing on data changes shape}
+
+The merged specification resolved one of its four conflicts by making
+transaction compatibility structural: two transactions with matching fields
+are compatible whatever they are called~\cite{unification}. Rust is
+nominally typed.
+
+A derive can recover it by generating an associated layout type, so that
+compatibility becomes a bound rather than a name comparison. It recovers it
+positionally, though, so the rule becomes ``the same field types in the
+same order'' rather than ``the same fields''. That is a real change to a
+decision already taken, and unlike everything else in this paper it has not
+been compiled.
+
+\subsection{A thesis is inverted}
+
+The project's second thesis~\cite{theses} names making the language a valid
+program in an existing language as one direction, and then takes the other,
+on the grounds that a full toolchain has become affordable to build. This
+paper takes the direction the thesis declined.
+
+The thesis is the rationale section of the merged specification, so it
+should be rewritten rather than quietly contradicted. Its argument survives
+the change of direction, and only its conclusion moves: a toolchain is
+still being built, but it buys a front end over Rust's own syntax tree
+rather than a lexer and a parser, and the type system, the module system,
+the generics and the tooling arrive already written.
+
+\subsection{Smaller frictions}
+
+\code{concat!} is a \code{std} macro, so the bit concatenation macro needs
+another name. \code{async fn} in a public trait warns that auto trait
+bounds cannot be stated, which is harmless while elaboration is single
+threaded and would matter if it ever were not.

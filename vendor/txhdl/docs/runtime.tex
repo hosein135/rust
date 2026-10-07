@@ -1,0 +1,86 @@
+% SPDX-License-Identifier: Apache-2.0
+%
+% The TxHDL runtime: the library that is the language, included verbatim.
+% Built by //docs:runtime. One column, because it is mostly listings.
+\documentclass[journal,onecolumn,9pt]{IEEEtran}
+
+% One column: 80 columns fit at the body size, so nothing is reduced.
+\newcommand{\listingsize}{\normalsize}
+\input{housestyle}
+
+\InputIfFileExists{buildstamp.tex}{}{}
+\providecommand{\buildstamp}{Draft build (outside the Bazel flow).}
+
+\title{The TxHDL Runtime}
+
+\author{Filip Filmar and Dragiša Janković%
+\thanks{Both authors are independent. Filip Filmar is the
+corresponding author, at f@hdlfactory.com; Dragiša Janković is
+reached at linkedin.com/in/dragisa-jankovic.}%
+\thanks{This document holds the runtime library of TxHDL, the crate
+\code{txhdl} at \code{//lib} of the project repository, included
+verbatim from the tree at build time. The language it implements is
+described in the embedding article~\cite{embedding}; the examples
+written against it are a third document~\cite{examples}; the cover
+document~\cite{cover} lists all of them.}%
+\thanks{The authors used a large language model, Claude, as an
+assistant in exploring the concepts and in writing and constructing
+the documents and the programs; every commit of the repository says
+so and records the prompts that led to it, verbatim.}%
+\thanks{\buildstamp}}
+
+\markboth{The TxHDL Runtime}{Filmar and Janković: The TxHDL Runtime}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+TxHDL is a hardware description language embedded in Rust, and once
+every construct Rust provides has been deleted from it, what is left is
+a library. This document is that library. It states the model of time
+the executor keeps, which is the one part of the runtime a reader
+cannot recover from the signatures alone, and then includes each source
+file of the crate in full. A unit simulates on this runtime, and
+\code{\#[lower]} writes the same unit as Verilog and VHDL, which the
+build checks against the run under nvc and Verilator; the lowering's
+own side of that is in the netlist module below.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Hardware description languages, embedded domain-specific languages, Rust,
+runtime, simulation.
+\end{IEEEkeywords}
+
+{\footnotesize\tableofcontents}
+
+% One \input per file in runtime_sections, in the order of the names,
+% written by the build (issue 586): a new section is its file alone.
+\input{runtime_sections_list}
+
+\begin{thebibliography}{10}
+
+\bibitem{embedding}
+F.~Filmar and D.~Janković, ``Deleting a language: Embedding TxHDL in
+Rust,'' project repository \code{HDL/txhdl}, \code{//docs:embedding},
+2026.
+
+\bibitem{examples}
+F.~Filmar and D.~Janković, ``TxHDL by example,'' project repository
+\code{HDL/txhdl}, \code{//docs:examples}, 2026.
+
+\bibitem{cover}
+F.~Filmar and D.~Janković, ``TxHDL documents,'' project repository
+\code{HDL/txhdl}, \code{//docs:cover}, 2026.
+
+\bibitem{merge}
+F.~Filmar and D.~Janković, ``TxHDL: Unifying a dataflow and a transaction
+hardware description language,'' project repository \code{HDL/txhdl},
+\code{//docs:article}, 2026.
+
+\bibitem{prove}
+F.~Filmar and D.~Janković, ``Formal verification in TxHDL,'' project
+repository \code{HDL/txhdl}, \code{//docs:prove}, 2026.
+
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,24 @@
+[package]
+name = "framework_tests"
+version = "0.1.0"
+edition = "2024"
+description = "Targeted simulator tests for rustdv itself (test-plan §3). Not a book example."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+# Crate root named after the crate, not lib.rs (D29).
+path = "src/framework_tests.rs"
+# cdylib: the simulator dlopens it as a VPI module.
+# rlib: so `cargo test --workspace` can link it without a simulator present.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rustdv = { path = ".." }
+
+[dev-dependencies]
+rustdv-vpi-stubs = { path = "../rustdv-vpi-stubs" }
+
+[features]
+# Enabled by run.sh only for Verilator's unpacked aggregate VPI tests.
+verilator-types = []

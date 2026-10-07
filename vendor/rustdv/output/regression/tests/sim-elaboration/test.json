@@ -1,0 +1,9 @@
+{
+  "comment": "Targeted simulator test (test-plan §3.2): An unconnected port fails elaboration before any run phase. One build of rustdv/framework-tests serves all six; RUSTDV_TESTCASE selects the group. Skips without iverilog.",
+  "cmd": ["bash", "rustdv/framework-tests/run.sh"],
+  "cwd": ".",
+  "env": { "RUSTDV_TESTCASE": "elab" },
+  "skip_if_missing": "iverilog",
+  "expect_exit": 0,
+  "expect_in_output": ["REGRESSION: PASS"]
+}

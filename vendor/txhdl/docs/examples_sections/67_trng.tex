@@ -1,0 +1,98 @@
+% SPDX-License-Identifier: Apache-2.0
+\section{Numbers Nobody Can Predict}
+\label{sec:x-trng}
+
+A network stack wants numbers nobody can guess: the first sequence
+number of a connection, a nonce, a key. A machine with no clock of the
+day, which boots into the same state every time, has nowhere to get
+them but physics, and until this part the Vreteno machine had nowhere
+at all: Zephyr's build with a network stack took a counter and called
+it random (issue 458).
+
+The physics is the jitter of a ring oscillator. A loop of an odd
+number of inverters runs at a rate set by its own gates, wandering
+with temperature and supply, and where the clock's edge catches it in
+its period is not something a program can know. Eight such rings are
+\code{RingOsc}, a Verilog module the netlist instantiates and does not
+write, since a loop of gates is not a thing this language says; the
+attributes on it stop Vivado folding the loops to nothing. In a Rust
+run it is a model, a shift register with feedback per ring, and the
+example says so: nothing it prints is evidence of randomness, only of
+the machinery. Only a board is evidence of that, and the issue says
+how far it has been measured.
+
+\code{Trng} is the other half and is ordinary hardware. Each cycle it
+folds the eight samples to one bit by exclusive or, which is less
+biased than any one of them, and does three things with the stream.
+It watches it: forty identical bits in a row, the repetition count
+test of NIST SP 800-90B at a false alarm rate of one in a million,
+raise a sticky fault and stop the buffer filling, since a ring that
+has stopped is worse than none; and the adaptive proportion test of
+the same standard counts, in each window of 1024 samples, how many
+equal the window's first, and raises a fault of its own at 793, which
+catches a source gone biased without going stuck
+(Section~\ref{sec:x-trngapt}). It debiases it: von Neumann's
+extractor takes the bits in pairs, \code{01} a zero, \code{10} a one,
+and the two equal pairs nothing, so whatever a ring's bias is, it
+cancels, at the cost of three bits in four. And it buffers it: the
+bits that survive fill a word, and whole words wait in a buffer of
+four, which a host takes one at a time from \code{data} after
+\code{status} says one is ready. A fourth word, \code{raw}, is the
+last thirty-two samples before the extractor, and is what a program
+on the board reads to measure the source.
+A loop of reads leaves gaps between the windows, though, so a
+correlation longer than a window cannot be measured that way (issue
+817). The capture can: a write of \code{cap} fills a buffer of 256
+words with 8192 samples in a row, none missing, and a program reads
+them back at its own pace through \code{capidx} and
+\code{capword}. The example takes one and checks that it is a
+stretch of the samples the model gave.
+
+\code{Entropy} is the two joined, the samples one way and the run bit
+the other, so that a design holds one unit and its netlist holds the
+module inside.
+
+What the words are not is independent. On the board the extractor's
+output passes the bias bound and measures about 0.99 bits of
+min-entropy per bit, but its bits are correlated with their neighbours
+in every capture, because the samples exhibit correlation at a few lags
+and von Neumann's extractor removes bias and not dependence. The lags
+move from one build of the same rings to the next: lag 19 on one,
+lags 5 and 22 on another (issue 780). So the words are not handed out
+as they are. Zephyr's driver conditions them: every 32 bytes it gives
+are SHA-256, from Zephyr's Mbed TLS, over 32 of the extractor's words,
+four input bits to each output bit, and a health test that trips part
+way through refuses the whole block. SP 800-90B lets a vetted
+conditioner's output claim full entropy when its input provides 64 bits
+more than the output's length, and 1024 input bits do that if each
+supplies half a bit. Half a bit is an engineering margin under the 0.99
+measured, chosen because the dependence moves; it is not an
+assessment.
+
+So much is claimed, and no more. Nothing here is certified to SP
+800-90B or to FIPS 140, and the entropy credited is an estimate from
+captures of a few builds on one board. The hardware runs the standard's
+two continuous health tests, the repetition count test and the
+adaptive proportion test (issue 918), at its cutoffs for half a bit a
+sample; a fault of either stops the source, and the driver refuses. The driver's host
+tests check the hash's wiring against digests taken with
+\code{sha256sum}, and pass a source shaped like the board's through
+it: \code{//tools/trngstat} fails that source's words as they come, as
+it fails the board's, and passes them conditioned.
+\code{//zephyr:entropy} prints the conditioned output on the board in
+the format that tool reads.
+
+\begin{figure}[htbp]
+\centering
+\input{trng_timing.tex}
+\caption{The source starting: \code{en} rises with the run bit, the
+samples arrive on \code{raw}, \code{have} and \code{first} hold the
+first bit of each pair, \code{nbits} climbs by the pairs that
+differ, and \code{runlen} counts the identical samples the health
+test watches.}
+\label{fig:x-trng}
+\end{figure}
+
+\lstinputlisting[caption={\code{ex\_trng.rs}. Run with \code{bazel run //lib/examples:ex\_trng}.},label={lst:x-trng}]{lib/examples/ex_trng.rs}
+
+\lstinputlisting[style=ascii,caption={What \code{ex\_trng} printed when the build ran it: the eight words, the raw samples, the buffer drained after the stop, and the capture.},label={lst:x-trng-out}]{out_trng.txt}

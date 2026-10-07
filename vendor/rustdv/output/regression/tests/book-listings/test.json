@@ -1,0 +1,12 @@
+{
+  "comment": "Every Rust listing in the ch15-40 manuscript must be real code from that chapter's crate. book-sync covers ch1-14 only; nothing covered Part II+, which is how the book came to print Clock::new(...) in five places after D112 removed the software clock. The repository README is swept with them (id chRM/N) because it walks tinyalu_tb the way the Interlude does and rots the same way. Code-only comparison (the book strips the crates' teaching comments by design). Exemptions live in KNOWN_DRIFT inside the script, each with a reason and an owner, and that register must only shrink. No simulator needed.",
+  "cmd": [
+    "python3",
+    "output/regression/verify-book-listings.py"
+  ],
+  "cwd": ".",
+  "expect_exit": 0,
+  "expect_in_output": [
+    "book listings (ch15-40 + Interlude + README):"
+  ]
+}

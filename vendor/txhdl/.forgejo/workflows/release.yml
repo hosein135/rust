@@ -1,0 +1,299 @@
+# SPDX-License-Identifier: Apache-2.0
+# Publish the rendered documents as a release.
+#
+# Two ways in, one job, two kinds of release.
+#
+#   schedule          -> the rolling `nightly` release, overwritten each night
+#   workflow_dispatch -> a new release stamped with the UTC date and time
+#
+# The nightly is a moving target, so somebody who wants "the current
+# documents" always has one link. A dispatched release is a fixed point that
+# nothing later overwrites, which is what makes it worth cutting by hand.
+#
+# The same assets go to the GitHub mirror as a release of the same name,
+# when able: the step needs A_GITHUB_MIRROR_TOKEN, the token the mirror
+# workflow pushes with, and skips without it. The Forgejo release is the
+# release; the copy is the spare, and its failure does not fail the run.
+name: release
+
+on:
+  schedule:
+    # 03:00 UTC daily.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: docker
+    steps:
+      # fetch-depth 0, because the nightly skip below reads the commit dates.
+      # A shallow clone shows one commit whatever actually happened.
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Only a scheduled run can decide there is nothing to do. A nightly with
+      # no commits behind it would repeat yesterday's release, and a list of
+      # identical releases hides the ones that differ.
+      #
+      # Every other event proceeds. That includes a manual dispatch, and it
+      # includes whatever event a local `act` run supplies, so testing this
+      # workflow locally does not silently skip every step and report success.
+      - name: Decide whether to release
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -eu
+          if [ "$EVENT" != "schedule" ]; then
+            echo "event is '$EVENT', proceeding"
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          elif [ -n "$(git log --since='25 hours ago' --format=%H)" ]; then
+            echo "commits landed since the last nightly, proceeding"
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "no commit in the last 25 hours, skipping"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The scheduled release is rolling and overwrites its own assets, so
+      # one link always points at the current documents. Every other run
+      # produces a release stamped with the UTC date and time, with override
+      # off, so nothing later destroys a release somebody asked for.
+      - name: Compute the tag
+        if: steps.decide.outputs.proceed == 'true'
+        id: tag
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -eu
+          if [ "$EVENT" = "schedule" ]; then
+            tag="nightly"
+            override=true
+          else
+            tag="release-$(date -u +%Y%m%d-%H%M%S)"
+            override=false
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "override=$override" >> "$GITHUB_OUTPUT"
+          echo "releasing as $tag (override=$override)"
+
+      # Nothing else is installed here. Every other tool this build needs
+      # comes from MODULE.bazel, TeX and the C and C++ toolchain among
+      # them (issue 782).
+      - name: Install Bazelisk (pinned)
+        if: steps.decide.outputs.proceed == 'true'
+        run: |
+          set -eux
+          { command -v curl && command -v git; } >/dev/null 2>&1 || {
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends ca-certificates curl git
+          }
+          curl -fsSL -o /usr/local/bin/bazel \
+            https://github.com/bazelbuild/bazelisk/releases/download/v1.29.0/bazelisk-linux-amd64
+          echo "5a408715e932c0250d28bd84555f12edbf70117de42f9181691c736eacc4a992  /usr/local/bin/bazel" | sha256sum -c
+          chmod +x /usr/local/bin/bazel
+
+      # Bazelisk's download alone, as in build.yml, which says why the
+      # output base is no longer tarred (#939).
+      - name: Cache Bazelisk
+        if: steps.decide.outputs.proceed == 'true'
+        uses: https://code.forgejo.org/actions/cache@v4
+        with:
+          path: ~/.cache/bazelisk
+          key: bazelisk-${{ hashFiles('.bazelversion') }}
+
+      # The log is kept for the export at the end, and `pipefail` keeps
+      # the status Bazel's rather than `tee`'s (#538).
+      - name: Build everything
+        if: steps.decide.outputs.proceed == 'true'
+        run: |
+          set -o pipefail
+          bazel build //... 2>&1 | tee -a /tmp/release.log
+
+      # Only what this build of //docs produces is gathered, as bazel cquery
+      # lists it; external repositories hold PNGs of their own. bazel-bin
+      # is not walked: the runner caches the output tree, so it still holds
+      # the outputs of targets since removed, and the release of 2026-09-27
+      # carried gpu.pdf months after //docs:gpu became //docs:razboj. A
+      # test's .runfiles tree is left out too: since #636 it holds a whole
+      # Python interpreter, Tk's demo images among it, and the release of
+      # 2026-09-26 carried 93 such files and was cut short before most of
+      # the documents (issue 640). The output path becomes the file name, so
+      # two packages that each produce `spec-pdf.pdf` do not overwrite one
+      # another in the release directory. The waveforms (.fst), one per
+      # example, ship as one archive for a viewer rather than a hundred
+      # assets, so the documents are never the ones crowded out.
+      - name: Gather the documents
+        if: steps.decide.outputs.proceed == 'true'
+        run: |
+          set -eu
+          exec > >(tee -a /tmp/release.log) 2>&1
+          mkdir -p dist/release dist/waveforms
+          # Each PDF goes into the archive of its topic (issue 642). A
+          # document not named here lands in docs-other with a warning, so
+          # a new one is never dropped: add it to its topic when it is added
+          # to //docs:cover. Each PDF also ships on its own, under its own
+          # name, for a reader who wants one document; two with the same
+          # name stop the release rather than one overwriting the other.
+          topic() {
+            case "$1" in
+              cover|showcase|paper|article|embedding|stats|dynamics) echo overview ;;
+              tutorial|zero|station|axi|prove|cheatsheet) echo tutorials ;;
+              runtime|examples|datasheets) echo reference ;;
+              vreteno|vreteno_figures|tapeout|razboj|noc|eth|hdmi|flagship|pcie) echo designs ;;
+              *) echo "warning: no topic for $1.pdf, it goes into docs-other" >&2; echo other ;;
+            esac
+          }
+          bazel cquery //docs/... --output=files > dist/outputs.txt
+          grep -E '\.(pdf|html|png|fst)$' dist/outputs.txt | grep -v '\.runfiles/' |
+            while IFS= read -r f; do
+              [ -f "$f" ] || { echo "warning: $f was not built" >&2; continue; }
+              rel="${f#bazel-out/*/bin/}"
+              case "$f" in
+                *.fst) cp "$f" "dist/waveforms/$(basename "$f")" ;;
+                # The merged document is not published: the PDFs ship on
+                # their own and in docs-pdfs.zip instead (issue 941).
+                # //docs:all still builds it.
+                */txhdl.pdf) ;;
+                *.pdf)
+                  t="$(topic "$(basename "$f" .pdf)")"
+                  mkdir -p "dist/pdf/$t"
+                  cp "$f" "dist/pdf/$t/$(basename "$f")"
+                  if [ -e "dist/release/$(basename "$f")" ]; then
+                    echo "two documents are named $(basename "$f")" >&2
+                    exit 1
+                  fi
+                  cp "$f" "dist/release/$(basename "$f")" ;;
+                *) cp "$f" "dist/release/$(printf '%s' "$rel" | tr '/' '-')" ;;
+              esac
+            done
+          for d in dist/pdf/*/; do
+            [ -d "$d" ] || continue
+            t="$(basename "$d")"
+            tar -C "$d" -czf "dist/release/docs-$t.tar.gz" .
+          done
+          # Every document in one archive, flat, each under its own name
+          # (issue 941). The job image has zip; -j drops the topic
+          # directories, so every PDF sits at the top under its own name,
+          # and -X leaves out the owner and time fields of this runner.
+          if [ -n "$(ls dist/pdf/*/*.pdf 2>/dev/null)" ]; then
+            zip -q -j -X dist/release/docs-pdfs.zip dist/pdf/*/*.pdf
+          fi
+          if [ -n "$(ls -A dist/waveforms)" ]; then
+            tar -C dist/waveforms -czf dist/release/docs-waveforms.tar.gz .
+          fi
+          ls -la dist/release
+          [ -n "$(ls -A dist/release)" ] || { echo "nothing to release" >&2; exit 1; }
+
+      # Referenced by full URL so it resolves whatever the instance's default
+      # action host is. The built-in per-run token is enough given
+      # `permissions: contents: write`; FORGEJO_RELEASE_TOKEN wins when set.
+      - name: Publish the release
+        if: steps.decide.outputs.proceed == 'true'
+        uses: https://code.forgejo.org/actions/forgejo-release@v2.13.4
+        with:
+          direction: upload
+          url: ${{ github.server_url }}
+          repo: ${{ github.repository }}
+          tag: ${{ steps.tag.outputs.tag }}
+          release-dir: dist/release
+          override: ${{ steps.tag.outputs.override }}
+          token: ${{ secrets.FORGEJO_RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      # The copy on GitHub. The commit goes first, so the release has
+      # something to point at; the mirror workflow pushes main on every
+      # push, so this is usually a no-op. The rolling release is remade
+      # from scratch, its old release and tag deleted, since GitHub does
+      # not move a release to a new commit; a stamped release is new by
+      # construction. The API is spoken with curl alone, since the runner
+      # has nothing else; the release id is the first "id" in the reply.
+      - name: Copy the release to GitHub
+        if: steps.decide.outputs.proceed == 'true'
+        continue-on-error: true
+        env:
+          TOKEN: ${{ secrets.A_GITHUB_MIRROR_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          OVERRIDE: ${{ steps.tag.outputs.override }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          if [ -z "$TOKEN" ]; then
+            echo "A_GITHUB_MIRROR_TOKEN is not set; no copy to GitHub" >&2
+            exit 0
+          fi
+          api="https://api.github.com/repos/filmil/hdl-txhdl"
+          auth="Authorization: Bearer $TOKEN"
+          accept="Accept: application/vnd.github+json"
+          release_id() { sed -n 's/^ *"id": *\([0-9]*\),.*/\1/p' | head -1; }
+          git remote add github "https://x-access-token:${TOKEN}@github.com/filmil/hdl-txhdl.git"
+          git push github "HEAD:refs/heads/main" ||
+            echo "main not pushed; the mirror may have it already" >&2
+          if [ "$OVERRIDE" = "true" ]; then
+            old=$(curl -sS -H "$auth" -H "$accept" "$api/releases/tags/$TAG" | release_id)
+            if [ -n "$old" ]; then
+              curl -fsS -X DELETE -H "$auth" -H "$accept" "$api/releases/$old"
+              echo "deleted the old release $old of $TAG"
+            fi
+            curl -sS -X DELETE -H "$auth" -H "$accept" "$api/git/refs/tags/$TAG" > /dev/null || true
+          fi
+          body=$(printf '{"tag_name":"%s","target_commitish":"%s","name":"%s","prerelease":%s}' \
+            "$TAG" "$SHA" "$TAG" "$OVERRIDE")
+          id=$(curl -fsS -X POST -H "$auth" -H "$accept" "$api/releases" -d "$body" | release_id)
+          [ -n "$id" ] || { echo "GitHub gave no release id" >&2; exit 1; }
+          for f in dist/release/*; do
+            name=$(basename "$f")
+            curl -fsS -X POST -H "$auth" -H "$accept" \
+              -H "Content-Type: application/octet-stream" \
+              "https://uploads.github.com/repos/filmil/hdl-txhdl/releases/$id/assets?name=$name" \
+              --data-binary "@$f" > /dev/null
+            echo "uploaded $name"
+          done
+          echo "released $TAG on GitHub as release $id"
+
+      # A failed release exports its own log, as the build does, since the
+      # Actions log cannot be read through `fj` or the API (#466). It lands
+      # on the same `ci-logs` branch, named release-<run>, readable by
+      # anyone who can clone:
+      #
+      #   git fetch origin ci-logs && git show origin/ci-logs:<file>
+      #
+      # The nightly of 2026-10-04 (run 1520) failed after 22 minutes with
+      # nothing to read (#940). What the publish step did is not in the
+      # file, since an action's output cannot be teed, so the tail says
+      # what was gathered and how big it was instead.
+      - name: Export the log on failure
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "=== release run ${GITHUB_RUN_NUMBER} on ${GITHUB_SHA} (${GITHUB_EVENT_NAME}) ==="
+            echo "=== df -h ==="; df -h / /data/cache/bazel 2>/dev/null | sort -u
+            echo "=== free -m ==="; free -m
+            echo "=== dist/release ==="
+            ls -la dist/release 2>/dev/null || echo "(no dist/release)"
+            du -sh dist/release 2>/dev/null || true
+            echo "=== log tail ==="
+            tail -c 60000 /tmp/release.log 2>/dev/null || echo "(no log)"
+          } > /tmp/release-tail.log 2>&1 || echo "(capture failed)" >> /tmp/release-tail.log
+          d=$(mktemp -d)
+          url="https://ci:${GITHUB_TOKEN}@git.hdlfactory.com/${GITHUB_REPOSITORY}.git"
+          # Add to the branch when it exists; start it when it does not.
+          if git -C "$d" clone -q --depth 1 --branch ci-logs "$url" . 2>/dev/null; then
+            :
+          else
+            git -C "$d" init -q -b ci-logs
+            git -C "$d" remote add origin "$url"
+          fi
+          cp /tmp/release-tail.log \
+            "$d/release-${GITHUB_RUN_NUMBER}-$(date -u +%Y%m%dT%H%M%S)-${GITHUB_SHA:0:8}.log"
+          git -C "$d" add -A
+          git -C "$d" -c user.name=ci -c user.email=ci@invalid \
+            commit -qm "release log for run ${GITHUB_RUN_NUMBER} (${GITHUB_SHA})"
+          git -C "$d" push -q origin ci-logs

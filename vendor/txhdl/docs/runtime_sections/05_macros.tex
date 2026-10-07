@@ -1,0 +1,305 @@
+% SPDX-License-Identifier: Apache-2.0
+\section{\code{txhdl\_macros}}
+\label{sec:r-macros}
+
+The procedural macros, written against \code{proc\_macro} alone so the
+crate has no dependencies. \code{\#[derive(Transaction)]} and
+\code{\#[derive(Bus)]} emit one empty \code{impl} each.
+\code{\#[derive(Value)]} gives a struct of values, or a fieldless
+enum, its width and its bits for a trace, and \code{\#[derive(Trace)]}
+registers every field of a unit under its field name; both read the
+item's generic parameters so a generic unit can derive them.
+\code{\#[pipeline(op = latency, ..)]} is the first of the lowering: on
+an \code{async fn} of awaited operator calls it keeps the function and
+emits a \code{NAME\_verilog()} beside it, each operator a stage of the
+stated latency and each value delayed to meet the operator that uses
+it. Its grammar is the one \code{mac} needs and no wider, and it
+refuses the rest with its own message. \code{\#[lower]} on an
+\code{impl Unit for Unit} does the same for a unit with state,
+filling the header's \code{<In, Out>} in from \code{run}'s signature,
+so the ports are named once: it reads \code{run} as one loop, or
+several under
+\code{join2}, each a process that waits for the rising or the falling
+edge of its clock, reads registers and ports into names, predicates
+drives with
+\code{with!}, \code{case!} and \code{if}, chooses values
+with
+\code{select!},
+and drives registers, words of memories and output ports, and writes
+\code{Unit::lowered(name)}, \code{verilog} and \code{vhdl} beside
+the impl. Ports come from \code{run}'s signature, a side of several
+written as a tuple or as a struct whose fields are the ports;
+registers, memories and widths come from the
+struct through the \code{Trace} derive, which also derives
+\code{Fields} and \code{Port}; and the configuration's constants are
+evaluated when \code{lowered} runs, so a generic unit lowers once per
+build. A \code{let} that computes is a wire named for it, a read of a
+port or register an alias. A call of a function under \code{\#[lower]}
+is inlined in the same terms: each argument and each \code{let} of the
+function is bound to the expression it stands for, and one the body
+reads more than once, and that is worth more than a name, is given a
+wire of its own instead, called after the function and the name it had
+there and numbered. That keeps an expression written once whatever the
+body does with it, so calls that nest cost a wire each rather than a
+power of the reads, which is issue 126.
+A helper that is not in the unit's file is reached another way, since
+the file is all the macro reads. \code{\#[lower]} on a function adds,
+beside it, a type of the same name in the other namespace, whose
+\code{lowered} builds the function's expression when a unit is
+lowered; a call the file does not explain, \code{f(x)} or
+\code{m::f::<K>(x)}, lowers to \code{f::lowered(x)} or
+\code{m::f::lowered::<K>(x)}, which Rust resolves wherever it resolves
+the function, through a path or a \code{use}. Inside it a value read
+twice is bound by \code{inline\_bind} to a wire of the unit, which
+the unit's \code{lowered} collects between \code{inlined\_begin} and
+\code{inlined\_end}, a frame per unit so that a child lowered inside
+it keeps its own. A parameter typed as a struct is known by its type
+while the body is read, so \code{p.f} is a field of it, whatever
+computed the value; and a struct literal passed for it, or given back,
+is the concatenation of its fields (issue 504). It reads \code{case!} and \code{select!},
+and a \code{match} that yields a value, as chains on the value, with
+an enum variant, an integer, a range \code{lo..=hi} or \code{lo..hi}
+or \code{\_} as a pattern and a guard joined by \code{\&\&}; a
+\code{match} splits its own arms, since rustfmt ends an arm whose
+value is a block with no comma. An \code{if} that yields a value is the
+same chain on its conditions, and is refused without an \code{else};
+a branch or an arm is one expression. \code{(lo..=hi).contains(\&x)}
+is the two compares a range pattern is. \code{*} and \code{\%} lower as
+the netlist's, \code{\%} as \code{rem} in VHDL; unary \code{-} as
+\code{\~{}x + 1} at \code{x}'s width, a negative number being refused
+for having none; and \code{x as uN} as \code{Expr::cast}, which the
+emitters resolve once the width is known, to \code{x} when it is no
+wider and to its low bits when it is. It used to drop the cast, which
+every one of the 132 casts in the tree survived only by widening
+(issue 496); \code{slice},
+\code{concat}, \code{sext} and \code{zext} by their turbofish, every
+width it needs written, since it sees tokens and not types, and only
+\code{concat}'s low operand left to Rust as \code{\_}; a
+struct literal as the concatenation of its fields; an \code{if} chain
+as arms under their conditions, each arm's statements lowered in
+turn, a \code{send} in an arm hoisted with the arm's path as
+\code{valid}, and a \code{set} of an output under it refused, since
+an output is a wire; \code{self.m.at(a)}
+on the left of a drive as a word of a memory and \code{self.m.read(a)}
+as an index; and channels as a valid/ready handshake: \code{until} or
+a channel's \code{wait} is the guard on every register drive after
+it, a receive asserts \code{ready} under the guard, a \code{take}
+binds \code{valid} and \code{data} to its two names and asserts
+\code{ready} the same way, a send drives
+\code{data} and asserts \code{valid} under it. What it does not read
+it refuses with a message that names the construct.
+A field of a port's value, \code{p.tag} where \code{p} is what a
+channel port transports, is read as the slice of the port's data the
+field occupies: the \code{Value} derive lays a struct's fields out
+first field highest and says so in a \code{layout}, and the netlist
+finds the bits when \code{lowered} runs, so a generic field's width
+is no obstacle.
+A side that is a struct, \code{inp: S<..>} or
+\code{S \{ a, b \}: S<..>}, is read from the file the unit is in, as
+the inlined functions are, since a proc macro sees only the item it
+is on. \code{find\_port\_structs} collects every struct of the file,
+with its generic parameters and its fields. It also collects every
+role of an \code{interface!} in the file: a member of \code{Signal}
+becomes an \code{Out} or an \code{In}, and a member of \code{Chan} a
+\code{Tx} or an \code{Rx}, by the role's direction. The side's
+arguments are substituted for the struct's parameters in each field's
+type, and each field is a port named for the field, in declaration
+order. Before the body is read, \code{port\_fields} rewrites every
+\code{inp.a} of such a side to the port \code{a}, so the rest of the
+lowering sees the names it sees for a tuple. A type that is neither a
+port nor a struct of the file is taken to implement \code{Ports},
+which \code{\#[derive(Ports)]} writes, so a struct declared in any
+file of any crate can be a side (issue 483). Its fields cannot be
+seen here, so \code{port\_fields} rewrites each \code{bus.f} the body
+reads to the port \code{bus\_f}, named for the side as well as the
+field so that two sides of one type stay apart. The ports come from
+\code{bundle\_ports} when \code{lowered} runs, each field's kind,
+width and clock from its type through \code{PortEnd}, and a field of
+a port's value is found by \code{bundle\_field} from the same
+layout. A struct of ports may hold another: \code{PortField} is what
+a field is, one port for an end and every port for a struct of ports,
+each \code{field\_sub}, so the netlist sees them flattened, and
+\code{port\_fields} reads \code{bus.pins.awid} as the port
+\code{bus\_pins\_awid}, every name of the chain up to a method call
+being the port's. A struct of the unit's own file may hold one the
+same way, and a side passed whole joins each nested struct whole
+(issue 498). One rule names the ports of either kind of side: written
+\code{name: S} its ports are \code{name\_field}, and taken apart,
+\code{S \{ a, b \}: S}, which only a struct of the file allows, they
+are \code{a} and \code{b} (issue 580). \code{instance} joins a parent's struct literal to such a
+child by the one port that ends in the field's name. A unit of units
+may take such a side and pass its fields, \code{bus.req}, to its
+children, which join as the parent's ports; their kinds cannot be
+seen here, so \code{Lowered::checked} checks when \code{lowered}
+runs that each channel port of a unit of units is joined to exactly
+one child. Passing the whole side to a child joins its ports to the
+child's in the order the struct declares them, and since the macro
+cannot see them the joins are made when \code{lowered} runs, by
+\code{bundle\_args} and \code{instance\_of} (issue 498). A port name
+that two sides both give is refused.
+An array of ports, \code{[Rx<T>; N]}, is such a side: \code{Ports} is
+implemented for arrays, their fields the indices, so its ports are
+\code{ins\_0} to \code{ins\_\{N-1\}} and are found when \code{lowered}
+runs. A \code{for i in lo..hi} at the top of the loop is unrolled
+there too, since \code{N} is a const parameter the macro cannot see
+(issue 500). A process's body is written as a block that pushes its
+statements, so a loop is a Rust \code{for} among the pushes;
+\code{port\_fields} writes \code{ins[i]} as a name holding \code{i}
+between two marks, and \code{dyn\_names} turns every quoted name
+holding one into a \code{format!} of it in the text the macro writes.
+Inside a loop, and for a \code{let mut}, a \code{let} is a Rust
+variable of the expression, and each value computed is a wire of its
+own, pushed onto \code{\_\_dynw} and named \code{x\_lN} by a counter,
+so a value an assignment forwards from one turn to the next is written
+once a turn. The process bodies are built before the unit, so those
+wires join the others. A \code{for} under an \code{if} is refused.
+So is a \code{let} after a loop that reads what the loop computed,
+since a plain wire is defined outside the process and those variables
+are not. A \code{send} under an \code{if} inside a \code{for} stays in
+the loop, one drive a turn, where elsewhere it is hoisted to the end
+of the process. An array may be one port among others in a tuple,
+and a unit of units passes an array port its ends as
+\code{[a, b, c]}, joined in order to \code{x\_0} to \code{x\_2}. An
+index is a number where \code{lowered} runs, so a constant may use
+it: \code{U::<3>::from(i)} is a literal on each turn.
+A register of a \code{Regs} field, \code{self.prio[i]}, is the
+register \code{prio\_i}, read or driven, and in \code{with!} and
+\code{when!} it is \code{prio[i]: v}; the index is a number or a
+loop's variable, since a register chosen by a signal is a
+multiplexer to write out, and that is refused.
+A name VHDL or SystemVerilog reserves, \code{next}, \code{out} and
+\code{inside} among them and VHDL's without regard to case, is
+escaped rather than refused: the netlist writes it with \code{\_rw}
+after it, the same in both targets, whichever one reserves it (issue
+497). A field is escaped by the \code{Trace} derive, which gives the
+netlist and the trace the same name for it, through the table
+\code{\#[rename]} already fills. Everything else is escaped by
+\code{Lowered::escaped}, which the emitters and the ports file call
+before they write: the module's own name, a string given to
+\code{lowered} that the macro never sees; a port of one wire; a wire
+or a net; an instance. A port escaped is recorded in the ports file
+with its own name as its trace scope, so the testbench reads the
+run's \code{next} for the netlist's \code{next\_rw}, and
+\code{trace\_as} still takes a port's own name. A channel is left
+alone, since its nets are its name and \code{\_data}, \code{\_valid}
+or \code{\_ready}, and so is a foreign module, whose names are its
+vendor's. An escaped name another name already has is refused,
+naming both, which is the one case left. The two word lists are one
+file, \code{lib/src/reserved.rs}, below: the runtime compiles it as
+a module of its own, and the macro crate, which cannot depend on the
+runtime since the runtime depends on it, includes the same file by
+path, as does \code{//tools/fst2tb}, which escapes the entity it is
+asked for the same way. A computed \code{let} or a
+port whose netlist name is also a field's would be declared twice.
+\code{\#[lower]} does not see the struct, so for each such name it
+writes a constant, placed at the name, that tests the name against the
+\code{NAMES} the derive gives \code{Fields} and fails to compile if it
+is there; \code{lowered} uses every one. For a generic unit that
+constant is evaluated only for a type that is lowered. A computed
+\code{let} with a port's name is still renamed, with \code{\_w}, and a
+name bound twice is numbered.
+\code{station!(Name, N)} writes a reservation
+station of \code{N} inputs as text, a line struct, the station's
+struct and its lowered \code{run}, every wire of the step named for
+what it is, and \code{TXHDL\_MACRO\_DUMP} writes the text out for
+reading; the attribute in its output expands as any does.
+A \code{run} with no loop is a unit of units, and \code{\#[lower]}
+reads it as the hierarchy example writes it for the simulation: a
+\code{let (tx, rx) = chan::<T, C>()} or \code{let (out, inp) =
+signal::<T, C>()} is a net between the children, named by the two
+ends' common prefix, and every \code{self.child.run(inputs,
+outputs)}, alone or under \code{join2}, is an instance of the
+child's own lowering, its ports joined in order to the nets and to
+the parent's ports. A wire's reading end or an input port may be read
+by several children: \code{let b = a.clone();} is another name for the
+same net, which is how a reset reaches the core, the timer and the
+serial port at once; a channel end is not cloned this way, since a
+channel has one receiver. A side of the parent's that is a struct, passed
+whole, is its fields in order, and a struct literal
+\code{S \{ b: x, a \}} joins each field to the child's port of that
+name, whatever order the literal writes them in; a channel end or
+channel port joined twice or never is refused by name, as is anything else in the body.
+A field of the literal that is itself a struct of ports takes a
+literal of its own, \code{pins: P \{ awid, .. \}}, which joins the
+child's \code{pins\_awid}, or the parent's own nested struct whole,
+\code{pins: jtag}, which joins the child's \code{pins\_} ports to the
+parent's \code{jtag\_} ones in order through \code{bundle\_args\_named}
+when \code{lowered} runs (issue 579).
+A unit of units may also join an array of children,
+\code{join\_all(self.f.iter\_mut().enumerate().map(|(i, c)| c.run(..)))}:
+the lowering writes a loop that pushes an instance per child,
+\code{f\_i}, when \code{lowered} runs, and each \code{x.take(e)} among
+the arguments joins the net or port \code{x\_e}, \code{e} being any
+expression of \code{i}. The nets of \code{chans} and \code{signals} are
+declared by a loop too, and \code{Ends::from} over an array port names
+its elements; the ends are bound under names of their own, since a
+side's name followed by a field is read as one of its ports (issue
+635).
+A child of the array may be passed \code{tie(v)} as well, where \code{v}
+may be an expression of \code{i}, and each child then has wires of
+its own, \code{f\_i\_tieK}; \code{Mesh} ties each node's column and row
+that way (issue 635).
+An input passed \code{tie(v)} is held at the constant \code{v}: in
+the run it is a wire \code{comp::tie} sets once, and in the netlist
+a wire of the parent, \code{FIELD\_tieK}, driven by \code{lit(v)},
+so \code{v} is evaluated when \code{lowered} runs and is a constant.
+\code{Lowered::checked} refuses such a wire joined to anything but a
+child's input, which it would drive twice (issue 498). The
+parent's \code{lowered} reaches each child through a value of
+itself, so a unit of units is \code{Default}, as every unit is, and
+each child's module is named for the parent and the field. A net
+made by \code{chan} is the runtime's channel in the netlist, a
+buffer of two with the receiver's \code{valid} and \code{data} and
+the sender's \code{ready} registered, one module \code{txhdl\_chan}
+put into the file once; a net made by \code{signal} is a wire. A
+bundle is made whole by \code{let (host, per) = link::<B>()}, where
+\code{B} is one side's struct of ports and implements \code{Link},
+whose \code{Host} is the other side's: its nets are listed by
+\code{link\_nets} when \code{lowered} runs, one per port of
+\code{B}, each named for the net and the field, and a side passed
+whole joins them in order through \code{link\_args}, or one at a time
+as \code{host.aw}. \code{Lowered::checked} then counts every channel
+between children, which must join exactly two ports (issue 498).
+A child need not be lowered. A unit that implements \code{Lower} by
+hand with \code{netlist::foreign} is a module the netlist does not
+write: its lowering names the module, its ports by their own names in
+the order the unit's \code{run} takes them, its parameters, and which
+clock drives each of its clock pins, and the parent joins it as it
+joins any child. The netlist then has an instance of that module,
+with its parameters, where the child would be, and emits no body for
+it: a Verilog instance with \code{\#(..)}, and in VHDL a component
+declared once per module and instantiated with a generic map, since a
+Verilog module is reached from VHDL no other way. The component's
+vectors are \code{std\_logic\_vector} where the netlist's are
+\code{unsigned}, so a vector crosses with a conversion, on the actual
+for an input and on the formal for an output. A port of kind
+\code{Pad} is a pin driven from both sides: the parent takes it among
+its own ports and passes it to the foreign child untouched, and both
+netlists declare it \code{inout}. The simulation transfers no signal state
+across a pad; the foreign unit's model in Rust stands in for whatever is on
+the other side of the pins.
+\code{interface!} takes an interface and any number of roles, checks
+that every role names every member once and that no member is driven
+twice, and emits a struct per role plus a constructor that splits each
+member. \code{with!(self <= \{ .. \})} is the drives of one struct,
+its name written once: an entry \code{field: value} is a drive,
+\code{c ? field: value} a drive under a condition, \code{c ? \{ ..
+\} else \{ .. \}} a group under one with the entries after
+\code{else} under its failure, and a memory word \code{m.at(i)} a
+field like any other; entries apply in order, the last drive of a
+field winning, and each lowers as an \code{if} in the clocked block;
+an entry that is not \code{field: value} is refused with the macro's
+own message. \code{when!(c => self \{ .. \} else \{ .. \})} is one
+group of it with the condition written first, the same entries and
+the same \code{if}; an \code{if} whose condition is a constant of
+the build is folded, its arm kept or dropped and the test gone. \code{case!} is a predicated drive per arm that reads
+as a conditional: each statement inside an arm is \code{register <=
+value}, the arrow pointing into the register, and a statement that
+is not is refused with the macro's own message. Both are procedural
+because a \code{macro\_rules!} \code{expr} fragment may be followed
+only by \code{=>}, \code{,} or \code{;}, so \code{lhs <= rhs} cannot be
+matched declaratively at all.
+
+\lstinputlisting[caption={\code{lib/macros/lib.rs}.},label={lst:r-macros}]{lib/macros/lib.rs}
+
+\lstinputlisting[caption={\code{lib/src/reserved.rs}: the words the two targets reserve, shared by the macros and the runtime.},label={lst:r-reserved}]{lib/src/reserved.rs}

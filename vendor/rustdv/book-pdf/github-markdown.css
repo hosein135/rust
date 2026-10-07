@@ -1,0 +1,58 @@
+/* --- MULTI-LINE CODE BLOCKS (Large boxes) --- */
+.markdown-body pre, pre {
+    background-color: #f6f8fa !important;
+    color: #24292e !important;
+    padding: 16px !important;
+    border-radius: 6px !important;
+    margin-bottom: 16px !important;
+    font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace !important;
+}
+
+/* --- INLINE CODE SNIPPETS (Inside sentences) --- */
+.markdown-body code, code {
+    background-color: #f6f8fa !important;
+    color: #24292e !important;
+    padding: 0.2em 0.4em !important; /* Tight internal spacing */
+    margin: 0 !important;
+    font-size: 85% !important;        /* Scales nicely with your font */
+    border-radius: 6px !important;
+    font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace !important;
+}
+
+/* Ensure the code inside a multi-line pre block doesn't inherit inline padding */
+pre code {
+    padding: 0 !important;
+    background-color: transparent !important;
+    font-size: 100% !important;
+}
+
+/* --- FORCE PRINT SHADING --- */
+@media print {
+    pre, code, .markdown-body pre, .markdown-body code {
+        background-color: #f6f8fa !important;
+        color: #24292e !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
+
+    /* --- KEEP WIDE TABLES ON THE PAGE --- */
+    /* Columns size to content (auto), prose wraps to absorb the width, and
+       code tokens stay whole. */
+    .markdown-body table, table {
+        width: 100% !important;
+        table-layout: auto !important;
+        font-size: 85% !important;
+        border-collapse: collapse !important;
+    }
+    .markdown-body th, .markdown-body td, th, td {
+        overflow-wrap: break-word !important;   /* long prose words wrap to fit */
+        vertical-align: top !important;
+    }
+    /* Code in cells wraps ONLY at spaces — never inside a token, so
+       #[derive(...)] and the like never split across lines. */
+    .markdown-body td code, .markdown-body th code, td code, th code {
+        white-space: normal !important;
+        overflow-wrap: normal !important;
+        word-break: normal !important;
+    }
+}

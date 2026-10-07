@@ -1,0 +1,6 @@
+[package]
+name = "ch03_rust_basics_fig05"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]

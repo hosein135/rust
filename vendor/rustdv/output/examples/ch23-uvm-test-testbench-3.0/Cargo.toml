@@ -1,0 +1,15 @@
+[package]
+name = "ch23_uvm_test_testbench_3_0"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+# Named after the crate rather than `lib.rs`: with ~25 chapter crates, a
+# tree full of identical `lib.rs` files is unsearchable and unreadable in
+# an editor's tab bar. Same reasoning that moved Rust off `mod.rs` in 2018.
+path = "src/ch23_uvm_test_testbench_3_0.rs"
+
+[dependencies]
+rustdv = { path = "../../../rustdv" }
+tinyalu_utils = { path = "../tinyalu-utils" }

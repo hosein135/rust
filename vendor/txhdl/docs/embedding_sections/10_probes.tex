@@ -1,0 +1,178 @@
+% SPDX-License-Identifier: Apache-2.0
+\section{What Was Compiled}
+\label{sec:e-probes}
+
+Every claim in this paper about what Rust does is a probe that was built.
+The probes are one file per question in \code{experiments/rust\_embedding},
+and those expected to fail are tagged \code{manual} and stay out of the
+default build; the \code{BUILD.bazel} beside them lists which, each with
+the error it gives. A failing probe is kept rather than deleted,
+because the failure is the answer.
+
+\begin{table*}[t]
+\caption{The probes and what they answered. Rust 1.90.0 stable unless
+stated. Two results changed the design rather than confirming it.}
+\label{tab:probes}
+\centering
+\footnotesize
+\begin{tabular}{@{}lp{60mm}p{80mm}@{}}
+\toprule
+Probe & Question & Answer \\
+\midrule
+\code{probe\_widths}
+  & Does \code{U<\{A + B\}>} compile?
+  & \textbf{No.} \code{error: generic parameters may not be used in const operations} \\
+\code{probe\_widths\_nightly}
+  & Does it compile on nightly?
+  & \textbf{Yes}, with \code{generic\_const\_exprs}, and \code{mul(a, b)} resolves to \code{U<64>} at the call site \\
+\code{probe\_design}
+  & Is \code{async fn} in a trait usable?
+  & \textbf{Yes}, warning that auto trait bounds such as \code{Send} cannot be stated \\
+\code{probe\_design}
+  & Inputs and outputs as type parameters?
+  & \textbf{Yes.} One struct implements \code{Unit} twice with different shapes \\
+\code{probe\_design}
+  & Interface as struct, modport as trait?
+  & \textbf{Yes}, including a unit generic over the role rather than the bus \\
+\code{probe\_comp}
+  & Do \code{Bus}, \code{Port}, \code{Signal}, \code{Chan} hold together?
+  & \textbf{Yes}, and construction compiles \\
+\code{probe\_comp}
+  & Is a \code{Tag} type parameter workable?
+  & \textbf{Yes}, with the policy as associated constants readable in the body \\
+\code{probe\_attr\_block}
+  & Is \code{\#[tag(..)]} on a block stable?
+  & \textbf{No.} \code{error[E0658]: attributes on expressions are experimental} \\
+\code{probe\_processes}
+  & Can \code{run} join two processes?
+  & \textbf{Yes}, with processes taking \code{\&self} and registers as cells \\
+\code{probe\_processes\_mut}
+  & Can they take \code{\&mut self}?
+  & \textbf{No.} \code{error[E0499]: cannot borrow *self as mutable more than once at a time} \\
+\code{probe\_config}
+  & Is a config a struct with associated types and constants?
+  & \textbf{Yes}, and its constants work in an array length, so they are genuinely compile-time \\
+\code{probe\_item\_order}
+  & May an \code{impl} precede the \code{struct} it is for?
+  & \textbf{Yes.} Items in a module are not order dependent, including generically and for types declared later \\
+\code{probe\_derive}
+  & Does a derive give the same reading and stay idiomatic?
+  & \textbf{Yes}, in about thirty lines needing neither \code{syn} nor \code{quote} \\
+\code{probe\_funcs}
+  & Can operator latency replace a hand-placed stage boundary?
+  & \textbf{Yes.} An \code{async} operator in \code{crate::pipeline} is awaited, and the depth follows from the operators used \\
+\code{probe\_if}
+  & Do \code{when!} and \code{with!} work, the fields as entries, the condition first or the struct first?
+  & \textbf{Yes}, as procedural macros; \code{macro\_rules!} cannot follow an \code{expr} with \code{?} or \code{<=} \\
+\code{probe\_when\_bad}
+  & An entry with no colon?
+  & \textbf{Refused:} \code{expected `field: value`, `c ? field: value` or `c ? \{ .. \}`} \\
+\code{probe\_case}
+  & Does \code{case!} take Rust patterns, with guards and alternatives?
+  & \textbf{Yes}, tested with \code{matches!}; the first arm that matches wins \\
+\code{probe\_case\_bad}
+  & A drive with no arrow in an arm?
+  & \textbf{Refused:} \code{expected `register <= value`}, the macro's own message \\
+\code{probe\_case\_binding}
+  & May an arm's pattern bind, as \code{Op::Load(v)}?
+  & \textbf{No.} \code{error[E0425]: cannot find value `v`}; \code{matches!} scopes its bindings \\
+\code{probe\_slice}
+  & May a slice bound be a const parameter, or a run-time offset?
+  & \textbf{Yes} to both, with the width static \\
+\code{probe\_slice\_dyn}
+  & May the slice \emph{width} be a run-time value?
+  & \textbf{No.} \code{error[E0435]: attempt to use a non-constant value in a constant} \\
+\code{probe\_hierarchy}
+  & How is a unit with submodules instantiated and wired?
+  & Submodules and their buses are fields; ports are passed to \code{run}. Disjoint fields, so the borrow rule of probe 5b does not apply \\
+\code{probe\_main}
+  & Can \code{fn main()} instantiate the top through a config?
+  & \textbf{Yes}, and it runs: \code{bazel run ... -- asic} prints \code{elaborated config 'asic' at 400 MHz} \\
+\code{probe\_ports}
+  & Can direction be enforced rather than documented?
+  & \textbf{Yes}, by which methods an end exposes \\
+\code{probe\_ports\_bad}
+  & Can a unit drive an input?
+  & \textbf{No.} \code{error[E0599]: no method named `set` found for struct `In`} \\
+\code{probe\_values}
+  & Do \code{Bit}, \code{Logic}, \code{U<N>}, \code{I<N>} work on stable?
+  & \textbf{Yes}, including the IEEE 1164 resolution table and \code{U} as the default of an undriven wire \\
+\code{probe\_signal\_split}
+  & Can a signal yield its two ends separately, as \code{mpsc} does?
+  & \textbf{Yes}, with \code{In} clonable for fanout and \code{Out} unique \\
+\code{probe\_two\_drivers}
+  & Can a wire have two drivers?
+  & \textbf{No.} \code{error[E0382]: use of moved value} \\
+\code{probe\_nested\_config}
+  & Can a submodule have a configuration of its own?
+  & \textbf{Yes.} A parent's config names its children's, so two children may share a knob name and a child's config is reusable \\
+\code{probe\_interface\_macro}
+  & Can \code{macro\_rules!} generate the role views?
+  & \textbf{Yes}, for exactly two roles, spelling \code{in} as \code{inp}, and a role that omits a member compiles silently \\
+\code{probe\_interface\_proc}
+  & Can a procedural macro do it properly?
+  & \textbf{Yes.} Any number of roles, \code{in} as written, under two hundred lines, no \code{syn} \\
+\code{probe\_interface\_incomplete}
+  & A role that omits a member?
+  & \textbf{Refused:} \code{role `Target` does not say which end of `dat` it takes} \\
+\code{probe\_interface\_twodrivers}
+  & Two roles driving one member?
+  & \textbf{Refused:} \code{member `adr` is driven by more than one role: A, B} \\
+\code{probe\_domain}
+  & Can the clock domain be a type parameter with a named default?
+  & \textbf{Yes.} A single-clock design never mentions one; a two-clock design names the second \\
+\code{probe\_domain\_cross}
+  & A wire across clocks with nothing between?
+  & \textbf{Refused:} \code{expected In<u32, Clk400>, found In<u32, Clk100>}, and the default is not a wildcard \\
+\code{probe\_infer}
+  & May a const width be left to inference, as \code{\_}?
+  & \textbf{Yes}, since Rust 1.89, where the context fixes it: an annotated destination, a typed use, the other operand, the return type \\
+\code{probe\_infer\_bad}
+  & A width nothing fixes, a slice compared with a number?
+  & \textbf{No.} \code{error[E0284]: type annotations needed}; and the lowering, which sees no types, asks for every width it needs \\
+\code{probe\_infer\_lower}
+  & A width Rust would infer, under \code{\#[lower]}?
+  & \textbf{Refused:} \code{`slice::<..>` needs its width written: the lowering sees no types}; \code{concat}'s low operand is the one width it does not need \\
+\code{probe\_macro\_in\_macro}
+  & Does \code{\#[lower]} written by a macro's output expand, and does a port's field, \code{p.tag}, lower?
+  & \textbf{Yes} to both: the unit lowers, and the field is the slice of the port's data the value's layout gives it \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{The four that changed the design}
+
+\textbf{Arbitrary-width arithmetic needs nightly.} A hardware library wants
+to write that multiplying an $A$-bit value by a $B$-bit value gives an
+$A+B$-bit one. Stating that in a signature needs arithmetic over const
+generic parameters, and stable Rust refuses it. The choices are nightly
+with \code{generic\_const\_exprs}, or one function per width pair, which
+compiles on stable and does not scale. This is the largest single
+constraint on the proposal, and it was a guess until it was built.
+
+\textbf{Parallel processes cannot take a mutable borrow.}
+Section~\ref{sec:e-units} gives the collision and the repair. The point
+here is that ten lines of Rust found a constraint that reading the language
+reference had not suggested, and that the repair, a register being a cell
+several processes reach, is a better model of a register than the one that
+failed.
+
+\textbf{A \code{macro\_rules!} conditional cannot reach inside a block.}
+Writing \code{with!} showed where the macro route stops, and that is the
+strongest argument for the recommendation in
+Section~\ref{sec:e-elaboration}. Section~\ref{sec:e-walls} states it.
+
+\textbf{One driver per wire comes free.} It was not designed in.
+\code{signal} returns one \code{Out} and \code{Out} is not \code{Clone},
+so a second driver is a value that cannot be made, and the oldest error
+message in hardware design arrives as \code{error[E0382]: use of moved
+value}. Section~\ref{sec:e-wiring} states the cardinality this rests on.
+
+\subsection{On method}
+
+The first draft of this work argued from the language rules and was wrong
+twice in eleven claims. Both errors were in the direction of optimism, and
+both were cheap to find. A design document for an embedded language should
+include its probes, and the probes should be part of the build, so that a
+Rust release that changes an answer breaks something visible rather than
+quietly invalidating a paragraph.

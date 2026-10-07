@@ -1,0 +1,13 @@
+error[E0502]: cannot borrow `transaction_data` as immutable because it is also borrowed as mutable
+ --> src/main.rs:5:22
+  |
+4 |     let monitor = &mut transaction_data;
+  |                   ---------------------- mutable borrow occurs here
+5 |     let scoreboard = &transaction_data;
+  |                      ^^^^^^^^^^^^^^^^^ immutable borrow occurs here
+...
+7 |     *monitor = Some(42);
+  |     ------------------- mutable borrow later used here
+
+For more information about this error, try `rustc --explain E0502`.
+error: could not compile `borrow_race` (bin "borrow_race") due to 1 previous error

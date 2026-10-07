@@ -1,0 +1,6 @@
+[package]
+name = "ch04_conditions_loops_match_fig10"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]

@@ -1,0 +1,35 @@
+% SPDX-License-Identifier: Apache-2.0
+\section{Conclusion}
+\label{sec:e-conclusion}
+
+A companion paper merged two hardware description languages into one with
+Rust-like syntax. This paper evaluated removing every construct Rust natively
+provides to determine the minimal viable embedded subset.
+
+Seventeen of twenty domain-specific constructs were eliminated, reducing the
+language from a distinct grammar to four core Rust modules and procedural macros.
+
+Two design simplifications proved especially significant. First, timeless dataflow
+cannot count cycles because cycle counting requires \code{.await}, making
+retiming invariants enforceable directly through Rust's type system rather than
+specialized compiler checks. Second, pipelines, transaction sequences, and
+concurrent processes represent a single construct (\code{async fn}) differentiated
+solely by execution drivers; async state machine synthesis replaces dedicated
+pipeline live-range tracking.
+
+Two negative experimental findings guided the architecture. Arbitrary-width
+arithmetic requires nightly compiler features due to const-eval limits. Furthermore,
+concurrent processes cannot hold simultaneous mutable borrows of unit state;
+modeling registers via interior mutability cells provides a cleaner abstraction
+for shared hardware state.
+
+To support dynamic signal selection without separate grammar parsing, the
+runtime provides \code{with!}, \code{case!}, and \code{select!} macros that
+lower directly into priority multiplexer trees.
+
+While the structural features of this architecture transpose Chisel's
+proven concepts into Rust with stronger static typing, the primary contribution
+is unifying hardware pipelines and protocols through \code{async fn}. As
+demonstrated by lowering a verified RV32I core~\cite{vreteno} at 100~MHz on
+FPGA hardware, embedding TxHDL within Rust harnesses an industrial-grade type
+system while concentrating design effort on novel behavioral synthesis.

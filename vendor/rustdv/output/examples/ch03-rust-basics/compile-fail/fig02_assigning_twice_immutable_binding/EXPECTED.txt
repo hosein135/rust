@@ -1,0 +1,14 @@
+% cargo run
+error[E0384]: cannot assign twice to immutable variable `xx`
+ --> src/main.rs:4:5
+  |
+2 |     let xx = 5;
+  |         -- first assignment to `xx`
+3 |     println!("xx: {xx}");
+4 |     xx = 6;
+  |     ^^^^^^ cannot assign twice to immutable variable
+  |
+help: consider making this binding mutable
+  |
+2 |     let mut xx = 5;
+  |         +++

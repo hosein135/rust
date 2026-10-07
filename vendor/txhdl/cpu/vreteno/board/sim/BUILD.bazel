@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: Apache-2.0
+# The Vreteno board simulated whole under Vivado's simulator: the top with
+# its resets, the lowered design with the DDR3 test in its memories,
+# AMD's MIG controller, which makes the clock, and the Micron models
+# on the memory's pins. Manual, as every Vivado target in the tree is:
+#   bazel test //cpu/vreteno/board/sim:board_test
+load("@rules_vivado//build/vivado:rules.bzl", "vivado_library", "vivado_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["board_verdict.tcl"])
+
+vivado_library(
+    name = "board_tb",
+    # The MIG controller comes in through deps, generated.
+    srcs = [
+        "//cpu/vreteno:board_sim_v",
+        "//cpu/vreteno:board/vreteno_board.v",
+        "board_tb.v",
+        "//ddr3:hdl",
+        "//lib/parts:hdl",
+        "//lib/board:bscan_user4",
+    ],
+    tags = ["manual"],
+    deps = [
+        "//ddr3:ddr3_mig_axi",
+        "//ddr3/sim:glbl",
+        "//ddr3/sim:micron",
+    ],
+)
+
+# The budget is `eternal`, an hour, and not `long`, which is fifteen
+# minutes. A run that works is about 35 us of simulated time: it took
+# under four minutes on a quiet machine and over fifteen on one with
+# other sessions on it, so `long` made a busy machine look like a
+# failing test. The target is manual, so nothing waits on the budget
+# but the person who asked for the run. See issue #347, where a budget
+# too small was also what hid a testbench that was stuck.
+vivado_test(
+    name = "board_test",
+    custom_tcl_script = "board_verdict.tcl",
+    extra_modules = ["glbl.glbl"],
+    library = ":board_tb",
+    tags = ["manual"],
+    timeout = "eternal",
+    top = "board_tb",
+    xelab_args = [
+        "--debug",
+        "typical",
+        "-L",
+        "unisims_ver",
+        "-L",
+        "secureip",
+    ],
+    xelab_relaxed = True,
+)

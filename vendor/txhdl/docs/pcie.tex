@@ -1,0 +1,366 @@
+% SPDX-License-Identifier: Apache-2.0
+%
+% PCIe in TxHDL. Built by //docs:pcie. Every listing is included from
+% the tree, and every printout and figure is what the build made by
+% running the example.
+\documentclass[journal,9pt]{IEEEtran}
+
+% Listings of Rust set by rustfmt at 80 columns: 5.6pt is what fits
+% the frame of a column (issue 1061).
+\newcommand{\listingsize}{\fontsize{5.6}{6.6}\selectfont}
+\input{housestyle}
+\input{memmap}
+
+\InputIfFileExists{buildstamp.tex}{}{}
+\providecommand{\buildstamp}{Draft build (outside the Bazel flow).}
+
+% A range of a source file, by its begin/end markers.
+\newcommand{\pinspart}[3]{%
+\lstinputlisting[rangebeginprefix=//\ begin\{,rangebeginsuffix=\},%
+rangeendprefix=//\ end\{,rangeendsuffix=\},includerangemarker=false,%
+linerange=#1-#1,caption={#2},label={#3}]{lib/parts/src/bus/axi_pins.rs}}
+\newcommand{\perpinspart}[3]{%
+\lstinputlisting[rangebeginprefix=//\ begin\{,rangebeginsuffix=\},%
+rangeendprefix=//\ end\{,rangeendsuffix=\},includerangemarker=false,%
+linerange=#1-#1,caption={#2},label={#3}]{lib/parts/src/bus/axi_per_pins.rs}}
+\newcommand{\barpart}[3]{%
+\lstinputlisting[rangebeginprefix=//\ begin\{,rangebeginsuffix=\},%
+rangeendprefix=//\ end\{,rangeendsuffix=\},includerangemarker=false,%
+linerange=#1-#1,caption={#2},label={#3}]{pcie/src/bar.rs}}
+
+\title{PCIe in TxHDL}
+
+\author{Filip Filmar and Dragiša Janković%
+\thanks{Both authors are independent. Filip Filmar is the
+corresponding author, at f@hdlfactory.com; Dragiša Janković is
+reached at linkedin.com/in/dragisa-jankovic.}%
+\thanks{This tutorial details integrating TxHDL logic behind a PCIe endpoint,
+building upon the AXI bus architecture~\cite{axi}. All code listings are
+embedded from the project repository \code{HDL/txhdl} during compilation, and
+all traces reflect automated testbench execution. The project overview~\cite{cover}
+indexes all companion reports.}%
+\thanks{The authors used Claude, an AI assistant, while developing
+architectural concepts, documentation, and software. Verbatim prompts are
+preserved in repository commit logs.}%
+\thanks{\buildstamp}}
+
+\markboth{PCIe in TxHDL}{Filmar and Janković: PCIe in TxHDL}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+The Alinx AX7A200B FPGA board includes a PCIe $\times$2 edge connector wired to
+dedicated GTP transceiver quads and integrated PCIe hard blocks. AMD supplies
+the physical and data link layers as the DMA/Bridge Subsystem for PCI Express IP
+core. The build system configures this core for Gen2 operation across two lanes
+with its AXI-Bridge bypass window enabled, mapping TxHDL logic behind the PCIe
+interface. Inbound reads and writes targeting BAR1 emerge from the core as AXI4
+transactions at external master pins. A dedicated library component,
+\code{AxiPins}, converts between raw pin-level signaling and TxHDL channel
+interfaces, connecting to a memory-mapped register unit containing four 64-bit
+registers. The pipeline is validated via cycle-accurate co-simulation in
+\code{nvc} and Verilator, exercised through high-level Rust drivers, and
+implemented through Vivado synthesis and placement to produce a timing-clean
+bitstream.
+\end{abstract}
+
+\section{What Is Here}
+\label{sec:p-what}
+
+This design spans three functional modules within the repository tree:
+
+\emph{Bus interface adapter.} Component \code{AxiPins}, located in
+\code{txhdl\_parts} under \code{bus::axi\_pins}, bridges external pin-level AXI4
+master signals to internal TxHDL channels. It drops in wherever a host tracker
+attaches to a physical bus interface.
+
+\emph{Target register file.} Module \code{pcie::bar}, implemented under
+\code{//pcie}, services transactions mapped to BAR1. Unit \code{BarRegs} provides
+four 64-bit registers behind a peripheral bus tracker. Composite unit
+\code{PcieBar} integrates \code{AxiPins}, the tracker, and the register file
+into a single lowered component.
+
+\emph{PCIe endpoint and board integration.} Rule \code{//pcie:xdma\_x2}
+generates the vendor PCIe controller via Vivado, while \code{pcie/board}
+provides the top-level structural wrapper and physical constraints.
+
+\section{The Endpoint}
+\label{sec:p-endpoint}
+
+The Bazel build system executes Vivado toolchains hermetically. Extension rules
+in \code{rules\_vivado} generate vendor IP cores through \code{vivado\_ip}, which
+takes core parameters and produces HDL sources alongside the \code{.xci}
+descriptor. Downstream synthesis rules import this descriptor via
+\code{read\_ip}, compiling vendor logic together with application RTL.
+
+Two AMD cores provide AXI master interfaces mapped to PCIe Base Address
+Registers on Artix-7 devices: the AXI Memory-Mapped PCIe bridge
+(\code{axi\_pcie}) and the DMA/Bridge Subsystem for PCI Express (\code{xdma}).
+Both were evaluated at Gen2 link speeds across two physical lanes using board pin
+assignments. Both mapped cleanly to the two GTP transceiver channels and the
+integrated PCIe hard macro. However, \code{axi\_pcie} failed timing closure by
+0.097\,ns across three internal paths within its unused AXI slave bridge, which
+cannot be disabled. Conversely, \code{xdma} allows disabling unused slave ports,
+closing timing with positive slack. At Gen2 $\times$2, the core requires a
+125\,MHz user clock frequency, rejecting 62.5\,MHz configurations.
+
+Configuration parameters reside in \code{pcie/BUILD.bazel}: Gen2 negotiation,
+two physical lanes, a 100\,MHz PCIe reference clock, a 64-bit master bus width,
+and an active bypass aperture mapping a 1~MiB address window to BAR1. On Artix-7
+devices, the XDMA core does not support pure bridge mode; setting bridge mode
+silently defaults to a DMA engine configuration where BAR0 maps internal DMA
+registers and drives a descriptor-based master~\cite{i451}. The bypass window
+resolves this limitation by providing direct bridging: host transactions
+targeting BAR1 emerge directly on the \code{m\_axib} master port without
+descriptor intervention. Outbound master addresses span 64 bits, of which
+downstream logic decodes the lower 32 bits.
+
+\section{The Pins}
+\label{sec:p-pins}
+
+External IP blocks acting as AXI4 masters expose standard pin interfaces:
+individual \code{valid} and \code{ready} control lines per channel and discrete
+wires for data and address payloads. In contrast, TxHDL components communicate
+across typed channels transporting structured transactions~\cite{axi}.
+Component \code{AxiPins} bridges these two conventions with zero pipeline latency.
+
+\pinspart{ports}{The pins, as the unit's two sides.}{lst:p-ports}
+
+Listing~\ref{lst:p-ports} illustrates \code{AxiPins} port declarations. The 24
+master interface pins aggregate into a structured type, \code{AxiHostPins}, which
+derives \code{Ports}. Input interfaces hold these pins as a grouped field,
+\code{pins}, alongside inbound response channels. During lowering, individual
+signals map to standard top-level ports such as \code{inp\_pins\_awid}, while
+outbound transactions drive \code{outp\_aw}. Designs incorporating host pins
+encapsulate them into composite structs, mirroring the approach used for Vreteno
+JTAG interfaces (issue~\#579).
+
+When an upstream master asserts an address phase or write beat, \code{AxiPins}
+presents it to the corresponding channel whenever downstream capacity is
+available, asserting the host's \code{ready} signal. Conversely, write responses
+and read beats arriving at channel heads drive host \code{valid} and data lines,
+retiring whenever the host asserts \code{ready}. Macro \code{select!} converts
+between raw AXI4 wire encodings and strongly-typed TxHDL enums. Upstream masters
+omit \code{AxQOS} and \code{AxREGION} signaling, so the adapter drives both
+outputs to zero.
+
+\pinspart{unit}{\code{AxiPins}: the step.}{lst:p-unit}
+
+Listing~\ref{lst:p-unit} details the synchronous step logic of \code{AxiPins}.
+Because pins model zero-delay combinatorial wires, driving processes evaluate in
+the same simulation delta cycle as consuming units, matching physical netlist
+behaviors.
+
+Example driver \code{ex\_axi\_pins} evaluates this adapter in simulation
+(Listing~\ref{lst:p-ex}). A behavioral host model drives
+\code{AxiPins<32, 64, 8, 4>}, matching endpoint bus widths, connected to a
+peripheral tracker and target RAM. The test issues three 64-bit write beats,
+reads back four words, and attempts an out-of-bounds read that triggers a bus
+fault. Listing~\ref{lst:p-out} records simulation output, and
+Figure~\ref{fig:p-pins} diagrams transaction handshakes across the pin boundary.
+Lowered netlists match software execution under both \code{nvc} and Verilator
+regressions: \code{//docs:axi\_pins\_sim\_axi\_pins\_tb\_test} and
+\code{//docs:axi\_pins\_vsim\_test}.
+
+\lstinputlisting[caption={\code{ex\_axi\_pins.rs}: a host on pins, and a
+RAM behind them.},label={lst:p-ex}]{lib/examples/ex_axi_pins.rs}
+
+\lstinputlisting[style=ascii,caption={What \code{ex\_axi\_pins} printed
+when the build ran it.},label={lst:p-out}]{out_axi_pins.txt}
+
+\begin{figure}[htbp]
+\centering
+\input{axi_pins_timing.tex}
+\caption{The write through the pins: its address phase and its three
+beats handed to the channels as the host offers them, and its response
+handed back.}
+\label{fig:p-pins}
+\end{figure}
+
+\section{The Pins the Other Way}
+\label{sec:p-perpins}
+
+External IP blocks can also function as AXI4 peripherals, such as the AMD DDR3
+memory controller evaluated in issue~\#1023. Component \code{AxiPerPins} provides
+the inverse adapter: it attaches to peripheral channel endpoints where a
+peripheral tracker typically resides, exposing physical slave pins without
+internal buffering.
+
+\perpinspart{ports}{The pins, the other way.}{lst:p-perports}
+
+Listing~\ref{lst:p-perports} shows port definitions for \code{AxiPerPins}.
+Peripheral-driven signals comprise eleven pins, including handshake lines and
+response data, encapsulated within struct \code{AxiPerDriven}. The adapter
+presents address phases, write beats, and response acknowledge lines as outputs
+alongside channel returns to the system link.
+
+\perpinspart{unit}{\code{AxiPerPins}: the step.}{lst:p-perunit}
+
+Listing~\ref{lst:p-perunit} presents the synchronous step logic. Address phases
+and write beats at channel heads assert external \code{valid} lines and data
+fields whenever the peripheral asserts \code{ready}. Inbound write responses and
+read data transfer to link channels when channel buffer space is available. The
+adapter exports all address phase fields except region qualifiers, which
+single-port memory controllers do not inspect. Quality-of-service bits
+(\code{AxQOS}) are forwarded directly.
+
+Example testbench \code{ex\_axi\_per\_pins} verifies this interface by attaching
+a simulated memory model behind \code{AxiPerPins<30, 32, 4, 5>}, matching DDR3
+controller widths. Listing~\ref{lst:p-perex} shows testbench construction,
+Listing~\ref{lst:p-perout} lists output traces, and Figure~\ref{fig:p-perpins}
+charts write transaction timing across peripheral pins. Multi-simulator test
+suites under \code{nvc} and Verilator confirm formal equivalence with generated
+netlists: \code{//docs:axi\_per\_pins\_sim\_axi\_per\_pins\_tb\_test} and
+\code{//docs:axi\_per\_pins\_vsim\_test}.
+
+\lstinputlisting[caption={\code{ex\_axi\_per\_pins.rs}: a memory on
+pins, and a client in front.},label={lst:p-perex}]{lib/examples/ex_axi_per_pins.rs}
+
+\lstinputlisting[style=ascii,caption={What \code{ex\_axi\_per\_pins}
+printed when the build ran it.},label={lst:p-perout}]{out_axi_per_pins.txt}
+
+\begin{figure}[htbp]
+\centering
+\input{axi_per_pins_timing.tex}
+\caption{The write the other way: its address phase and its three
+beats taken off the link's channels as the peripheral, always ready,
+takes them, and its response sent back on the link.}
+\label{fig:p-perpins}
+\end{figure}
+
+\section{Behind BAR1}
+\label{sec:p-bar}
+
+\code{BarRegs} is four words, at the offsets a host reads and writes in
+BAR1.
+
+\mmget{regs}{bar}
+
+The identifier reads \mmget{ident}{bar}, which encodes \code{TxHDL} in ASCII
+along with revision metadata. The build generates this table directly from
+\code{WORDS} declarations in \code{bar.rs}, and test cases access each register
+at its declared offset.
+
+The register bank services single transactions sequentially, mirroring Vreteno
+system timer semantics. Read requests complete in the cycle of acceptance, and
+writes commit upon arrival of the write data beat. Decoding logic inspects
+address bits 4 and 3, relying on upstream trackers to filter out-of-range
+requests. Writes update complete 64-bit words regardless of byte enable strobes.
+
+\barpart{regs}{\code{BarRegs}: four words behind a peripheral
+tracker.}{lst:p-regs}
+
+Composite module \code{PcieBar} integrates the three components into a single
+unit: the \code{AxiPins} adapter, peripheral tracker, and register bank, joined
+by internal channels. External ports expose AXI master pins, system resets, and
+diagnostic LED outputs, connecting directly to top-level XDMA interfaces.
+
+\barpart{bar}{\code{PcieBar}: everything behind BAR1, as one
+unit.}{lst:p-bar}
+
+Diagnostic test suite \code{//pcie:bar\_test} exercises \code{PcieBar} across
+its pin interface, validating identifier queries, scratchpad read-write loops,
+LED state toggles, and write counter tracking. Automated checks confirm that the
+synthesized netlist forms a single module with pins exposed as top-level ports.
+
+\section{The Board}
+\label{sec:p-board}
+
+Top-level integration module \code{pcie\_top.v} coordinates components beyond the
+scope of lowered units: differential reference clock buffers, the XDMA endpoint
+macro, and clock-reset distribution networks. \code{PcieBar} executes
+synchronously on the 125\,MHz PCIe user clock, avoiding clock domain crossing
+logic. Active-low resets drive lowered logic through synchronous inversion.
+
+\lstinputlisting[caption={\code{pcie/board/pcie\_top.v}: the
+endpoint and the design behind it.},label={lst:p-top}]{pcie/board/pcie_top.v}
+
+Physical constraints in \code{pcie/board/ax7a200\_pcie.xdc} assign the two
+serial lanes, 100\,MHz differential reference clock inputs, reset pushbuttons,
+and diagnostic LEDs. High-speed gigabit transceivers omit standard CMOS I/O
+declarations. Because the AX7A200B hardware manual omits PCIe slot reset (PERST\#)
+routing~\cite{i179}, system resets map to the on-board pushbutton.
+
+\lstinputlisting[caption={\code{pcie/board/ax7a200\_pcie.xdc}: the
+board's pins.},label={lst:p-xdc}]{pcie/board/ax7a200_pcie.xdc}
+
+Compilation via \code{bazel build //pcie:endpoint\_synth} synthesizes the XDMA
+IP, lowers \code{PcieBar}, and executes Vivado synthesis without critical
+warnings. Implementation rule \code{//pcie:endpoint\_pnr} places and routes the
+design in eight minutes. The design meets all timing constraints, achieving
+0.656\,ns setup slack and 0.036\,ns hold slack across 42\,813 endpoints on the
+100\,MHz reference clock and derived 125\,MHz user clock. Device utilization
+consumes 11\,320 slice LUTs, 13\,570 flip-flops, 20.5 Block RAM tiles, two GTP
+transceivers, and the integrated PCIe block.
+
+\section{What Is Not Done}
+\label{sec:p-not}
+
+Hardware validation within an active host motherboard remains to be completed.
+Physical host testing will verify Gen2 link negotiation across both lanes, PCIe
+device enumeration, Base Address Register mapping, and register read-write
+cycles from host software~\cite{i180}.
+
+The endpoint is thoroughly verified in behavioral simulation. Compilation
+scripts build simulation libraries directly from Vivado simulation export assets.
+Testbench \code{//pcie/sim:xdma\_test} evaluates top-level gateware and
+\code{BarRegs} without external stimuli, confirming the link remains quiescent.
+Testbench \code{//pcie/sim:rp\_test} connects the design to a behavioral PCIe
+root port model provided by AMD example designs~\cite{i178}. The simulation
+establishes a Gen2 $\times$2 link, interrogates vendor and device IDs, programs
+BAR1, and executes register validation test suite \code{pcie/sim/rp/tests.vh}.
+The test sequence reads identifier strings, performs scratchpad read-write
+loops, and verifies write operation counters, passing all checks in 26 minutes
+of simulation. Initial runs without the bypass aperture exposed DMA engine
+defaults at BAR0~\cite{i451}.
+
+Rule \code{vivado\_ip} masks certain IP configuration errors, requiring manual
+inspection of synthesis logs when parameters change~\cite{i177}. Furthermore,
+PCIe slot reset line PERST\# remains unrouted on this hardware
+revision~\cite{i179}. Currently, \code{PcieBar} operates on an isolated bus
+clocked by the PCIe endpoint. Bridging the BAR aperture to the primary Vreteno
+processor bus will require dual-clock asynchronous FIFOs, implemented using
+\code{ChanCdc} channel synchronizers~\cite{i131}.
+
+\IEEEtriggeratref{2}
+\begin{thebibliography}{9}
+
+\bibitem{axi}
+F.~Filmar and D.~Janković, ``AXI in TxHDL,'' project repository
+\code{HDL/txhdl}, \code{//docs:axi}, 2026.
+
+\bibitem{i131}
+Issue 131, ``feat(test): co-simulate a unit of several clocks, and
+lower a clock-crossing channel,'' project repository \code{HDL/txhdl},
+2026.
+
+\bibitem{i177}
+Issue 177, ``fix(rules\_vivado): vivado\_ip succeeds when Vivado
+rejects the IP's configuration,'' project repository
+\code{HDL/txhdl}, 2026.
+
+\bibitem{i178}
+Issue 178, ``feat(pcie): simulate the PCIe endpoint, its IP and a root
+port,'' project repository \code{HDL/txhdl}, 2026.
+
+\bibitem{i179}
+Issue 179, ``board: the AX7A200B's PCIe reset, PERST\#, and its pin,''
+project repository \code{HDL/txhdl}, 2026.
+
+\bibitem{i180}
+Issue 180, ``test(pcie): run the endpoint in a PC and read its BAR from
+the host,'' project repository \code{HDL/txhdl}, 2026.
+
+\bibitem{i451}
+Issue 451, ``fix(pcie): the endpoint is a DMA engine, not a bridge;
+the Artix-7 XDMA ignores functional\_mode,'' project repository
+\code{HDL/txhdl}, 2026.
+
+\bibitem{cover}
+F.~Filmar and D.~Janković, ``TxHDL documents,'' project repository
+\code{HDL/txhdl}, \code{//docs:cover}, 2026.
+
+\end{thebibliography}
+
+\end{document}

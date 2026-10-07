@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Parts: what the language provides as hardware, written in its own
+//! lowerable subset and checked as every unit is. A unit's channel
+//! port is one side of a channel; the channel itself, the elastic
+//! buffer of two between two units, is the first part here; a FIFO
+//! with a channel at each end and a reservation station are the
+//! others.
+
+// As in the runtime crate: every public item is documented and the
+// build refuses one that is not. A part written by a macro is
+// documented by its generator, so the text arrives with the code.
+#![deny(missing_docs)]
+
+pub mod buffer;
+pub mod bus;
+pub mod cdc;
+pub mod cfgflash;
+#[cfg(test)]
+mod derives;
+pub mod dma;
+pub mod dtm;
+pub mod eth;
+pub mod ethdma;
+pub mod ethshare;
+pub mod ethslots;
+pub mod fifo;
+pub mod flashwin;
+pub mod gpio;
+pub mod hdmi;
+pub mod i2c;
+#[cfg(test)]
+mod lowering;
+pub mod mdio;
+pub mod mmu;
+pub mod plic;
+pub mod pwm;
+pub mod redundant;
+#[cfg(test)]
+mod regmap;
+pub mod remote;
+pub mod scanout;
+pub mod sd;
+pub mod spi;
+pub mod station;
+pub mod syscon;
+pub mod tracer;
+pub mod trng;
+pub mod wdog;

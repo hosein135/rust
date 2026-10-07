@@ -1,0 +1,161 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Operators that may take a cycle. Every one is `async`, and every one
+//! is a pipeline stage the moment it is awaited. They live here and not
+//! beside the combinational ones so that the module a design imports
+//! from says whether an operation can cost time.
+//!
+//! There is no `impl Add`. An operator must return a value, and an
+//! operation whose latency the mapping decides cannot. `.await` is not a
+//! claim that a cycle is spent; it is a refusal to decide here.
+//!
+//! Widths are declared per function rather than computed, because
+//! `U<{A + B}>` needs nightly Rust. The prototype pays that in
+//! functions; a nightly build could pay it once.
+
+use crate::comp::{process_in, tick, Clock, Rx, Tx};
+use crate::types::Transaction;
+use crate::types::U;
+use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll, Waker};
+
+// In the prototype each operator yields to the executor once, so it
+// costs one cycle. A mapping would decide the real number.
+
+/// A product, at twice the width of its operands, so it cannot
+/// overflow. One cycle, as every operator here costs one.
+pub async fn mul(a: U<32>, b: U<32>) -> U<64> {
+    tick().await;
+    U::new(a.raw() * b.raw())
+}
+
+/// A sum at the operands' width, wrapping, in one cycle. `N` is that
+/// width, which both operands and the result share.
+pub async fn add<const N: usize>(a: U<N>, b: U<N>) -> U<N> {
+    tick().await;
+    a + b
+}
+
+/// A difference at the operands' width, wrapping, in one cycle. `N`
+/// is that width.
+pub async fn sub<const N: usize>(a: U<N>, b: U<N>) -> U<N> {
+    tick().await;
+    a - b
+}
+
+/// A quotient, in one cycle. Division by zero gives zero here, which
+/// is this prototype's choice and not any hardware convention.
+pub async fn div(a: U<32>, b: U<32>) -> U<32> {
+    tick().await;
+    if b.raw() == 0 {
+        U::new(0)
+    } else {
+        U::new(a.raw() / b.raw())
+    }
+}
+
+/// Wait a stated number of cycles. This is the one place a design counts
+/// them, and it is honoured exactly: a baud interval comes from the wire.
+pub async fn cycles(n: usize) {
+    for _ in 0..n {
+        tick().await
+    }
+}
+
+/// Drive a pipeline. At every edge of `C` at which an input is
+/// offered and the pipeline is not stalled (below), an invocation of
+/// `f` starts; every invocation in flight is polled each step as a
+/// process of its own, so each advances one await per cycle; and each
+/// result is sent as its invocation completes, oldest first. Several
+/// invocations are in flight at once, each at a different await,
+/// which is what a pipeline is; the awaits inside `f` are its stage
+/// boundaries and nobody places them.
+///
+/// Every stage has one enable. At an edge where the oldest result is
+/// finished and the output has no room, nothing moves: no invocation
+/// advances and no input is taken, so the stall reaches the sender
+/// through the input channel's `ready`, and what `drive` holds is never
+/// more than the pipeline's depth (issue 730).
+pub async fn drive<I, O, C, F, Fut>(f: F, input: Rx<I, C>, output: Tx<O, C>)
+where
+    I: Transaction,
+    O: Transaction,
+    C: Clock,
+    F: Fn(I) -> Fut,
+    Fut: Future<Output = O>,
+{
+    let mut flying: VecDeque<(Pin<Box<Fut>>, Waker, Option<O>)> =
+        VecDeque::new();
+    loop {
+        C::rising().await;
+        let finished = matches!(flying.front(), Some((_, _, Some(_))));
+        if finished && !output.ready().to_bool() {
+            continue;
+        }
+        if let Some(x) = input.recv() {
+            flying.push_back((Box::pin(f(x)), process_in::<C>(), None));
+        }
+        for (fut, w, done) in flying.iter_mut() {
+            if done.is_none() {
+                let mut cx = Context::from_waker(w);
+                if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
+                    *done = Some(v);
+                }
+            }
+        }
+        if let Some((_, _, Some(_))) = flying.front() {
+            if output.ready().to_bool() {
+                let (_, _, v) = flying.pop_front().unwrap();
+                output.send(v.unwrap());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::comp::{chan, join2, DefaultClock, Running};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    async fn inc(x: U<32>) -> U<32> {
+        add(x, U::<32>::from(1u32)).await
+    }
+
+    /// A receiver that takes nothing for a thousand edges stalls the
+    /// pipeline, and the stall reaches the sender: a handful of words
+    /// go in, not a thousand. When the receiver takes again, every
+    /// result comes out once and in order. Before issue 730 all
+    /// thousand went in and `drive` kept them.
+    #[test]
+    fn a_stalled_output_stops_the_input() {
+        let (in_tx, in_rx) = chan::<U<32>, DefaultClock>();
+        let (out_tx, out_rx) = chan::<U<32>, DefaultClock>();
+        let sent = Rc::new(Cell::new(0u32));
+        let n = sent.clone();
+        let source = async move {
+            loop {
+                DefaultClock::rising().await;
+                if in_tx.ready().to_bool() && n.get() < 1000 {
+                    in_tx.send(U::<32>::from(n.get()));
+                    n.set(n.get() + 1);
+                }
+            }
+        };
+        let mut sim = Running::new(join2(source, drive(inc, in_rx, out_tx)));
+        for _ in 0..1000 {
+            sim.cycle();
+        }
+        assert!(sent.get() < 8, "{} went in, stalled", sent.get());
+        let mut got = Vec::new();
+        for _ in 0..3000 {
+            if let Some(v) = out_rx.recv() {
+                got.push(v.raw() as u32);
+            }
+            sim.cycle();
+        }
+        assert_eq!(got, (1..=1000).collect::<Vec<u32>>(), "each once");
+    }
+}

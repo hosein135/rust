@@ -1,0 +1,14 @@
+# Local Cargo manifest. Upstream TxHDL builds this proc-macro with Bazel
+# (`lib/BUILD.bazel`, target `txhdl_macros`). This file exists so the
+# Verilog IDE workspace can compile the same sources.
+[package]
+name = "txhdl_macros"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "Proc macros for the vendored TxHDL library"
+
+[lib]
+proc-macro = true
+path = "lib.rs"

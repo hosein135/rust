@@ -1,0 +1,17 @@
+[package]
+name = "rustdv-macros"
+version = "0.2.0"
+edition = "2024"
+description = "Proc macros for rustdv: #[rustdv::test] and #[derive(Component)] (design-doc §6)."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rustdv/rustdv"
+
+[lib]
+# Crate root named after the crate, not lib.rs (D29).
+path = "src/rustdv_macros.rs"
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "3", features = ["full"] }

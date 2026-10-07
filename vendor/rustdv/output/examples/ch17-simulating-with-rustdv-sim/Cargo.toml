@@ -1,0 +1,11 @@
+[package]
+name = "ch17_simulating_with_rustdv_sim"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/ch17_simulating_with_rustdv_sim.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+rustdv = { path = "../../../rustdv" }

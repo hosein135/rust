@@ -1,0 +1,48 @@
+% SPDX-License-Identifier: Apache-2.0
+\section{\code{txhdl::formal}}
+\label{sec:r-formal}
+
+What a unit states about itself (issue 502). \code{check!(c, "m")}
+says that \code{c} holds on every edge at which the statement is
+reached, \code{assume!(c, "m")} that the unit takes \code{c} for
+granted of its inputs, and \code{cover!(c, "m")} that \code{c} can
+happen. Each is a macro that calls a function of this module, so that
+it reads as a statement in a unit's \code{run} and runs as Rust. In
+the run a failed check panics with its message and the time, and so
+does an assumption the run's own inputs break, since a proof made
+under it would not cover that run; a cover point counts the steps it
+is reached on, by its message, in a table per thread that
+\code{covered} reads.
+
+Under \code{\#[lower]} each is \code{Stmt::Check}, with its kind
+(\code{Checked}), its condition and its message, a statement of the
+process it is in and under the conditions it is under; the lowering
+does not skip it as it skips \code{println!}. Each is stated only
+while \code{rst} is low, whichever side declared the port: a unit with
+its own reset, as the core has, would otherwise have its checks
+stated in the reset cycles, where an output it holds or a register it
+has not yet put back fails them for no fault of the design (issue
+633). \code{//docs:rstcheck\_reset\_vsim\_test} and its VHDL twin
+hold the reset and pass, \code{rstcheck\_prove\_test} proves the check
+for every input and every reset, and the same netlist without the gate
+fails its proof at the first step. The run gates them the same way,
+on \code{reset()}: while a testbench holds the reset, \code{check}
+and \code{assume} return at once and \code{cover} counts nothing
+(issue 879). The Verilog writes it inside the clocked
+block, as \code{if (!rst)} before SystemVerilog's immediate
+\code{assert}, \code{assume} or
+\code{cover}, between \code{`ifdef FORMAL} and \code{`endif}: a formal
+tool defines \code{FORMAL}, and a synthesis tool that reads plain
+Verilog never sees the words. The VHDL writes a check and an
+assumption as VHDL-2008's own \code{assert}, of \code{rst = '1' or}
+the condition, with the message and severity failure, and a cover
+point as a \code{report} of its message when it is reached out of
+reset. A block that states something and drives nothing
+is still written. The co-simulations check both: nvc checks the
+VHDL's assertions natively, and the Verilator build defines
+\code{FORMAL} and passes \code{--assert}. The assertions are also
+proved: \code{formal\_test} in \code{tools/formal/defs.bzl} runs
+SymbiYosys on the pinned Yosys over a netlist, and the formal
+tutorial~\cite{prove} shows a digit proved for every input.
+
+\lstinputlisting[caption={\code{lib/src/formal.rs}.},label={lst:r-formal}]{lib/src/formal.rs}

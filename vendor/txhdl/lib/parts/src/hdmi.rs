@@ -1,0 +1,819 @@
+// SPDX-License-Identifier: Apache-2.0
+//! HDMI through an encoder chip: a video peripheral on AXI-Lite, and
+//! the I2C master that configures the chip.
+//!
+//! The Alinx AX7A200B drives its HDMI connector through a SiI9134, which
+//! takes pixels in parallel and does the TMDS encoding and the
+//! serialising itself. What the FPGA gives it is a pixel clock, 24 bits
+//! of colour, the horizontal and vertical syncs and a data enable, and
+//! the chip is set up once over I2C before it shows anything.
+//!
+//! [`Hdmi`] is the video side, one unit on the pixel clock. It counts
+//! the raster, reads its framebuffer under the beam, and drives the
+//! chip's parallel inputs from registers. The framebuffer is written
+//! over AXI-Lite, so a host paints the picture a pixel at a time and
+//! the unit shows it for as long as it runs. Every number of the video
+//! mode is a parameter, so a test can run a raster of a few hundred
+//! pixels where the board runs one of 420 000.
+//!
+//! [`I2cInit`] holds the chip in reset, then writes its configuration
+//! registers over I2C, and says whether every byte was acknowledged.
+use txhdl::comp::{
+    join2, mux, until, Clock, DefaultClock, In, Mem, Out, Reg, Unit,
+};
+use txhdl::types::{Bit, U};
+use txhdl::{lower, regmap, select, with, Trace};
+
+use crate::bus::axi::Resp;
+use crate::bus::axi_lite::{LiteB, LitePort, LiteR};
+
+/// Words in the framebuffer: an address is the row in its top seven
+/// bits and the column in its low eight, so the picture is at most
+/// 256 columns by 128 rows.
+pub const FB_WORDS: usize = 1 << 15;
+
+// begin{modes}
+/// 640 by 480 at 60 Hz, as VESA states it: 800 columns and 525 rows
+/// per frame at 25.175 MHz, both syncs low while active.
+pub mod vga {
+    /// Visible columns.
+    pub const HV: usize = 640;
+    /// Columns of front porch.
+    pub const HFP: usize = 16;
+    /// Columns of horizontal sync.
+    pub const HSW: usize = 96;
+    /// Columns of back porch.
+    pub const HBP: usize = 48;
+    /// Visible rows.
+    pub const VV: usize = 480;
+    /// Rows of front porch.
+    pub const VFP: usize = 10;
+    /// Rows of vertical sync.
+    pub const VSW: usize = 2;
+    /// Rows of back porch.
+    pub const VBP: usize = 33;
+}
+// end{modes}
+
+// begin{fns}
+/// The last count of an axis, blanking included: the visible part, the
+/// front porch, the sync pulse and the back porch, less one.
+///
+/// One function serves both axes. A call binds a function's const
+/// parameters by position, so the names here are the axis's rather
+/// than either axis's own, which is issue 127; before that they had to
+/// be the unit's names, and each axis had a function of its own.
+#[lower]
+fn axis_end<
+    const V: usize,
+    const FP: usize,
+    const SW: usize,
+    const BP: usize,
+>(
+    c: U<12>,
+) -> bool {
+    c == V + FP + SW + BP - 1
+}
+
+/// Whether a count is inside its axis's sync pulse.
+#[lower]
+fn in_sync<const V: usize, const FP: usize, const SW: usize>(c: U<12>) -> bool {
+    (c >= V + FP) & (c < V + FP + SW)
+}
+
+/// Whether a count is in the visible part of its axis.
+#[lower]
+fn visible<const V: usize>(c: U<12>) -> bool {
+    c < V
+}
+
+/// The last column of the framebuffer: the visible columns, divided by
+/// the size of a framebuffer pixel on the screen.
+#[lower]
+fn last_col<const HV: usize, const SHIFT: usize>(x: U<8>) -> bool {
+    x == (HV >> SHIFT) - 1
+}
+
+/// The last row of the framebuffer.
+#[lower]
+fn last_row<const VV: usize, const SHIFT: usize>(y: U<7>) -> bool {
+    y == (VV >> SHIFT) - 1
+}
+
+/// A 4-bit colour as 8 bits, its bits repeated, so 15 is full scale.
+#[lower]
+fn wide(c: U<4>) -> U<8> {
+    c.concat::<4, 8>(c)
+}
+// end{fns}
+
+// begin{regs}
+// The video peripheral's AXI-Lite words.
+regmap! { regs (regs_read, regs_we), 2: [
+    (0, status, ro, "the raster and the frames shown", [
+        (blank, 0, 1, ro, 0, "high in vertical blanking"),
+        (frames, 16, 16, ro, 0, "frames shown, wrapping"),
+    ]),
+    (1, cursor, rw, "where the next pixel written goes", [
+        (col, 0, 8, rw, 0, "the column"),
+        (row, 8, 7, rw, 0, "the row"),
+    ]),
+    (2, pixel, wo, "a pixel at the cursor, which then moves on", [
+        (colour, 0, 12, wo, 0, "four bits each of red, green and blue"),
+    ]),
+] }
+// end{regs}
+
+/// What the video peripheral drives: the pixel and the three timing
+/// lines, a port each, named as the netlist names them (issue 344).
+pub struct VideoOut {
+    /// The pixel, red in the top byte.
+    pub rgb: Out<U<24>>,
+    /// Horizontal sync.
+    pub hsync: Out<Bit>,
+    /// Vertical sync.
+    pub vsync: Out<Bit>,
+    /// The pixel is in the visible area.
+    pub de: Out<Bit>,
+}
+
+/// The video peripheral. A framebuffer pixel is 12 bits, four each of
+/// red, green and blue from the top, and covers `1 << SHIFT` by
+/// `1 << SHIFT` pixels of the screen.
+///
+/// Its AXI-Lite words are `regs`. A write to `pixel` puts the colour
+/// into the framebuffer at the cursor, and the cursor moves to the
+/// next column, and from the last column to the first of the next row,
+/// and from the last row to the first; a fixed burst to it paints a run
+/// of pixels.
+///
+/// The chip's inputs are registers: the pixel read at the edge from the
+/// framebuffer, and the syncs and the enable delayed to meet it.
+// begin{state}
+#[derive(Trace, Default)]
+pub struct Hdmi<
+    const HV: usize,
+    const HFP: usize,
+    const HSW: usize,
+    const HBP: usize,
+    const VV: usize,
+    const VFP: usize,
+    const VSW: usize,
+    const VBP: usize,
+    const SHIFT: usize,
+> {
+    /// The framebuffer.
+    pub fb: Mem<U<12>, FB_WORDS>,
+    /// The column of the raster.
+    pub hc: Reg<U<12>>,
+    /// The row of the raster.
+    pub vc: Reg<U<12>>,
+    /// The pixel under the beam, read at the edge.
+    pub px: Reg<U<12>>,
+    /// The horizontal sync, low while active, a cycle late to meet the
+    /// pixel.
+    pub hs_q: Reg<Bit>,
+    /// The vertical sync, the same way.
+    pub vs_q: Reg<Bit>,
+    /// The data enable, high over the visible part, the same way.
+    pub de_q: Reg<Bit>,
+    /// The column a pixel written goes to.
+    pub cx: Reg<U<8>>,
+    /// The row a pixel written goes to.
+    pub cy: Reg<U<7>>,
+    /// Frames shown.
+    pub frames: Reg<U<16>>,
+}
+// end{state}
+
+// begin{run}
+#[lower]
+impl<
+        const HV: usize,
+        const HFP: usize,
+        const HSW: usize,
+        const HBP: usize,
+        const VV: usize,
+        const VFP: usize,
+        const VSW: usize,
+        const VBP: usize,
+        const SHIFT: usize,
+    > Unit for Hdmi<HV, HFP, HSW, HBP, VV, VFP, VSW, VBP, SHIFT>
+{
+    async fn run(
+        &mut self,
+        bus: LitePort<32, 32, 4>,
+        VideoOut {
+            rgb,
+            hsync,
+            vsync,
+            de,
+        }: VideoOut,
+    ) {
+        loop {
+            DefaultClock::rising().await;
+            // The raster.
+            let hc = self.hc.get();
+            let vc = self.vc.get();
+            let h_last = axis_end::<HV, HFP, HSW, HBP>(hc);
+            let v_last = axis_end::<VV, VFP, VSW, VBP>(vc);
+            let shown = visible::<HV>(hc) & visible::<VV>(vc);
+            let hs_on = in_sync::<HV, HFP, HSW>(hc);
+            let vs_on = in_sync::<VV, VFP, VSW>(vc);
+            // The framebuffer's pixel under the beam.
+            let fx = (hc >> SHIFT).slice::<0, 8>();
+            let fy = (vc >> SHIFT).slice::<0, 7>();
+            let beam = fy.concat::<_, 15>(fx);
+            // The pixel read at the last edge, for the chip, its three
+            // colours each a wire of its own.
+            let shade = self.px.get();
+            let red = shade.slice::<8, 4>();
+            let green = shade.slice::<4, 4>();
+            let blue = shade.slice::<0, 4>();
+            // The bus.
+            let arh = bus.ar.head();
+            let awh = bus.aw.head();
+            let wh = bus.w.head();
+            let rsel = arh.addr.slice::<2, 2>();
+            let wsel = awh.addr.slice::<2, 2>();
+            let rgo = bus.r.ready() & bus.ar.peek().is_some();
+            let _ = bus.ar.recv_if(bus.r.ready());
+            let wgo = bus.b.ready()
+                & bus.aw.peek().is_some()
+                & bus.w.peek().is_some();
+            let _ = bus.aw.recv_if(wgo);
+            let _ = bus.w.recv_if(wgo);
+            let written = wh.data;
+            let cx = self.cx.get();
+            let cy = self.cy.get();
+            let cursor = cy.concat::<_, 15>(cx);
+            let put = regs_we(wgo, wsel).bit(2);
+            let place = regs_we(wgo, wsel).bit(1);
+            let row_done = last_col::<HV, SHIFT>(cx);
+            let rows_done = last_row::<VV, SHIFT>(cy);
+            let blank = Bit::from(!visible::<VV>(vc));
+            let status = regs_status_pack(blank, self.frames.get());
+            let where_at = regs_cursor_pack(cx, cy);
+            let word = regs_read(rsel, status, where_at, U::<32>::from(0u8));
+            with!(self <= {
+                hc: mux(h_last, U::<12>::from(0u8), hc + 1),
+                h_last ? vc: mux(v_last, U::<12>::from(0u8), vc + 1),
+                h_last & v_last ? frames: self.frames.get() + 1,
+                px: self.fb.read(beam),
+                hs_q: Bit::from(!hs_on),
+                vs_q: Bit::from(!vs_on),
+                de_q: Bit::from(shown),
+                put ? fb.at(cursor): regs_pixel_colour(written),
+                put ? {
+                    cx: mux(row_done, U::<8>::from(0u8), cx + 1),
+                    cy: mux(
+                        row_done,
+                        mux(rows_done, U::<7>::from(0u8), cy + 1),
+                        cy,
+                    ),
+                },
+                place ? {
+                    cx: regs_cursor_col(written),
+                    cy: regs_cursor_row(written),
+                },
+            });
+            if rgo.to_bool() {
+                bus.r.send(LiteR {
+                    data: word,
+                    resp: Resp::Okay,
+                });
+            }
+            if wgo.to_bool() {
+                bus.b.send(LiteB { resp: Resp::Okay });
+            }
+            rgb.set(
+                wide(red)
+                    .concat::<8, 16>(wide(green))
+                    .concat::<8, 24>(wide(blue)),
+            );
+            hsync.set(self.hs_q.get());
+            vsync.set(self.vs_q.get());
+            de.set(self.de_q.get());
+        }
+    }
+}
+// end{run}
+
+// begin{raster}
+/// The raster of [`Hdmi`], counted again for a unit beside it that
+/// must know where the beam is: a scanout's line pair (issue 151).
+///
+/// It is [`Hdmi`]'s two counters, from the same functions with the
+/// same parameters, so the two count alike from reset and never part.
+/// They are counted again rather than read out of [`Hdmi`] because a
+/// wire between two units is read after it is driven only if the
+/// reader runs second, and the reader here also drives what
+/// [`Hdmi`]'s neighbours read; a register of its own breaks the loop.
+/// `ex_scanvideo` checks that the two agree on every cycle of a frame
+/// and across a reset.
+///
+/// Every output is a register or a function of registers, so it is
+/// this step's whatever reads it. `col` is the column's low `AW` bits,
+/// `vis` the visible part, `line` the first column of every row,
+/// `row` the row, and `frame` the first column of the first row after
+/// the visible ones, where a new frame's base is taken.
+#[derive(Trace, Default)]
+pub struct Raster<
+    const HV: usize,
+    const HFP: usize,
+    const HSW: usize,
+    const HBP: usize,
+    const VV: usize,
+    const VFP: usize,
+    const VSW: usize,
+    const VBP: usize,
+    const AW: usize,
+> {
+    /// The column, as [`Hdmi`]'s `hc`.
+    pub hc: Reg<U<12>>,
+    /// The row, as [`Hdmi`]'s `vc`.
+    pub vc: Reg<U<12>>,
+}
+
+#[lower]
+impl<
+        const HV: usize,
+        const HFP: usize,
+        const HSW: usize,
+        const HBP: usize,
+        const VV: usize,
+        const VFP: usize,
+        const VSW: usize,
+        const VBP: usize,
+        const AW: usize,
+    > Unit for Raster<HV, HFP, HSW, HBP, VV, VFP, VSW, VBP, AW>
+{
+    async fn run(
+        &mut self,
+        _i: (),
+        (col, vis, line, row, frame): (
+            Out<U<AW>>,
+            Out<Bit>,
+            Out<Bit>,
+            Out<U<12>>,
+            Out<Bit>,
+        ),
+    ) {
+        loop {
+            DefaultClock::rising().await;
+            let hc = self.hc.get();
+            let vc = self.vc.get();
+            let h_last = axis_end::<HV, HFP, HSW, HBP>(hc);
+            let v_last = axis_end::<VV, VFP, VSW, VBP>(vc);
+            let first = hc == U::<12>::from(0u8);
+            col.set(hc.resize::<AW>());
+            vis.set(Bit::from(visible::<HV>(hc) & visible::<VV>(vc)));
+            line.set(Bit::from(first));
+            row.set(vc);
+            frame.set(Bit::from(first & (vc == U::<12>::from(VV as u32))));
+            with!(self <= {
+                hc: mux(h_last, U::<12>::from(0u8), hc + 1),
+                h_last ? vc: mux(v_last, U::<12>::from(0u8), vc + 1),
+            });
+        }
+    }
+}
+// end{raster}
+
+// begin{table}
+/// The SiI9134's configuration, one register write per entry: the
+/// chip's I2C address as eight bits, write bit included, the register,
+/// and the value. No document this part was written from states the
+/// chip's registers, so the values are to be confirmed against the
+/// chip's documentation or the board vendor's example before the board
+/// is expected to show a picture.
+pub const SII9134_WRITES: [(u8, u8, u8); 2] = [
+    // System control: out of power down, with the input bus as the
+    // board wires it.
+    (0x72, 0x08, 0x35),
+    // The output as DVI: no HDMI packets, only the picture.
+    (0x7a, 0x2f, 0x00),
+];
+
+/// The address of entry `e`.
+#[lower]
+fn table_dev(e: U<3>) -> U<8> {
+    select!(e.raw() => {
+        0 => U::<8>::from(0x72u8),
+        _ => U::<8>::from(0x7au8),
+    })
+}
+
+/// The register of entry `e`.
+#[lower]
+fn table_reg(e: U<3>) -> U<8> {
+    select!(e.raw() => {
+        0 => U::<8>::from(0x08u8),
+        _ => U::<8>::from(0x2fu8),
+    })
+}
+
+/// The value of entry `e`.
+#[lower]
+fn table_val(e: U<3>) -> U<8> {
+    select!(e.raw() => {
+        0 => U::<8>::from(0x35u8),
+        _ => U::<8>::from(0x00u8),
+    })
+}
+// end{table}
+
+/// Whether the last cycle of a quarter of an I2C bit has come.
+#[lower]
+fn quarter_end<const DIV: usize>(tick: U<16>) -> bool {
+    tick == DIV - 1
+}
+
+/// The byte `b` of entry `e`: the address, the register, the value.
+#[lower]
+fn table_byte(e: U<3>, b: U<2>) -> U<8> {
+    select!(b.raw() => {
+        0 => table_dev(e),
+        1 => table_reg(e),
+        _ => table_val(e),
+    })
+}
+
+/// The I2C master that configures the chip.
+///
+/// It holds the chip's reset low for `HOLD` cycles, releases it, waits
+/// `HOLD` cycles more, and then writes each entry of the table as one
+/// I2C transaction: a start, the address, the register, the value, and
+/// a stop, with the chip's acknowledge after each byte. A bit is four
+/// quarters of `DIV` cycles each; the clock is low in the first and the
+/// last, and the data changes only while it is low. The lines are open
+/// drain: `scl_low` and `sda_low` high pull a line low, and a line not
+/// pulled is high through the board's pull-up. A byte the chip does not
+/// acknowledge sets `failed`, and `done` rises when the table is
+/// written.
+///
+/// Two processes. The first is the quarter clock, `tick` counting the
+/// cycles of a quarter over and over, and it carries `failed` and
+/// `done` out from their registers. The second is the sequence: the
+/// two holds as counted loops, then each entry's transaction quarter
+/// by quarter, a line set at the start of a quarter and held to its
+/// end, and the acknowledge read at the end of its second quarter.
+/// Its last wait never returns, since `written` stays up.
+// begin{i2cstate}
+#[derive(Trace, Default)]
+pub struct I2cInit<const DIV: usize, const HOLD: usize> {
+    /// Cycles into the quarter.
+    pub tick: Reg<U<16>>,
+    /// The entry being written.
+    pub entry: Reg<U<3>>,
+    /// The byte of the entry being sent.
+    pub byte: Reg<U<2>>,
+    /// The byte going out, its next bit on top.
+    pub shift: Reg<U<8>>,
+    /// A byte was not acknowledged.
+    pub nak: Reg<Bit>,
+    /// The table is written.
+    pub written: Reg<Bit>,
+}
+// end{i2cstate}
+
+// begin{i2c}
+#[lower]
+impl<const DIV: usize, const HOLD: usize> Unit for I2cInit<DIV, HOLD> {
+    async fn run(
+        &mut self,
+        sda_in: In<Bit>,
+        (nreset, scl_low, sda_low, done, failed): (
+            Out<Bit>,
+            Out<Bit>,
+            Out<Bit>,
+            Out<Bit>,
+            Out<Bit>,
+        ),
+    ) {
+        join2(
+            async {
+                loop {
+                    DefaultClock::rising().await;
+                    let tick = self.tick.get();
+                    with!(self <= {
+                        tick: mux(
+                            quarter_end::<DIV>(tick),
+                            U::<16>::from(0u8),
+                            tick + 1,
+                        ),
+                    });
+                    done.set(self.written.get());
+                    failed.set(self.nak.get());
+                }
+            },
+            async {
+                loop {
+                    // The reset, held low for HOLD cycles, then
+                    // released and given HOLD cycles to settle.
+                    DefaultClock::rising().await;
+                    nreset.set(Bit::Zero);
+                    for _ in 0..HOLD {
+                        DefaultClock::rising().await;
+                    }
+                    nreset.set(Bit::One);
+                    for _ in 0..HOLD {
+                        DefaultClock::rising().await;
+                    }
+                    // Each entry of the table is one transaction.
+                    for _ in 0..2 {
+                        // The start: the data line falls while the
+                        // clock is high, then the clock falls.
+                        until(DefaultClock::rising, || {
+                            quarter_end::<DIV>(self.tick.get())
+                        })
+                        .await;
+                        with!(self <= {
+                            byte: U::<2>::from(0u8),
+                            shift: table_byte(
+                                self.entry.get(),
+                                U::<2>::from(0u8),
+                            ),
+                        });
+                        scl_low.set(Bit::Zero);
+                        sda_low.set(Bit::Zero);
+                        until(DefaultClock::rising, || {
+                            quarter_end::<DIV>(self.tick.get())
+                        })
+                        .await;
+                        sda_low.set(Bit::One);
+                        until(DefaultClock::rising, || {
+                            quarter_end::<DIV>(self.tick.get())
+                        })
+                        .await;
+                        scl_low.set(Bit::One);
+                        until(DefaultClock::rising, || {
+                            quarter_end::<DIV>(self.tick.get())
+                        })
+                        .await;
+                        // The address, the register and the value,
+                        // each followed by the chip's acknowledge.
+                        for _ in 0..3 {
+                            // The eight bits, high bit first: the
+                            // data line set while the clock is low,
+                            // the clock high through the two middle
+                            // quarters.
+                            for _ in 0..8 {
+                                until(DefaultClock::rising, || {
+                                    quarter_end::<DIV>(self.tick.get())
+                                })
+                                .await;
+                                sda_low.set(!self.shift.get().bit(7));
+                                until(DefaultClock::rising, || {
+                                    quarter_end::<DIV>(self.tick.get())
+                                })
+                                .await;
+                                scl_low.set(Bit::Zero);
+                                until(DefaultClock::rising, || {
+                                    quarter_end::<DIV>(self.tick.get())
+                                })
+                                .await;
+                                until(DefaultClock::rising, || {
+                                    quarter_end::<DIV>(self.tick.get())
+                                })
+                                .await;
+                                scl_low.set(Bit::One);
+                                self.shift.set(self.shift.get() << 1);
+                            }
+                            // The acknowledge: the data line released
+                            // and read at the end of the clock's high
+                            // half; a one is a byte not taken.
+                            until(DefaultClock::rising, || {
+                                quarter_end::<DIV>(self.tick.get())
+                            })
+                            .await;
+                            sda_low.set(Bit::Zero);
+                            until(DefaultClock::rising, || {
+                                quarter_end::<DIV>(self.tick.get())
+                            })
+                            .await;
+                            scl_low.set(Bit::Zero);
+                            until(DefaultClock::rising, || {
+                                quarter_end::<DIV>(self.tick.get())
+                            })
+                            .await;
+                            until(DefaultClock::rising, || {
+                                quarter_end::<DIV>(self.tick.get())
+                            })
+                            .await;
+                            scl_low.set(Bit::One);
+                            with!(self <= {
+                                nak: self.nak.get() | sda_in.get(),
+                                byte: self.byte.get() + 1,
+                                shift: table_byte(
+                                    self.entry.get(),
+                                    self.byte.get() + 1,
+                                ),
+                            });
+                        }
+                        // The stop: the clock rises while the data
+                        // line is low, then the data line rises.
+                        until(DefaultClock::rising, || {
+                            quarter_end::<DIV>(self.tick.get())
+                        })
+                        .await;
+                        sda_low.set(Bit::One);
+                        until(DefaultClock::rising, || {
+                            quarter_end::<DIV>(self.tick.get())
+                        })
+                        .await;
+                        scl_low.set(Bit::Zero);
+                        until(DefaultClock::rising, || {
+                            quarter_end::<DIV>(self.tick.get())
+                        })
+                        .await;
+                        sda_low.set(Bit::Zero);
+                        until(DefaultClock::rising, || {
+                            quarter_end::<DIV>(self.tick.get())
+                        })
+                        .await;
+                        self.entry.set(self.entry.get() + 1);
+                    }
+                    self.written.set(Bit::One);
+                    // The table is written; nothing follows.
+                    until(DefaultClock::rising, || {
+                        !self.written.get().to_bool()
+                    })
+                    .await;
+                }
+            },
+        )
+        .await;
+    }
+}
+// end{i2c}
+
+/// An I2C device that acknowledges every byte and records what it was
+/// sent, for the tests and the example: it watches the two lines as the
+/// board resolves them and pulls the data line low for each
+/// acknowledge.
+#[derive(Default)]
+pub struct I2cDevice {
+    scl: bool,
+    sda: bool,
+    in_transaction: bool,
+    bits: u32,
+    byte: u8,
+    bytes: Vec<u8>,
+    acking: bool,
+    /// Each transaction's bytes, in the order they came.
+    pub transactions: Vec<Vec<u8>>,
+}
+
+impl I2cDevice {
+    /// A device on idle lines.
+    pub fn new() -> Self {
+        I2cDevice {
+            scl: true,
+            sda: true,
+            ..Default::default()
+        }
+    }
+
+    /// Whether the device pulls the data line low now.
+    pub fn pulls_sda(&self) -> bool {
+        self.acking
+    }
+
+    /// One cycle of the lines: `scl_low` and `sda_low` are the master's
+    /// pulls, and the data line is also low while the device pulls it.
+    pub fn step(&mut self, scl_low: bool, sda_low: bool) {
+        let scl = !scl_low;
+        let sda = !sda_low && !self.acking;
+        if self.scl && scl {
+            if self.sda && !sda {
+                // A start.
+                self.in_transaction = true;
+                self.bits = 0;
+                self.bytes.clear();
+            } else if !self.sda && sda && self.in_transaction {
+                // A stop.
+                self.in_transaction = false;
+                self.transactions.push(std::mem::take(&mut self.bytes));
+            }
+        }
+        if self.in_transaction && !self.scl && scl {
+            // A rising clock: a data bit, or the acknowledge's clock.
+            if self.bits < 8 {
+                self.byte = (self.byte << 1) | sda as u8;
+            }
+            self.bits += 1;
+        }
+        if self.in_transaction && self.scl && !scl {
+            // A falling clock: after the eighth bit the device pulls the
+            // line for the acknowledge, and after the ninth lets it go.
+            if self.bits == 8 {
+                self.acking = true;
+                self.bytes.push(self.byte);
+            } else if self.bits == 9 {
+                self.acking = false;
+                self.bits = 0;
+            }
+        }
+        self.scl = scl;
+        self.sda = sda;
+    }
+}
+
+/// The peripheral and the master against models: the raster's syncs
+/// and enable where the mode puts them, the pixels written where the
+/// beam shows them, and the chip's table on the I2C lines as a device
+/// decodes it.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use txhdl::comp::{join2, signal, Running};
+
+    /// A tiny mode: 8 by 6 visible, 2 of front porch, 3 of sync and 3
+    /// of back porch across, 1, 2 and 2 down; each framebuffer pixel is
+    /// 2 by 2 on the screen, so the framebuffer is 4 by 3.
+    type Tiny = Hdmi<8, 2, 3, 3, 6, 1, 2, 2, 1>;
+
+    #[test]
+    fn the_raster_is_where_the_mode_puts_it() {
+        let lite = crate::bus::axi_lite::axi_lite::<32, 32, 4>();
+        let bus: LitePort<32, 32, 4> = lite.per.into();
+        let (rgb_out, _rgb) = signal::<U<24>, DefaultClock>();
+        let (hs_out, hs) = signal::<Bit, DefaultClock>();
+        let (vs_out, vs) = signal::<Bit, DefaultClock>();
+        let (de_out, de) = signal::<Bit, DefaultClock>();
+        let mut unit = Tiny::default();
+        let mut sim = Running::new(unit.run(
+            bus,
+            VideoOut {
+                rgb: rgb_out,
+                hsync: hs_out,
+                vsync: vs_out,
+                de: de_out,
+            },
+        ));
+        let (width, height) = (16usize, 11usize);
+        let mut seen: Vec<(bool, bool, bool)> = Vec::new();
+        for _ in 0..(2 * width * height) {
+            sim.cycle();
+            seen.push((
+                hs.get().to_bool(),
+                vs.get().to_bool(),
+                de.get().to_bool(),
+            ));
+        }
+        // The outputs trail the counters by a fixed number of cycles.
+        // One lag must fit the enable and both syncs at once, which is
+        // what keeps the three aligned for the chip.
+        let fits = |lag: usize| {
+            seen.iter().enumerate().skip(lag).all(|(t, &(h, v, d))| {
+                let n = t - lag;
+                let (x, y) = (n % width, (n / width) % height);
+                d == (x < 8 && y < 6)
+                    && h != (10..13).contains(&x)
+                    && v != (7..9).contains(&y)
+            })
+        };
+        let lags: Vec<usize> = (0..4).filter(|&l| fits(l)).collect();
+        assert_eq!(lags.len(), 1, "one lag fits all three: {lags:?}");
+    }
+
+    #[test]
+    fn the_chip_is_configured_over_i2c() {
+        let (sda_out, sda_in) = signal::<Bit, DefaultClock>();
+        let (rst_out, rst) = signal::<Bit, DefaultClock>();
+        let (scl_out, scl) = signal::<Bit, DefaultClock>();
+        let (sdal_out, sdal) = signal::<Bit, DefaultClock>();
+        let (done_out, done) = signal::<Bit, DefaultClock>();
+        let (fail_out, fail) = signal::<Bit, DefaultClock>();
+        let mut master = I2cInit::<3, 5>::default();
+        let mut sim = Running::new(join2(
+            master
+                .run(sda_in, (rst_out, scl_out, sdal_out, done_out, fail_out)),
+            async {},
+        ));
+        let mut dev = I2cDevice::new();
+        let mut released_at = None;
+        for t in 0..2000 {
+            sim.cycle();
+            if released_at.is_none() && rst.get().to_bool() {
+                released_at = Some(t);
+            }
+            dev.step(scl.get().to_bool(), sdal.get().to_bool());
+            let line = !sdal.get().to_bool() && !dev.pulls_sda();
+            sda_out.set(Bit::from_bool(line));
+            if done.get().to_bool() {
+                break;
+            }
+        }
+        assert!(done.get().to_bool(), "the table was written");
+        assert!(!fail.get().to_bool(), "every byte acknowledged");
+        // Low for cycles 0 to 4, so high from cycle 5: HOLD cycles.
+        assert_eq!(released_at, Some(5), "the reset held for HOLD cycles");
+        let want: Vec<Vec<u8>> = SII9134_WRITES
+            .iter()
+            .map(|&(d, r, v)| vec![d, r, v])
+            .collect();
+        assert_eq!(dev.transactions, want);
+    }
+}

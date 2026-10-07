@@ -1,0 +1,550 @@
+# SPDX-License-Identifier: Apache-2.0
+module(
+    name = "txhdl",
+    version = "0.0.0",
+)
+
+# LaTeX, from the custom registry named in .bazelrc. The module registers a
+# `system` toolchain that shells out to the host's pdflatex; the hermetic
+# toolchain declared below is registered by this root module and therefore
+# wins, so the build needs nothing installed on the machine.
+bazel_dep(name = "rules_latex_host", version = "0.3.0")
+
+hermetic_latex = use_extension(
+    "@rules_latex_host//latex:extensions.bzl",
+    "hermetic_latex",
+)
+
+# The pinned TinyTeX distribution carries neither IEEEtran nor the drawing
+# packages, and the obvious fix does not work here. `texlive_archives` pins a
+# package archive by sha256, but texlive.info answers Bazel with a different
+# byte stream on every request (the hash changed on each of two consecutive
+# fetches, while curl returned identical bytes each time), so no pin can
+# match. IEEEtran.cls and IEEEtrantools.sty are therefore vendored next to
+# the document and passed through `data`, which the ruleset documents as the
+# way to supply a class or style file. That removes the fetch entirely.
+hermetic_latex.toolchain()
+use_repo(hermetic_latex, "hermetic_latex", "hermetic_latex_ghostscript")
+
+register_toolchains("@hermetic_latex//:all")
+
+# Rust, so that claims about what the language can express are compiled
+# rather than argued. docs/rust-embedding.md section 8 lists what is being
+# checked. The toolchain is fetched by the ruleset, so nothing is installed
+# on the machine.
+# The constraint values a platform is written in: the CPU Vreteno is,
+# and the absence of an operating system.
+bazel_dep(name = "platforms", version = "1.1.0")
+
+bazel_dep(name = "rules_rust", version = "0.74.0")
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2021",
+    # The bare-metal RISC-V target Vreteno is: thirty-two bit, the
+    # multiply extension, compressed instructions, no operating
+    # system. Naming it here makes the build fetch that target's
+    # standard library by checksum, as it fetches the host's, so
+    # nothing has to be installed to compile for the core.
+    extra_target_triples = ["riscv32imc-unknown-none-elf"],
+    versions = [
+        # Stable and nightly both, because the open question is which of
+        # the two the numeric library needs.
+        "1.90.0",
+        "nightly/2026-08-01",
+    ],
+)
+use_repo(rust, "rust_toolchains")
+
+register_toolchains("@rust_toolchains//:all")
+
+# A C and C++ compiler for Vreteno itself, fetched by checksum: the
+# xPack build of the GNU toolchain for bare-metal RISC-V. It is here
+# rather than a Clang because of what comes with it. Its `rv32imc/ilp32`
+# multilib, RV32IMC with the soft-float ABI, is this core less the
+# atomic instructions, so its code runs on the core as it is, and
+# it carries newlib and a
+# real `libstdc++.a` built for it, so "with a standard library" is
+# something the toolchain already has rather than something the build
+# would have to compile.
+http_archive = use_repo_rule(
+    "@bazel_tools//tools/build_defs/repo:http.bzl",
+    "http_archive",
+)
+
+http_archive(
+    name = "riscv_none_elf_gcc",
+    build_file = "//third_party/riscv_gcc:BUILD.toolchain",
+    sha256 = "f574415b63f12b09bdd3475223ab492a465d23810646c90c13a4c3b676c83503",
+    strip_prefix = "xpack-riscv-none-elf-gcc-14.2.0-3",
+    urls = [
+        "https://github.com/xpack-dev-tools/riscv-none-elf-gcc-xpack/releases/download/v14.2.0-3/xpack-riscv-none-elf-gcc-14.2.0-3-linux-x64.tar.gz",
+    ],
+)
+
+# Prebuilt tools, fetched by checksum for every platform they ship for.
+# vcdcvt and sqlite2drawtiming turn a VCD into a signals database and
+# the database into drawtiming text; //tools/dt2tikz draws that text.
+bazel_dep(name = "rules_multitool", version = "1.11.1")
+
+# 1.11.1 reports every module's multitool hub as a direct dependency
+# of the root, so rules_bid's hub, reached through rules_vivado, made
+# every build warn (issue 534). Upstream fixed it in v1.12.0, which the
+# registry does not have yet; the patch is that fix alone. Drop this
+# when the registry has 1.12.0.
+single_version_override(
+    module_name = "rules_multitool",
+    patch_strip = 1,
+    patches = ["//third_party:rules_multitool_root_hubs.patch"],
+    version = "1.11.1",
+)
+
+multitool = use_extension("@rules_multitool//multitool:extension.bzl", "multitool")
+multitool.hub(lockfile = "//:multitool.lock.json")
+use_repo(multitool, "multitool")
+
+# Four external crates. The first is an FST writer, so a waveform is a
+# compressed binary the tools read as they read VCD. Pinned by a lockfile;
+# `CARGO_BAZEL_REPIN=1 bazel sync --only=crates` regenerates it.
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.spec(
+    package = "fst-writer",
+    version = "0.3.1",
+)
+# The second is the reference reader, for checking what the writer
+# wrote.
+crate.spec(
+    package = "wellen",
+    version = "0.25.6",
+)
+# The third is a DEFLATE encoder in Rust, already pinned under the first
+# two, which //tools/gzip wraps as gzip so that the boot image's
+# initramfs is compressed without Python (issue 1201).
+crate.spec(
+    package = "miniz_oxide",
+    version = "0.8.9",
+)
+# The fourth is smoltcp, a TCP/IP stack in Rust, for the machine
+# model's station on the Ethernet cable: a fastboot client sends the
+# fastboot server a download over it, so a download is timed off the
+# board (issue 1390). The stack is somebody else's, maintained, rather
+# than a TCP written here.
+crate.spec(
+    default_features = False,
+    features = [
+        "alloc",
+        "medium-ethernet",
+        "proto-ipv4",
+        "socket-tcp",
+    ],
+    package = "smoltcp",
+    version = "0.12.0",
+)
+crate.from_specs(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+    lockfile = "//:cargo-bazel-lock.json",
+)
+use_repo(crate, "crates")
+
+# VHDL simulation, hermetic (nvc is built from source through the
+# registry): the lowered designs are simulated against the traces the Rust
+# simulation wrote.
+bazel_dep(name = "rules_nvc", version = "4.5.2")
+
+# Verilog simulation, hermetic (Verilator comes down as a binary, below,
+# and is not built here): the same lowered designs, as Verilog, are simulated against
+# the same traces, so both emitters are checked.
+bazel_dep(name = "rules_verilator", version = "1.1.2")
+bazel_dep(name = "rules_verilog", version = "1.4.3")
+bazel_dep(name = "rules_cc", version = "0.2.22")
+
+# The C and C++ toolchain, fetched rather than taken from the host (issue
+# 782): a pinned LLVM release, and a pinned Debian bullseye sysroot for
+# the headers and libraries a program links against, so that neither the
+# compiler nor libc nor the C++ library is whatever the machine has.
+# Everything that compiles or links C or C++ goes through it: every Rust
+# binary, since rules_rust links through the C++ toolchain, the Verilator
+# examples, nvc and the tools rules_foreign_cc builds. It is registered
+# here, in the module, so that it also reaches a workspace that depends
+# on this one, as the blinky of `//docs:zero` does. The sysroot is
+# Debian bullseye's, unpacked from packages pinned by checksum.
+# `third_party/llvm/extension.bzl` makes both, and says why there.
+bazel_dep(name = "toolchains_llvm", version = "1.10.0")
+
+# The toolchain's generated build files load from it, and a repository
+# this module's extension makes sees only this module's dependencies.
+bazel_dep(name = "bazel_skylib", version = "1.9.2")
+
+# `write_source_files`, which keeps the committed generated files, the
+# register headers, equal to what their generators write, with one
+# command to write them all again (issue 1179). bazel_lib, which
+# replaces the module aspect_bazel_lib.
+bazel_dep(name = "bazel_lib", version = "3.7.2")
+
+cc_toolchain = use_extension("//third_party/llvm:extension.bzl", "cc_toolchain")
+use_repo(cc_toolchain, "llvm_toolchain", "llvm_toolchain_llvm", "sysroot_bullseye")
+
+# Only the Linux one. The repository also declares toolchains for bare
+# metal RISC-V, and those would be picked for the core's own platform,
+# whose programs rustc links with its own lld and none of clang's flags.
+register_toolchains("@llvm_toolchain//:cc-toolchain-x86_64-linux")
+
+# Verilator comes down as a binary rather than being compiled here.
+# Building it from source is about six minutes on a machine that has
+# not done it before, and it is the same binary everywhere, so it is
+# built once by `filmil/bazel_toolchains_verilator` and downloaded by
+# everybody. The rules are still `rules_verilator`'s; only where the
+# binary comes from changes.
+bazel_dep(name = "bazel_toolchains_verilator", version = "0.1.0")
+
+verilator_binary = use_extension(
+    "@bazel_toolchains_verilator//verilator:extension.bzl",
+    "verilator_binary",
+)
+use_repo(verilator_binary, "verilator_prebuilt")
+
+register_toolchains("@verilator_prebuilt//:toolchain")
+
+# Synthesis, hermetic: rules_vivado installs Vivado itself, from the AMD
+# installer archive named here, into a shared install cache, and every
+# workspace on the machine reuses that one installation. AMD's download
+# needs a login, so the archive is served from a local path; `.bazelrc`
+# selects the mode. A cold install moves the archive three times and
+# needs about 300 GB free at its peak, see the ruleset's
+# docs/vivado-toolchain.md; a warm cache is found in seconds. The cache
+# key is the URL and the selection with no `sha256`, exactly as the
+# other workspaces on this machine state them, so that the key matches
+# theirs and the installation is shared rather than redone.
+bazel_dep(name = "rules_vivado", version = "3.16.1")
+# Shell binaries: the remote programmer and the serial watcher.
+bazel_dep(name = "rules_shell", version = "0.8.0")
+
+# Go, for the serial watcher that runs on the board's machine: one
+# static binary, uploaded, with the standard library alone.
+bazel_dep(name = "rules_go", version = "0.61.1")
+
+go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
+go_sdk.download(version = "1.25.1")
+
+vivado = use_extension("@rules_vivado//:extensions.bzl", "vivado")
+vivado.install(
+    install_cache = "/data/cache/vivado-install",
+    urls = ["file:///data/tools/archives/FPGAs_AdaptiveSoCs_Unified_SDI_2025.2_1114_2157_1.tar"],
+    modules = ["Artix-7"],
+)
+
+# The ASIC flow, hermetic in the same sense as the rest: nothing is
+# installed, everything is fetched by checksum. Yosys maps the core's
+# Verilog onto a standard cell library and OpenROAD floorplans, places,
+# routes and times it. Both are published as Debian packages, and a
+# Debian package names the shared libraries it needs without carrying
+# them, so //tools/debclosure writes the closure of each as a lock file
+# in //third_party and the rule below unpacks exactly those bytes.
+# Bazel's own decompressors open both the `ar` archive a `.deb` is and
+# the `tar.xz` inside it, so neither `dpkg` nor a container is used.
+deb_tree = use_repo_rule("//third_party/debs:repo.bzl", "deb_tree")
+
+file_tree = use_repo_rule("//third_party/debs:repo.bzl", "file_tree")
+
+deb_tree(
+    name = "yosys_tree",
+    locks = ["//third_party/yosys:trixie.lock.tsv"],
+)
+
+deb_tree(
+    name = "openroad_tree",
+    locks = [
+        "//third_party/openroad:openroad.lock.tsv",
+        "//third_party/openroad:bullseye.lock.tsv",
+    ],
+)
+
+# OpenOCD 0.12.0, which speaks JTAG to a debug target, for the RISC-V
+# debug transport of #154 (issue 853). Its closure carries the C
+# library, since the package is built against a newer one than the
+# machine's, and //third_party/openocd runs it through the tree's loader.
+deb_tree(
+    name = "openocd_tree",
+    locks = ["//third_party/openocd:trixie.lock.tsv"],
+)
+
+# gdb-multiarch, Debian's gdb for every architecture it builds, RISC-V
+# among them, which loads a program through OpenOCD's gdb server and
+# stops it at a breakpoint (issue 872). Like OpenOCD's, its closure
+# carries the C library, and //third_party/gdb runs it through the
+# tree's loader.
+deb_tree(
+    name = "gdb_tree",
+    locks = ["//third_party/gdb:trixie.lock.tsv"],
+)
+
+# Poppler's `pdftotext`, which reads a rendered page back with the
+# position of every word, for the check that no document runs off its
+# page (issue 457).
+deb_tree(
+    name = "poppler_tree",
+    locks = ["//third_party/poppler:trixie.lock.tsv"],
+)
+
+# The SMT solver SymbiYosys's bounded search and cover runs use
+# (issue 581). The unbounded proof runs inside yosys-abc and needs no
+# solver.
+deb_tree(
+    name = "z3_tree",
+    locks = ["//third_party/z3:trixie.lock.tsv"],
+)
+
+# SymbiYosys, the front end that drives Yosys through a formal proof
+# (issue 581). Pure Python, packaged by no Debian suite, so fetched from
+# its release tag; v0.52 matches the Yosys 0.52 of //third_party/yosys.
+# ISC. //third_party/sby installs it.
+http_archive(
+    name = "sby",
+    build_file_content = """
+exports_files(glob(["sbysrc/*.py"]))
+""",
+    sha256 = "8c14bcd6130a8db94764abc650046bf9986a4a5bbea662a03481ba546b6df5e0",
+    strip_prefix = "sby-0.52",
+    urls = ["https://github.com/YosysHQ/sby/archive/refs/tags/v0.52.tar.gz"],
+)
+
+# The solver OpenROAD's global placer uses. The package links against
+# it and does not carry it: its runpath names `/opt/or-tools`, which is
+# where the project's own build puts this archive.
+http_archive(
+    name = "or_tools",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+filegroup(name = "all", srcs = glob(["lib/**"]))
+""",
+    sha256 = "a8354696f365aa13a2375da5f8f6cfd8785430681addcd887bfd194851dd4710",
+    strip_prefix = "or-tools_x86_64_Debian-11_cpp_v9.11.4210",
+    urls = [
+        "https://github.com/google/or-tools/releases/download/v9.11/or-tools_amd64_debian-11_cpp_v9.11.4210.tar.gz",
+    ],
+)
+
+# The technology: the open 45 nm library the OpenROAD project uses for
+# its own examples, taken file by file from the flow scripts at one
+# revision.
+file_tree(
+    name = "nangate45",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+filegroup(name = "all", srcs = glob(["tree/**"]))
+""",
+    locks = ["//third_party/nangate45:nangate45.lock.tsv"],
+)
+
+# Zephyr, and what its build needs, so that the port under `//zephyr`
+# is compiled by this build rather than by a reader following a README
+# (issue 390).
+#
+# Nothing here is used by any other target. The cost is a cold build's
+# fetches, about ninety megabytes of Zephyr and rather less of the
+# rest; the gain is that a device tree which does not parse, a Kconfig
+# symbol that does not exist, or a driver that does not compile fails
+# `bazel test //...` instead of waiting for somebody to try it. That
+# port shipped four faults of exactly those kinds, every one of them
+# leaving a green build, before it ever printed on a board.
+#
+# Python is here because Zephyr's build generates its headers with
+# Python and there is no way to have the one without the other. It is
+# a vendored toolchain rather than a language this repository writes
+# in: nothing under `//tools` becomes Python because of this.
+bazel_dep(name = "rules_python", version = "2.3.4")
+bazel_dep(name = "rules_foreign_cc", version = "0.16.0")
+bazel_dep(name = "rules_dtc", version = "0.0.5")
+bazel_dep(name = "dtc", version = "1.7.2.bcr.1")
+
+# `flex` is pinned rather than resolved. The default resolution takes
+# `2.6.4.bcr.2`, on which building `dtc` fails with `config.h:208:
+# expected expression before '/'` and a `strrchr` called with too few
+# arguments.
+bazel_dep(name = "flex", version = "2.6.4.bcr.6")
+bazel_dep(name = "ninja", version = "1.13.2")
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(is_default = True, python_version = "3.12")
+use_repo(python, "python_3_12_host")
+
+# The devicetree tooling Zephyr's build imports. The closure is listed
+# and not just the four packages that are named in Zephyr's own
+# documentation: `rules_python` installs what it is given and nothing
+# else, so a missing transitive dependency is a `No module named` at
+# the end of a configure rather than at the start of one.
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "zephyr_py",
+    python_version = "3.12",
+    requirements_lock = "//third_party/zephyr:requirements.txt",
+)
+use_repo(pip, "zephyr_py")
+
+# SymbiYosys imports `click` and nothing else beyond the standard
+# library; the lock beside its BUILD file pins it by hash (issue 581).
+pip.parse(
+    hub_name = "formal_py",
+    python_version = "3.12",
+    requirements_lock = "//third_party/sby:requirements.txt",
+)
+use_repo(pip, "formal_py")
+
+# CMake, prebuilt and by checksum, as the RISC-V compiler above is.
+# Zephyr drives its build with CMake, so what is wanted is the binary
+# rather than a library rule.
+http_archive(
+    name = "cmake_host",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+filegroup(name = "cmake", srcs = ["bin/cmake"])
+filegroup(name = "all", srcs = glob(["**"]))
+""",
+    sha256 = "5a1133ff103c71eb5120e2cc3de922733e7d8a26a98ae716397e8676adb367bf",
+    strip_prefix = "cmake-3.31.6-linux-x86_64",
+    urls = [
+        "https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.tar.gz",
+    ],
+)
+
+# Zephyr itself, at the release the port was written against. The
+# module under `//zephyr` is pointed at this tree rather than vendored
+# into it, which is the same arrangement a reader gets with `west`.
+http_archive(
+    name = "zephyr",
+    build_file = "//third_party/zephyr:zephyr.BUILD.bazel",
+    sha256 = "b98623e68d9eb220331ad7447ceae465673a3538704d94add30ac3b66721f992",
+    strip_prefix = "zephyr-4.1.0",
+    urls = [
+        "https://github.com/zephyrproject-rtos/zephyr/archive/refs/tags/v4.1.0.tar.gz",
+    ],
+)
+
+# Khronos's headers for OpenGL ES 1.1 and EGL, which the GL library's C
+# entry points and EGL's are declared by (issues 1224 and 996):
+# GLES/gl.h and GLES/glplatform.h from OpenGL-Registry, and EGL/egl.h,
+# EGL/eglplatform.h and KHR/khrplatform.h from EGL-Registry, each at
+# a pinned commit and checked by its sha256. GLES and KHR are MIT and
+# EGL is Apache 2.0, and they are the interface every GL ES program
+# already includes, so they are
+# fetched as Khronos publishes them rather than copied into the tree.
+http_file = use_repo_rule(
+    "@bazel_tools//tools/build_defs/repo:http.bzl",
+    "http_file",
+)
+
+http_file(
+    name = "khronos_gles_gl_h",
+    downloaded_file_path = "gl.h",
+    sha256 = "6dea5ae69d619c8181a2c5aa5f55f69fd19427fd6efb78a9a5c7453491bc0598",
+    urls = ["https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/1cdd228e34966dd6b95bd203e9f84faba0f371a1/api/GLES/gl.h"],
+)
+
+http_file(
+    name = "khronos_gles_glplatform_h",
+    downloaded_file_path = "glplatform.h",
+    sha256 = "c6bcc0caaf56609c494efb327e8e9e2845630f6b58641ddde71eacd2c2790d21",
+    urls = ["https://raw.githubusercontent.com/KhronosGroup/OpenGL-Registry/1cdd228e34966dd6b95bd203e9f84faba0f371a1/api/GLES/glplatform.h"],
+)
+
+http_file(
+    name = "khronos_egl_h",
+    downloaded_file_path = "egl.h",
+    sha256 = "a7c24c828bf2e1a4dfe6511b4f4812b948a285eb54787074015896976d4da076",
+    urls = ["https://raw.githubusercontent.com/KhronosGroup/EGL-Registry/db3425b8246136faccb5e2782b5694960bd6edf1/api/EGL/egl.h"],
+)
+
+http_file(
+    name = "khronos_eglplatform_h",
+    downloaded_file_path = "eglplatform.h",
+    sha256 = "25b5391655effcf363a38fa00c3154f356a3eab3d35dc067847875513cf1e441",
+    urls = ["https://raw.githubusercontent.com/KhronosGroup/EGL-Registry/db3425b8246136faccb5e2782b5694960bd6edf1/api/EGL/eglplatform.h"],
+)
+
+http_file(
+    name = "khronos_khrplatform_h",
+    downloaded_file_path = "khrplatform.h",
+    sha256 = "7b1e01aaa7ad8f6fc34b5c7bdf79ebf5189bb09e2c4d2e79fc5d350623d11e83",
+    urls = ["https://raw.githubusercontent.com/KhronosGroup/EGL-Registry/db3425b8246136faccb5e2782b5694960bd6edf1/api/KHR/khrplatform.h"],
+)
+
+# Zephyr's Mbed TLS module, at the revision v4.1.0's west.yml pins, for
+# the SHA-256 the entropy driver conditions with (issue 780). Zephyr's
+# own tree holds the module's CMake and Kconfig; this is the library.
+http_archive(
+    name = "zephyr_mbedtls",
+    build_file = "//third_party/zephyr:mbedtls.BUILD.bazel",
+    sha256 = "f7ddd3e8e1367cd4ab55b7879211e84fee72e882e531c341cd9db3890fb3d1d3",
+    strip_prefix = "mbedtls-4952e1328529ee549d412b498ea71c54f30aa3b1",
+    urls = [
+        "https://github.com/zephyrproject-rtos/mbedtls/archive/4952e1328529ee549d412b498ea71c54f30aa3b1.tar.gz",
+    ],
+)
+
+# Linux on Vreteno (issue 279): the mainline kernel and OpenSBI, pinned
+# by checksum, and the four programs Kbuild runs that the tree does not
+# otherwise have, `make`, `flex`, `bison` and `bc`, as Debian packages
+# the way Yosys is (issue 1008). The kernel and OpenSBI are built with
+# the hermetic LLVM above, `LLVM=1`, and no GCC; see //linux.
+http_archive(
+    name = "linux",
+    build_file = "//third_party/linux:linux.BUILD.bazel",
+    sha256 = "f410638061a165c12f42ab871d2f3fcd525515359b5faeee80969cff84524df9",
+    strip_prefix = "linux-6.18.55",
+    urls = [
+        "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.55.tar.xz",
+    ],
+)
+
+http_archive(
+    name = "opensbi",
+    build_file = "//third_party/linux:opensbi.BUILD.bazel",
+    sha256 = "d11702103f177a2914e94eec57ce5ed820296d874f6b6525c4482e55d71a3667",
+    strip_prefix = "opensbi-1.6",
+    urls = [
+        "https://github.com/riscv-software-src/opensbi/archive/refs/tags/v1.6.tar.gz",
+    ],
+)
+
+# The userspace, an initramfs of BusyBox on musl (issue 1018), built with
+# the same LLVM. The LLVM release carries compiler-rt's builtins for the
+# host alone, and a static program at `ilp32` needs them for soft float
+# and 64-bit division, so they are built from compiler-rt's source, at
+# the release's own version. musl takes the two patches its author
+# published for CVE-2025-26519.
+http_archive(
+    name = "compiler_rt",
+    build_file = "//third_party/linux:source.BUILD.bazel",
+    sha256 = "15277402f6fd63397c0917a5c7171cda82d16d226094b828c1ed0f58f73b9c69",
+    strip_prefix = "compiler-rt-20.1.8.src",
+    urls = [
+        "https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/compiler-rt-20.1.8.src.tar.xz",
+    ],
+)
+
+http_archive(
+    name = "musl",
+    build_file = "//third_party/linux:source.BUILD.bazel",
+    patch_args = ["-p1"],
+    patches = [
+        "//third_party/linux:musl-cve-2025-26519-1.patch",
+        "//third_party/linux:musl-cve-2025-26519-2.patch",
+    ],
+    sha256 = "a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4",
+    strip_prefix = "musl-1.2.5",
+    urls = ["https://musl.libc.org/releases/musl-1.2.5.tar.gz"],
+)
+
+http_archive(
+    name = "busybox",
+    build_file = "//third_party/linux:source.BUILD.bazel",
+    sha256 = "3311dff32e746499f4df0d5df04d7eb396382d7e108bb9250e7b519b837043a4",
+    strip_prefix = "busybox-1.37.0",
+    urls = ["https://busybox.net/downloads/busybox-1.37.0.tar.bz2"],
+)
+
+deb_tree(
+    name = "kbuild_tree",
+    locks = ["//third_party/kbuild:trixie.lock.tsv"],
+)

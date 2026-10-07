@@ -1,0 +1,3 @@
+Printing the record: Name: Joe Shmoe, ID: 37
+Logging the record:  Name: Joe Shmoe, ID: 37
+Debug form:          PersonRecord { name: "Joe Shmoe", id_number: 37 }

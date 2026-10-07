@@ -1,0 +1,31 @@
+% SPDX-License-Identifier: Apache-2.0
+\section{A State Machine}
+\label{sec:x-case}
+
+\code{case!} is a \code{with!} group with many arms, and a state machine is
+what it is for. The arms are Rust patterns, guards and alternatives
+included, and the first that matches wins, so the guarded arm for
+\code{Run} sits above the plain one. Each iteration waits for the
+edge and then reads the state and the count at it. A sequencer waits
+for \code{go},
+loads a count, runs it down, reports done and waits again; the
+testbench raises \code{go} for one cycle and prints the state per
+cycle. The sequencer is lowered too, at the end of its output:
+\code{\#[lower]} turns \code{case!} into a chain of \code{else if}s,
+each arm a comparison of the state register with its variant's
+literal, which the \code{Value} derive supplies, guards joined with
+\code{\&\&} and alternatives with \code{||}, in the order written, so
+the first arm that holds wins as it does in the macro. The lowering is
+simulated against the trace, Section~\ref{sec:x-checked}, and
+Figure~\ref{fig:x-case} is the trace.
+
+\begin{figure}[htbp]
+\centering
+\input{case_timing.tex}
+\caption{The sequencer: \code{go} for one cycle, then the states and the count.}
+\label{fig:x-case}
+\end{figure}
+
+\lstinputlisting[caption={\code{ex\_case.rs}. Run with \code{bazel run //lib/examples:ex\_case}.},label={lst:x-case}]{lib/examples/ex_case.rs}
+
+\lstinputlisting[style=ascii,caption={What \code{ex\_case} printed when the build ran it.},label={lst:x-case-out}]{out_case.txt}

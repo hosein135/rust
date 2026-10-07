@@ -1,0 +1,6 @@
+[package]
+name = "ch13_smart_pointers_fig04"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]

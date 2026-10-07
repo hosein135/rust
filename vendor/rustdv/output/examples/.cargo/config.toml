@@ -1,0 +1,8 @@
+# macOS: the chapter cdylibs reference vpi_* symbols that the simulator
+# (vvp) provides when it loads the module. Linux linkers allow undefined
+# symbols in shared libraries by default; Mach-O needs to be told.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]

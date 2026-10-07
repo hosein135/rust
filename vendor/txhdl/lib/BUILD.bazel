@@ -1,0 +1,93 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The prototypical runtime: what the language is, once everything Rust
+# provides has been deleted. Every concept the article introduces lives
+# here, and every one is exercised by a compiled example under
+# //lib/examples that the article's appendix includes verbatim.
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_proc_macro", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_proc_macro(
+    name = "txhdl_macros",
+    srcs = [
+        "macros/lib.rs",
+        "macros/regmap.rs",
+        # A process of several waits, lowered to a state machine (issue 501).
+        "macros/seq.rs",
+        # The reserved words, shared with the runtime (issue 485).
+        "src/reserved.rs",
+    ],
+    crate_name = "txhdl_macros",
+    edition = "2021",
+)
+
+# The macros' own tests: the reserved words a netlist cannot hold.
+rust_test(
+    name = "macros_test",
+    crate = ":txhdl_macros",
+    edition = "2021",
+)
+
+# The library's own unit tests: what the two emitters write for a
+# declaration, which no example can assert as directly. See issue #359.
+rust_test(
+    name = "netlist_test",
+    crate = ":txhdl",
+    edition = "2021",
+)
+
+rust_library(
+    name = "txhdl",
+    srcs = [
+        "src/lib.rs",
+        "src/comp.rs",
+        "src/foreign.rs",
+        "src/formal.rs",
+        "src/funcs.rs",
+        "src/map.rs",
+        "src/netlist.rs",
+        "src/reserved.rs",
+        "src/pipeline.rs",
+        "src/regmap.rs",
+        "src/types.rs",
+    ],
+    crate_name = "txhdl",
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    proc_macro_deps = [":txhdl_macros"],
+    deps = ["@crates//:fst-writer"],
+)
+
+# The sources, for the article's appendix to include verbatim.
+filegroup(
+    name = "sources",
+    srcs = [
+        "macros/lib.rs",
+        "src/comp.rs",
+        "src/foreign.rs",
+        "src/formal.rs",
+        "src/funcs.rs",
+        "src/lib.rs",
+        "src/map.rs",
+        "src/pipeline.rs",
+        "src/regmap.rs",
+        "src/types.rs",
+        "src/netlist.rs",
+        "src/reserved.rs",
+    ],
+)
+
+exports_files([
+    "src/types.rs",
+    "src/comp.rs",
+    "src/foreign.rs",
+    "src/formal.rs",
+    "src/pipeline.rs",
+    "src/funcs.rs",
+    "src/netlist.rs",
+    # Also read by //tools/fst2tb, which escapes an entity's name as
+    # the netlist does (issue 497).
+    "src/reserved.rs",
+    "macros/lib.rs",
+])

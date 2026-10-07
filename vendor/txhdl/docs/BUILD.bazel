@@ -1,0 +1,3903 @@
+# SPDX-License-Identifier: Apache-2.0
+load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
+load("//tools:quiet.bzl", "quiet_cmd")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("@rules_latex_host//latex:defs.bzl", "combined_pdf", "latex_document")
+load(":waveform.bzl", "waveform")
+load("//tools/formal:defs.bzl", "formal_run", "formal_test", "formal_trace")
+load("//tools/pdfedge:defs.bzl", "pdf_edge_test", "pdf_frame_test")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("@rules_nvc//nvc:rules.bzl", "vhdl_test")
+load("@rules_verilator//verilator:defs.bzl", "verilator_cc_library")
+load("@rules_verilog//verilog:defs.bzl", "verilog_library")
+
+# Every source of every document, for the checks that read them: the
+# width test each waveform gets in waveform.bzl reads these to find
+# where a diagram is put and in which document (issue 324).
+filegroup(
+    name = "tex_sources",
+    srcs = glob([
+        "*.tex",
+        "examples_sections/*.tex",
+        "runtime_sections/*.tex",
+        "datasheets/*.tex",
+    ]) + [
+        # The lists the build writes, so a section is still found through
+        # its document (issue 586).
+        ":examples_sections_list",
+        ":runtime_sections_list",
+    ],
+)
+
+package(default_visibility = ["//visibility:public"])
+
+# The sections of the examples and the runtime documents, one \input per
+# file in the directory, sorted by name. The names carry the order, so a
+# new section is its file alone and two branches that each add one do
+# not meet in a hand-kept list (issue 586).
+[
+    genrule(
+        name = d + "_sections_list",
+        srcs = glob([d + "_sections/*.tex"]),
+        outs = [d + "_sections_list.tex"],
+        cmd = "for f in $$(printf '%s\\n' $(SRCS) | LC_ALL=C sort); do" +
+              " echo \"\\\\input{" + d + "_sections/$$(basename $$f .tex)}\";" +
+              " done > $@",
+    )
+    for d in ["examples", "runtime"]
+]
+
+# The vendored class, package and drawing files live in //third_party, so
+# every vendored byte is tracked in one place. They cannot be used from
+# there: `latex_document` copies a `data` file into the build directory
+# under its package relative path, and pdflatex searches the build directory
+# rather than a tree beneath it, so a file from //third_party would land at
+# `third_party/...` and never be found. Copying them into this package first
+# puts them next to the master, which is where LaTeX looks.
+#
+# The `outs` list is long because pgf is 282 files. It is generated from the
+# contents of //third_party/pgf rather than written by hand, and it is
+# listed rather than globbed so that a file appearing upstream does not
+# travel into a build unnoticed. To regenerate after changing what is
+# vendored, re-run the generator noted in docs/document-build-plan.md.
+genrule(
+    name = "vendored_tex",
+    srcs = [
+        "//third_party/ieeetran:files",
+        "//third_party/listings:files",
+        "//third_party/pgf:files",
+    ],
+    outs = [
+        "IEEEtran.cls",
+        "IEEEtrantools.sty",
+        "listings.cfg",
+        "listings.sty",
+        "lstmisc.sty",
+        "LUA_CODING_STYLE",
+        "example_graph_for_ascii_displayer.txt",
+        "pgf.cfg",
+        "pgf.revision.tex",
+        "pgf.sty",
+        "pgf.tex",
+        "pgfarrows.sty",
+        "pgfautomata.sty",
+        "pgfbaseimage.sty",
+        "pgfbaseimage.tex",
+        "pgfbaselayers.sty",
+        "pgfbaselayers.tex",
+        "pgfbasematrix.sty",
+        "pgfbasematrix.tex",
+        "pgfbasepatterns.sty",
+        "pgfbasepatterns.tex",
+        "pgfbaseplot.sty",
+        "pgfbaseplot.tex",
+        "pgfbaseshapes.sty",
+        "pgfbaseshapes.tex",
+        "pgfbasesnakes.sty",
+        "pgfbasesnakes.tex",
+        "pgfcalendar.code.tex",
+        "pgfcalendar.sty",
+        "pgfcalendar.tex",
+        "pgfcomp-version-0-65.sty",
+        "pgfcomp-version-1-18.sty",
+        "pgfcore.code.tex",
+        "pgfcore.sty",
+        "pgfcore.tex",
+        "pgfcorearrows.code.tex",
+        "pgfcoreexternal.code.tex",
+        "pgfcoregraphicstate.code.tex",
+        "pgfcoreimage.code.tex",
+        "pgfcorelayers.code.tex",
+        "pgfcoreobjects.code.tex",
+        "pgfcorepathconstruct.code.tex",
+        "pgfcorepathprocessing.code.tex",
+        "pgfcorepathusage.code.tex",
+        "pgfcorepatterns.code.tex",
+        "pgfcorepoints.code.tex",
+        "pgfcorequick.code.tex",
+        "pgfcorerdf.code.tex",
+        "pgfcorescopes.code.tex",
+        "pgfcoreshade.code.tex",
+        "pgfcoretransformations.code.tex",
+        "pgfcoretransparency.code.tex",
+        "pgfexternal.tex",
+        "pgfexternalwithdepth.tex",
+        "pgffor.code.tex",
+        "pgffor.sty",
+        "pgffor.tex",
+        "pgfheaps.sty",
+        "pgfint.code.tex",
+        "pgfkeys.code.tex",
+        "pgfkeys.sty",
+        "pgfkeys.tex",
+        "pgfkeyslibraryfiltered.code.tex",
+        "pgflibraryarrows.code.tex",
+        "pgflibraryarrows.meta.code.tex",
+        "pgflibraryarrows.spaced.code.tex",
+        "pgflibraryarrows.sty",
+        "pgflibraryautomata.sty",
+        "pgflibrarycurvilinear.code.tex",
+        "pgflibrarydatavisualization.barcharts.code.tex",
+        "pgflibrarydatavisualization.formats.functions.code.tex",
+        "pgflibrarydatavisualization.polar.code.tex",
+        "pgflibrarydecorations.footprints.code.tex",
+        "pgflibrarydecorations.fractals.code.tex",
+        "pgflibrarydecorations.markings.code.tex",
+        "pgflibrarydecorations.pathmorphing.code.tex",
+        "pgflibrarydecorations.pathreplacing.code.tex",
+        "pgflibrarydecorations.shapes.code.tex",
+        "pgflibrarydecorations.text.code.tex",
+        "pgflibraryfadings.code.tex",
+        "pgflibraryfixedpointarithmetic.code.tex",
+        "pgflibraryfpu.code.tex",
+        "pgflibrarygraphdrawing.circular.code.tex",
+        "pgflibrarygraphdrawing.code.tex",
+        "pgflibrarygraphdrawing.examples.code.tex",
+        "pgflibrarygraphdrawing.force.code.tex",
+        "pgflibrarygraphdrawing.layered.code.tex",
+        "pgflibrarygraphdrawing.trees.code.tex",
+        "pgflibraryintersections.code.tex",
+        "pgflibrarylindenmayersystems.code.tex",
+        "pgflibraryluamath.code.tex",
+        "pgflibrarypatterns.code.tex",
+        "pgflibrarypatterns.meta.code.tex",
+        "pgflibraryplothandlers.code.tex",
+        "pgflibraryplothandlers.sty",
+        "pgflibraryplotmarks.code.tex",
+        "pgflibraryplotmarks.sty",
+        "pgflibraryprofiler.code.tex",
+        "pgflibraryshadings.code.tex",
+        "pgflibraryshapes.arrows.code.tex",
+        "pgflibraryshapes.callouts.code.tex",
+        "pgflibraryshapes.code.tex",
+        "pgflibraryshapes.gates.ee.IEC.code.tex",
+        "pgflibraryshapes.gates.ee.code.tex",
+        "pgflibraryshapes.gates.logic.IEC.code.tex",
+        "pgflibraryshapes.gates.logic.US.code.tex",
+        "pgflibraryshapes.gates.logic.code.tex",
+        "pgflibraryshapes.geometric.code.tex",
+        "pgflibraryshapes.misc.code.tex",
+        "pgflibraryshapes.multipart.code.tex",
+        "pgflibraryshapes.sty",
+        "pgflibraryshapes.symbols.code.tex",
+        "pgflibrarysnakes.code.tex",
+        "pgflibrarysnakes.sty",
+        "pgflibrarysvg.path.code.tex",
+        "pgflibrarytikzbackgrounds.sty",
+        "pgflibrarytikztrees.sty",
+        "pgflibrarytimelines.code.tex",
+        "pgfmanual-en-macros.tex",
+        "pgfmanual.code.tex",
+        "pgfmanual.pdflinks.code.tex",
+        "pgfmanual.prettyprinter.code.tex",
+        "pgfmanual.sty",
+        "pgfmath.code.tex",
+        "pgfmath.sty",
+        "pgfmath.tex",
+        "pgfmathcalc.code.tex",
+        "pgfmathfloat.code.tex",
+        "pgfmathfunctions.base.code.tex",
+        "pgfmathfunctions.basic.code.tex",
+        "pgfmathfunctions.code.tex",
+        "pgfmathfunctions.comparison.code.tex",
+        "pgfmathfunctions.integerarithmetics.code.tex",
+        "pgfmathfunctions.misc.code.tex",
+        "pgfmathfunctions.random.code.tex",
+        "pgfmathfunctions.round.code.tex",
+        "pgfmathfunctions.trigonometric.code.tex",
+        "pgfmathode.code.tex",
+        "pgfmathparser.code.tex",
+        "pgfmathutil.code.tex",
+        "pgfmoduleanimations.code.tex",
+        "pgfmodulebending.code.tex",
+        "pgfmoduledatavisualization.code.tex",
+        "pgfmoduledecorations.code.tex",
+        "pgfmodulematrix.code.tex",
+        "pgfmodulenonlineartransformations.code.tex",
+        "pgfmoduleoo.code.tex",
+        "pgfmoduleparser.code.tex",
+        "pgfmoduleplot.code.tex",
+        "pgfmoduleshapes.code.tex",
+        "pgfmodulesnakes.code.tex",
+        "pgfmodulesorting.code.tex",
+        "pgfnodes.sty",
+        "pgfpages.sty",
+        "pgfparser.sty",
+        "pgfpict2e.sty",
+        "pgfrcs.code.tex",
+        "pgfrcs.sty",
+        "pgfrcs.tex",
+        "pgfshade.sty",
+        "pgfsys-common-pdf-via-dvi.def",
+        "pgfsys-common-pdf.def",
+        "pgfsys-common-postscript.def",
+        "pgfsys-common-svg.def",
+        "pgfsys-dvi.def",
+        "pgfsys-dvipdfm.def",
+        "pgfsys-dvipdfmx.def",
+        "pgfsys-dvips.def",
+        "pgfsys-dvisvgm.def",
+        "pgfsys-dvisvgm4ht.def",
+        "pgfsys-luatex.def",
+        "pgfsys-pdftex.def",
+        "pgfsys-tex4ht.def",
+        "pgfsys-textures.def",
+        "pgfsys-vtex.def",
+        "pgfsys-xetex.def",
+        "pgfsys.code.tex",
+        "pgfsys.sty",
+        "pgfsys.tex",
+        "pgfsysanimations.code.tex",
+        "pgfsysprotocol.code.tex",
+        "pgfsyssoftpath.code.tex",
+        "pgfutil-common-lists.tex",
+        "pgfutil-common.tex",
+        "pgfutil-context.def",
+        "pgfutil-latex.def",
+        "pgfutil-plain.def",
+        "t-pgf.tex",
+        "t-pgfbim.tex",
+        "t-pgfbla.tex",
+        "t-pgfbma.tex",
+        "t-pgfbpl.tex",
+        "t-pgfbpt.tex",
+        "t-pgfbsh.tex",
+        "t-pgfbsn.tex",
+        "t-pgfcal.tex",
+        "t-pgfcor.tex",
+        "t-pgffor.tex",
+        "t-pgfkey.tex",
+        "t-pgfmat.tex",
+        "t-pgfmod.tex",
+        "t-pgfrcs.tex",
+        "t-pgfsys.tex",
+        "t-tikz.tex",
+        "tikz.code.tex",
+        "tikz.sty",
+        "tikz.tex",
+        "tikzexternal.sty",
+        "tikzexternalshared.code.tex",
+        "tikzlibrary3d.code.tex",
+        "tikzlibraryangles.code.tex",
+        "tikzlibraryanimations.code.tex",
+        "tikzlibraryarrows.code.tex",
+        "tikzlibraryautomata.code.tex",
+        "tikzlibrarybabel.code.tex",
+        "tikzlibrarybackgrounds.code.tex",
+        "tikzlibrarybending.code.tex",
+        "tikzlibrarycalc.code.tex",
+        "tikzlibrarycalendar.code.tex",
+        "tikzlibrarychains.code.tex",
+        "tikzlibrarycircuits.code.tex",
+        "tikzlibrarycircuits.ee.IEC.code.tex",
+        "tikzlibrarycircuits.ee.code.tex",
+        "tikzlibrarycircuits.logic.CDH.code.tex",
+        "tikzlibrarycircuits.logic.IEC.code.tex",
+        "tikzlibrarycircuits.logic.US.code.tex",
+        "tikzlibrarycircuits.logic.code.tex",
+        "tikzlibrarydatavisualization.3d.code.tex",
+        "tikzlibrarydatavisualization.barcharts.code.tex",
+        "tikzlibrarydatavisualization.code.tex",
+        "tikzlibrarydatavisualization.formats.functions.code.tex",
+        "tikzlibrarydatavisualization.polar.code.tex",
+        "tikzlibrarydatavisualization.sparklines.code.tex",
+        "tikzlibrarydecorations.code.tex",
+        "tikzlibrarydecorations.footprints.code.tex",
+        "tikzlibrarydecorations.fractals.code.tex",
+        "tikzlibrarydecorations.markings.code.tex",
+        "tikzlibrarydecorations.pathmorphing.code.tex",
+        "tikzlibrarydecorations.pathreplacing.code.tex",
+        "tikzlibrarydecorations.shapes.code.tex",
+        "tikzlibrarydecorations.text.code.tex",
+        "tikzlibraryer.code.tex",
+        "tikzlibraryexternal.code.tex",
+        "tikzlibraryfadings.code.tex",
+        "tikzlibraryfit.code.tex",
+        "tikzlibraryfixedpointarithmetic.code.tex",
+        "tikzlibraryfolding.code.tex",
+        "tikzlibraryfpu.code.tex",
+        "tikzlibrarygraphdrawing.code.tex",
+        "tikzlibrarygraphdrawing.evolving.code.tex",
+        "tikzlibrarygraphs.code.tex",
+        "tikzlibrarygraphs.standard.code.tex",
+        "tikzlibraryintersections.code.tex",
+        "tikzlibrarylindenmayersystems.code.tex",
+        "tikzlibrarymath.code.tex",
+        "tikzlibrarymatrix.code.tex",
+        "tikzlibrarymindmap.code.tex",
+        "tikzlibrarypatterns.code.tex",
+        "tikzlibrarypatterns.meta.code.tex",
+        "tikzlibraryperspective.code.tex",
+        "tikzlibrarypetri.code.tex",
+        "tikzlibraryplothandlers.code.tex",
+        "tikzlibraryplotmarks.code.tex",
+        "tikzlibrarypositioning.code.tex",
+        "tikzlibraryquotes.code.tex",
+        "tikzlibraryrdf.code.tex",
+        "tikzlibraryscopes.code.tex",
+        "tikzlibraryshadings.code.tex",
+        "tikzlibraryshadows.code.tex",
+        "tikzlibraryshapes.arrows.code.tex",
+        "tikzlibraryshapes.callouts.code.tex",
+        "tikzlibraryshapes.code.tex",
+        "tikzlibraryshapes.gates.logic.IEC.code.tex",
+        "tikzlibraryshapes.gates.logic.US.code.tex",
+        "tikzlibraryshapes.geometric.code.tex",
+        "tikzlibraryshapes.misc.code.tex",
+        "tikzlibraryshapes.multipart.code.tex",
+        "tikzlibraryshapes.symbols.code.tex",
+        "tikzlibrarysnakes.code.tex",
+        "tikzlibraryspy.code.tex",
+        "tikzlibrarysvg.path.code.tex",
+        "tikzlibrarythrough.code.tex",
+        "tikzlibrarytopaths.code.tex",
+        "tikzlibrarytrees.code.tex",
+        "tikzlibraryturtle.code.tex",
+        "tikzlibraryviews.code.tex",
+        "xxcolor.sty",
+    ],
+    cmd = "for f in $(SRCS); do cp \"$$f\" \"$(RULEDIR)/$$(basename $$f)\"; done",
+)
+
+# The specification as an IEEE two-column article, set in Computer Modern.
+# Built against the hermetic LaTeX toolchain registered in MODULE.bazel, so
+# nothing has to be installed on the machine running the build.
+# The build stamp: the commit and the day, from Bazel's workspace status
+# (tools/workspace_status.sh), as \buildstamp for every document. A
+# build outside Bazel has no file and falls back to a draft note.
+#
+# Every document reads buildstamp.tex, and stable-status.txt changes with
+# every commit, so a stamped build typesets every document again on every
+# commit: no cache can serve them. --//docs:stamp=off writes a fixed
+# stamp that reads no workspace status, so a document whose sources did not
+# change comes from the cache. The `ci` config in .bazelrc sets it, for
+# pull-request and push builds; the release build stamps.
+string_flag(
+    name = "stamp",
+    build_setting_default = "on",
+    values = [
+        "off",
+        "on",
+    ],
+)
+
+config_setting(
+    name = "unstamped",
+    flag_values = {":stamp": "off"},
+)
+
+genrule(
+    name = "buildstamp",
+    outs = ["buildstamp.tex"],
+    cmd = select({
+        ":unstamped": "printf '\\\\newcommand{\\\\buildstamp}{Built by Bazel, unstamped.}\\n' > $@",
+        "//conditions:default": "c=$$(grep '^STABLE_GIT_COMMIT ' bazel-out/stable-status.txt | cut -d' ' -f2);" +
+                                " t=$$(grep '^BUILD_TIMESTAMP ' bazel-out/volatile-status.txt | cut -d' ' -f2);" +
+                                " d=$$(date -u -d @$$t +%Y-%m-%d);" +
+                                " printf '\\\\newcommand{\\\\buildstamp}{Built by Bazel from commit" +
+                                " \\\\code{%s} on %s.}\\n' \"$$c\" \"$$d\" > $@",
+    }),
+    stamp = select({
+        ":unstamped": 0,
+        "//conditions:default": 1,
+    }),
+)
+
+latex_document(
+    name = "article",
+    main = "article.tex",
+    data = [
+        ":buildstamp",
+        ":vendored_tex",
+    ],
+    deps = ["housestyle.tex"] + glob(["sections/*.tex"]),
+)
+
+# The second article: what is left of the language once every construct
+# Rust already provides is deleted. Shares the house preamble, so the
+# documents cannot drift apart in font, listing style or figure style.
+latex_document(
+    name = "embedding",
+    main = "embedding.tex",
+    data = [
+        ":buildstamp",
+        ":vendored_tex",
+        "//experiments/rust_embedding:probe_interface_proc.rs",
+        "//lib/examples:ex_unreg.rs",
+    ],
+    deps = ["housestyle.tex"] + glob(["embedding_sections/*.tex"]),
+)
+
+# The runtime: the library included verbatim from the tree, so a listing
+# there cannot differ from the code.
+latex_document(
+    name = "runtime",
+    main = "runtime.tex",
+    data = [
+        ":buildstamp",
+        ":runtime_sections_list",
+        ":vendored_tex",
+        "//lib:sources",
+        "//lib/parts:sources",
+    ],
+    deps = ["housestyle.tex"] + glob(["runtime_sections/*.tex"]),
+)
+
+# The public interface of each runtime file, extracted from the source.
+# The examples document shows the runtime through nothing else.
+API = {
+    "api_types.rs": "//lib:src/types.rs",
+    "api_comp.rs": "//lib:src/comp.rs",
+    "api_pipeline.rs": "//lib:src/pipeline.rs",
+    "api_funcs.rs": "//lib:src/funcs.rs",
+    "api_macros.rs": "//lib:macros/lib.rs",
+    "api_netlist.rs": "//lib:src/netlist.rs",
+    "api_foreign.rs": "//lib:src/foreign.rs",
+    "api_regmap.rs": "//lib:src/regmap.rs",
+    "api_formal.rs": "//lib:src/formal.rs",
+    "api_map.rs": "//lib:src/map.rs",
+    "api_buffer.rs": "//lib/parts:src/buffer.rs",
+    "api_fifo.rs": "//lib/parts:src/fifo.rs",
+    "api_station.rs": "//lib/parts:src/station.rs",
+}
+
+[
+    genrule(
+        name = out.replace(".rs", ""),
+        srcs = [src],
+        outs = [out],
+        cmd = "$(location //tools/api) $(location " + src + ") > $@",
+        tools = ["//tools/api"],
+    )
+    for out, src in API.items()
+]
+
+# What the examples that print printed. Run by the build, so the output
+# under a listing is the output of the listing beside it.
+genrule(
+    name = "example_outputs",
+    outs = [
+        "out_config.txt",
+        "out_fifo.txt",
+        "out_arbiter.txt",
+        "out_trace.txt",
+    ],
+    cmd = " && ".join([
+        "$(location //lib/examples:ex_config) fpga > $(RULEDIR)/out_config.txt",
+        "$(location //lib/examples:ex_config) asic >> $(RULEDIR)/out_config.txt",
+        "$(location //lib/examples:ex_fifo) > $(RULEDIR)/out_fifo.txt",
+        "$(location //lib/examples:ex_arbiter) > $(RULEDIR)/out_arbiter.txt",
+        "$(location //lib/examples:ex_trace) > $(RULEDIR)/out_trace.txt",
+    ]),
+    tools = [
+        "//lib/examples:ex_config",
+        "//lib/examples:ex_fifo",
+        "//lib/examples:ex_arbiter",
+        "//lib/examples:ex_trace",
+    ],
+)
+
+# The waveform of the trace example, drawn: VCD to a signals database
+# (vcdcvt), the database to drawtiming text for the chosen signals
+# (sqlite2drawtiming), the text to TikZ (//tools/dt2tikz). The two
+# converters are prebuilt tools pinned in //:multitool.lock.json.
+genrule(
+    name = "counter_db",
+    srcs = ["out_trace.txt"],
+    outs = ["counter.db"],
+    cmd = quiet_cmd("$(location @multitool//tools/vcdcvt) -logtostderr" +
+          " -in $(location out_trace.txt) -format sqlite -out $@"),
+    tools = ["@multitool//tools/vcdcvt"],
+)
+
+genrule(
+    name = "counter_dt",
+    srcs = ["counter.db"],
+    outs = ["counter.dt"],
+    cmd = quiet_cmd("$(location @multitool//tools/sqlite2drawtiming) -logtostderr" +
+          " -in $(location counter.db) -ndots 1" +
+          " -signal '//clocks/clk=>clk'" +
+          " -signal '//counter/n=>n'" +
+          " -signal '//counter/phase=>phase'" +
+          " -signal '//msb=>msb' > $@"),
+    tools = ["@multitool//tools/sqlite2drawtiming"],
+)
+
+genrule(
+    name = "counter_timing",
+    srcs = ["counter.dt"],
+    outs = ["counter_timing.tex"],
+    cmd = "$(location //tools/dt2tikz) $(location counter.dt)" +
+          " --order clk,n,phase,msb --color > $@",
+    tools = ["//tools/dt2tikz"],
+)
+
+# Every later example has a waveform: run, converted and drawn. The
+# lowered ones are also simulated against their own trace.
+waveform(
+    name = "blinky",
+    example = "//lib/examples:ex_blinky",
+    lowered = ("blinky", "blinky"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//blinky/count=>count",
+        "//led=>led",
+    ],
+)
+
+waveform(
+    name = "case",
+    example = "//lib/examples:ex_case",
+    lowered = ("sequencer", "sequencer"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//go=>go",
+        "//sequencer/state=>state",
+        "//sequencer/count=>count",
+        "//observed=>observed",
+    ],
+)
+
+waveform(
+    name = "join",
+    example = "//lib/examples:ex_join",
+    signals = [
+        "//clocks/clk=>clk",
+        "//a/rx_valid=>a_valid",
+        "//a/rx_data=>a",
+        "//b/rx_valid=>b_valid",
+        "//b/rx_data=>b",
+        "//sum/rx_data=>sum",
+        "//adder/sums=>sums",
+    ],
+)
+
+waveform(
+    name = "inflight",
+    example = "//lib/examples:ex_inflight",
+    # The pipeline takes a pair in the step it is offered, so the valid
+    # bits never show; the data rows say it all.
+    signals = [
+        "//clocks/clk=>clk",
+        "//pair/rx_data=>pair",
+        "//result/rx_data=>result",
+    ],
+)
+
+waveform(
+    name = "netlist",
+    example = "//lib/examples:ex_netlist",
+    signals = [
+        "//clocks/clk=>clk",
+        "//top/producer/n=>n",
+        "//top/producer/outp=>outp",
+        "//top/consumer/total=>total",
+    ],
+)
+
+waveform(
+    name = "edges",
+    example = "//lib/examples:ex_edges",
+    signals = [
+        "//clocks/clk=>clk",
+        "//edges/count=>count",
+        "//edges/captured=>captured",
+        "//edges/seen_four=>seen_four",
+    ],
+)
+
+waveform(
+    name = "lower",
+    example = "//lib/examples:ex_lower",
+    signals = [
+        "//clocks/clk=>clk",
+        "//triple/rx_data=>triple",
+        "//result/rx_data=>result",
+    ],
+)
+
+# The reset, which no unit declares and every module has.
+waveform(
+    name = "reset",
+    example = "//lib/examples:ex_reset",
+    lowered = ("ticker", "ticker"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//rst=>rst",
+        "//tick=>tick",
+        "//ticker/count=>count",
+        "//total=>total",
+    ],
+)
+
+# A register starts where the unit's Default puts it, inside a unit of
+# units, with no init_reg (issue 890).
+waveform(
+    name = "start",
+    example = "//lib/examples:ex_start",
+    lowered = ("shell", "shell"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//rst=>rst",
+        "//tick=>tick",
+        "//shell/ticker/count=>count",
+        "//total=>total",
+    ],
+)
+
+# A loop whose only wait is a channel's, a sender and a receiver
+# joined (issue 881).
+waveform(
+    name = "chanwait",
+    example = "//lib/examples:ex_chanwait",
+    lowered = ("chanpair", "pair"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//pair/count/n=>n",
+        "//shown=>shown",
+    ],
+)
+
+# A reset empties the channel between two units (issue 729).
+waveform(
+    name = "flush",
+    example = "//lib/examples:ex_flush",
+    lowered = ("pair", "pair"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//rst=>rst",
+        "//take=>take",
+        "//pair/counter/n=>n",
+        "//pair/taker/last=>last",
+        "//shown=>shown",
+    ],
+)
+
+# Whether a receive took something: `recv_if`'s answer to `is_some()` is
+# the take, one bit, and not the transaction's data (issue 1079).
+waveform(
+    name = "recv_some",
+    example = "//lib/examples:ex_recv_some",
+    lowered = ("takers", "takers"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//go=>go",
+        "//took=>took",
+        "//count=>count",
+        "//takers/source/n=>n",
+    ],
+)
+
+# A unit that answers the reset itself, and the run's reset that leaves
+# its registers to it (issue 878).
+waveform(
+    name = "ownrst",
+    example = "//lib/examples:ex_ownrst",
+    lowered = ("fetch", "fetch"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//rst=>rst",
+        "//fetch/pc=>pc",
+        "//pc_out=>pc_out",
+    ],
+)
+
+# A reset drops a memory's write and keeps its words (issue 877).
+waveform(
+    name = "rstmem",
+    example = "//lib/examples:ex_rstmem",
+    lowered = ("log", "log"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//rst=>rst",
+        "//we=>we",
+        "//d=>d",
+        "//a=>a",
+        "//log/wp=>wp",
+        "//q=>q",
+        "//r=>r",
+    ],
+)
+
+# A unit that answers its own reset writes its memory under it, a wipe
+# a word a cycle (issue 966).
+waveform(
+    name = "rstmemown",
+    example = "//lib/examples:ex_rstmemown",
+    lowered = ("wipe", "wipe"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//rst=>rst",
+        "//we=>we",
+        "//a=>a",
+        "//wipe/at=>at",
+        "//q=>q",
+    ],
+)
+
+# A unit that takes its own reset and checks its count only out of it
+# (issue 633).
+waveform(
+    name = "rstcheck",
+    example = "//lib/examples:ex_rstcheck",
+    lowered = ("decade", "decade"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//rst=>rst",
+        "//tick=>tick",
+        "//decade/count=>count",
+        "//shown=>shown",
+    ],
+)
+
+# The same netlist held in its own reset and released, in each language:
+# under reset the counter shows a blank, which its check rejects, so the
+# check must not be stated there (issue 633). Each fails before the fix
+# and passes after it.
+verilog_library(
+    name = "rstcheck_reset_vl",
+    srcs = [
+        "rstcheck.v",
+        "rstcheck_reset_tb.v",
+    ],
+    top_module = "rstcheck_reset_tb",
+)
+
+verilator_cc_library(
+    name = "rstcheck_reset_verilated",
+    module = ":rstcheck_reset_vl",
+    copts = ["-Wno-sign-compare"],
+    timing = True,
+    vopts = ["--main", "-Wno-fatal", "--assert", "+define+FORMAL"],
+)
+
+cc_test(
+    name = "rstcheck_reset_vsim_test",
+    srcs = ["//tools/vlcheck:main.cc"],
+    deps = [":rstcheck_reset_verilated"],
+)
+
+vhdl_test(
+    name = "rstcheck_reset_sim",
+    srcs = [
+        "rstcheck.vhd",
+        "rstcheck_reset_tb.vhd",
+    ],
+    deps = [],
+    entities = ["rstcheck_reset_tb"],
+)
+
+# The same check proved for every input and every reset, by the rules
+# of #581: the netlist as written, and a copy without the gate, which
+# is what the netlist wrote before issue 633 and whose proof fails at
+# the first edge under reset.
+genrule(
+    name = "rstcheck_ungated",
+    srcs = [":rstcheck.v"],
+    outs = ["rstcheck_ungated.v"],
+    cmd = "sed 's/if (!rst) //' $< > $@ && ! cmp -s $< $@",
+)
+
+formal_test(
+    name = "rstcheck_prove_test",
+    top = "decade",
+    verilog = ":rstcheck.v",
+)
+
+formal_test(
+    name = "rstcheck_ungated_prove_test",
+    expect = 2,
+    top = "decade",
+    verilog = ":rstcheck_ungated.v",
+)
+
+formal_test(
+    name = "rstcheck_ungated_bmc_test",
+    expect = 2,
+    mode = "bmc",
+    top = "decade",
+    verilog = ":rstcheck_ungated.v",
+)
+
+# The engines through the real Wishbone bridge. Issues 151, 471.
+waveform(
+    name = "dmawb",
+    example = "//lib/examples:ex_dmawb",
+    signals = [
+        "//clocks/clk=>clk",
+        "//r_running=>fetch_running",
+        "//r_cyc=>fetch_cyc",
+        "//r_ack=>fetch_ack",
+        "//w_running=>store_running",
+        "//w_ack=>store_ack",
+    ],
+)
+
+# A frame's length found again after the clock crossing. Issue 151.
+waveform(
+    name = "framelen",
+    example = "//lib/examples:ex_framelen",
+    lowered = ("framelen", "framelen"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//framelen/phase=>giving",
+        "//framelen/held=>held",
+        "//len=>len",
+    ],
+)
+
+# One Ethernet wire, two users, split by EtherType. Issue 480.
+waveform(
+    name = "ethshare",
+    example = "//lib/examples:ex_ethshare",
+    lowered = ("ethshare", "ethshare"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//ethshare/rph=>rx_phase",
+        "//ethshare/to_a=>to_a",
+        "//ethshare/tbusy=>tx_busy",
+        "//ethshare/tsel=>tx_from_b",
+    ],
+)
+
+# Words to a frame and back, through the MAC. Issue 151.
+waveform(
+    name = "ethdma",
+    example = "//lib/examples:ex_ethdma",
+    lowered = [
+        ("frame_out", "frame_out"),
+        ("frame_in", "frame_in"),
+    ],
+    signals = [
+        "//clocks/clk=>clk",
+        "//go=>go",
+        "//running=>running",
+        "//frame_out/have=>out_have",
+        "//frame_in/have=>in_have",
+        "//in_go=>in_go",
+    ],
+)
+
+# The Ethernet slot registers, as a driver drives them. Issue 411.
+waveform(
+    name = "ethslots",
+    example = "//lib/examples:ex_ethslots",
+    lowered = ("ethslots", "ethslots"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//ethslots/queued=>queued",
+        "//ethslots/tx_go=>tx_go",
+        "//irq=>irq",
+        "//rx_full=>rx_full",
+    ],
+)
+
+# Writing memory in bursts, byte accurate. Issue 151.
+waveform(
+    name = "dmaw",
+    example = "//lib/examples:ex_dmaw",
+    lowered = ("linestore", "linestore"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//go=>go",
+        "//running=>running",
+        "//inp/rx_valid=>inp_valid",
+        "//inp/rx_data=>inp",
+        "//linestore/want=>want",
+        "//linestore/left=>left",
+        "//wbeat/tx_valid=>wbeat_valid",
+    ],
+)
+
+# The far end of the scanout, on the pixel clock. Issue 151.
+waveform(
+    name = "scanout",
+    example = "//lib/examples:ex_scanout",
+    lowered = ("linebuf", "linebuf"),
+    signals = [
+        "//clocks/clk_pix=>clk_pix",
+        "//inp/rx_valid=>inp_valid",
+        "//inp/rx_data=>inp",
+        "//linebuf/at=>at",
+        "//linebuf/shown=>shown",
+        "//col=>col",
+        "//pix=>pix",
+    ],
+)
+
+# The video peripheral with a scanout beside it, simulated whole as one
+# netlist: the fourth frame's rows 1 to 3, where the memory stalls for a
+# line, the pair starves, and the registers hear of it a few cycles on.
+waveform(
+    name = "scanvideo",
+    example = "//lib/examples:ex_scanvideo",
+    lowered = [("scanvideo", "scanvideo")],
+    signals = [
+        "//de=>de",
+        "//req/tx_valid=>req",
+        "//words/rx_valid=>word",
+        "//scanvideo/pair/rgot=>rgot",
+        "//scanvideo/pair/under=>under",
+        "//scanvideo/ctl/seen=>seen",
+    ],
+    from_tick = 2780,
+    until = 3300,
+)
+
+# A scanout a line ahead of the beam, and a line that starves when the
+# memory stalls longer than a line (issue 151). The window is the
+# fourth frame's rows 1 to 3, where the long stall is.
+waveform(
+    name = "scanpair",
+    example = "//lib/examples:ex_scanpair",
+    lowered = [
+        ("linepair", "linepair"),
+        ("scanfetch", "scanfetch"),
+    ],
+    signals = [
+        "//row=>row",
+        "//line=>line",
+        "//req/tx_valid=>req",
+        "//start=>start",
+        "//inp/rx_valid=>word",
+        "//linepair/rgot=>rgot",
+        "//starved=>starved",
+    ],
+    from_tick = 7200,
+    until = 8300,
+)
+
+# Reading memory in bursts, and what it buys. Issue 151.
+waveform(
+    name = "dma",
+    example = "//lib/examples:ex_dma",
+    lowered = ("linefetch", "linefetch"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//go=>go",
+        "//running=>running",
+        "//linefetch/want=>want",
+        "//linefetch/left=>left",
+        "//out/rx_valid=>out_valid",
+        "//out/rx_data=>out",
+    ],
+)
+
+# The clock-crossing channel: two clocks, and the pointers between
+# them. Issue 370.
+waveform(
+    name = "cdc",
+    example = "//lib/examples:ex_cdc",
+    lowered = ("cdc", "cdc"),
+    signals = [
+        "//clocks/clk_w=>clk_w",
+        "//clocks/clk_r=>clk_r",
+        "//inp/rx_ready=>inp_ready",
+        "//inp/rx_data=>inp",
+        "//cdc/wgray=>wgray",
+        "//cdc/wgray_r2=>wgray_r2",
+        "//cdc/rgray=>rgray",
+        "//out/tx_valid=>out_valid",
+        "//out/tx_data=>out",
+    ],
+)
+
+# The RISC-V debug transport on the cable's clock, one tunneled scan of
+# the instruction register as OpenOCD frames it. Issue 154.
+waveform(
+    name = "dtm",
+    example = "//lib/examples:ex_dtm",
+    lowered = ("dtm", "dtm"),
+    from_tick = 479,
+    until = 679,
+    signals = [
+        "//clocks/tck=>tck",
+        "//capture=>capture",
+        "//shift=>shift",
+        "//update=>update",
+        "//tdi=>tdi",
+        "//dtm/phase=>phase",
+        "//dtm/cnt=>cnt",
+        "//dtm/ir=>ir",
+    ],
+)
+
+waveform(
+    name = "stage",
+    example = "//lib/examples:ex_stage",
+    lowered = ("stage", "stage"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//inp/rx_valid=>inp_valid",
+        "//inp/rx_data=>inp",
+        "//inp/rx_ready=>inp_ready",
+        "//out/tx_valid=>out_valid",
+        "//out/tx_data=>out",
+        "//out/tx_ready=>out_ready",
+        "//stage/count=>count",
+    ],
+)
+
+waveform(
+    name = "packet",
+    example = "//lib/examples:ex_packet",
+    signals = [
+        "//clocks/clk=>clk",
+        "//link/rx_data/src=>src",
+        "//link/rx_data/dst=>dst",
+        "//link/rx_data/kind=>kind",
+        "//link/rx_data/len=>len",
+        "//listener/last/kind=>last_kind",
+    ],
+)
+
+# The examples: every file under //lib/examples verbatim, the output of
+# the ones that run, and the runtime's public interface.
+latex_document(
+    name = "examples",
+    main = "examples.tex",
+    data = [
+        ":buildstamp",
+        ":examples_sections_list",
+        ":vendored_tex",
+        ":example_outputs",
+        ":counter_dt",
+        ":counter_timing",
+        ":blinky_run",
+        ":blinky_timing",
+        ":case_run",
+        ":case_timing",
+        ":join_run",
+        ":join_timing",
+        ":inflight_run",
+        ":inflight_timing",
+        ":netlist_run",
+        ":netlist_timing",
+        ":edges_run",
+        ":edges_timing",
+        ":lower_run",
+        ":lower_timing",
+        ":stage_run",
+        ":stage_timing",
+        ":packet_run",
+        ":packet_timing",
+        ":alu_run",
+        ":alu_timing",
+        ":mem_run",
+        ":mem_timing",
+        ":imm_run",
+        ":imm_timing",
+        ":twoproc_run",
+        ":twoproc_timing",
+        ":mul_run",
+        ":mul_timing",
+        ":lanes_run",
+        ":lanes_timing",
+        ":mesh_run",
+        ":mesh_timing",
+        ":put_run",
+        ":put_timing",
+        ":chanwait_run",
+        ":chanwait_timing",
+        ":dtm_run",
+        ":dtm_timing",
+        ":regs_run",
+        ":regs_timing",
+        ":wide_run",
+        ":wide_timing",
+        ":tap_run",
+        ":tap_timing",
+        ":buffer_run",
+        ":buffer_timing",
+        ":wire_run",
+        ":wire_timing",
+        ":fn_run",
+        ":arith_run",
+        ":arith_timing",
+        ":valif_run",
+        ":valif_timing",
+        ":range_run",
+        ":range_timing",
+        ":cast_run",
+        ":cast_timing",
+        ":loop_run",
+        ":loop_timing",
+        ":litfn_run",
+        ":litfn_timing",
+        ":fn_timing",
+        ":names_run",
+        ":names_timing",
+        ":reserved_run",
+        ":reserved_timing",
+        ":tie_run",
+        ":tie_timing",
+        ":side_run",
+        ":side_timing",
+        ":nested_run",
+        ":nested_timing",
+        ":link_run",
+        ":link_timing",
+        ":seq_run",
+        ":seq_timing",
+        ":formal_run",
+        ":formal_timing",
+        ":serial_run",
+        ":serial_timing",
+        ":frame_run",
+        ":frame_timing",
+        ":hold_run",
+        ":hold_timing",
+        ":helpers_run",
+        ":helpers_timing",
+        ":repeat_run",
+        ":repeat_timing",
+        ":map_run",
+        ":map_timing",
+        ":rename_run",
+        ":rename_timing",
+        ":foreign_run",
+        ":foreign_timing",
+        ":ops_run",
+        ":ops_timing",
+        ":if_run",
+        ":if_timing",
+        ":inplace_run",
+        ":inplace_timing",
+        ":with_run",
+        ":with_timing",
+        ":queue_run",
+        ":queue_timing",
+        ":station_run",
+        ":station_timing",
+        ":station_source",
+        ":stream_alu_run",
+        ":stream_alu_timing",
+        ":compose_run",
+        ":compose_timing",
+        ":unreg_run",
+        ":unreg_timing",
+        ":ports_run",
+        ":ports_timing",
+        ":bundle_run",
+        ":bundle_timing",
+        ":blackbox_run",
+        ":blackbox_timing",
+        ":gpio_run",
+        ":gpio_timing",
+        ":redundant_run",
+        ":redundant_timing",
+        ":cfgflash_run",
+        ":cfgflash_timing",
+        ":flashwin_run",
+        ":flashwin_timing",
+        ":remote_run",
+        ":remote_timing",
+        ":pwm_run",
+        ":pwm_timing",
+        ":trng_run",
+        ":trng_timing",
+        ":trng_apt_run",
+        ":trng_apt_timing",
+        ":sd_run",
+        ":sd_timing",
+        ":sddma_run",
+        ":sddma_timing",
+        ":regmap_run",
+        ":regmap_timing",
+        ":tracer_run",
+        ":tracer_timing",
+        ":spi_run",
+        ":spi_timing",
+        ":i2c_run",
+        ":i2c_timing",
+        ":mdio_run",
+        ":mdio_timing",
+        ":syscon_run",
+        ":syscon_timing",
+        ":cdc_run",
+        ":cdc_timing",
+        ":dma_run",
+        ":dma_timing",
+        ":dmaw_run",
+        ":dmaw_timing",
+        ":dmawb_run",
+        ":dmawb_timing",
+        ":ethdma_run",
+        ":ethshare_run",
+        ":framelen_run",
+        ":framelen_timing",
+        ":ethshare_timing",
+        ":ethdma_timing",
+        ":ethslots_run",
+        ":ethslots_timing",
+        ":scanout_run",
+        ":scanout_timing",
+        ":scanpair_run",
+        ":scanpair_timing",
+        ":scanvideo_run",
+        ":scanvideo_timing",
+        ":reset_run",
+        ":reset_timing",
+        ":ownrst_run",
+        ":ownrst_timing",
+        ":slowfirst_run",
+        ":slowfirst_timing",
+        ":rstmem_run",
+        ":rstmem_timing",
+        ":rstmemown_run",
+        ":rstmemown_timing",
+        ":flush_run",
+        ":recv_some_run",
+        ":recv_some_timing",
+        ":flush_timing",
+        ":start_run",
+        ":start_timing",
+        ":wdog_run",
+        ":wdog_timing",
+        "//lib/examples:sources",
+        # The clock-crossing part's source, for the listing in the
+        # section on it: the part is in //lib/parts, not in the
+        # examples, because it is a part.
+        "//lib/parts:sources",
+    ] + API.keys(),
+    deps = ["housestyle.tex"] + glob(["examples_sections/*.tex"]),
+)
+
+# The datasheets: one per component, their tables generated from each
+# component's lowering by //tools/datasheet.
+latex_document(
+    name = "datasheets",
+    main = "datasheets.tex",
+    data = [
+        ":buildstamp",
+        ":vendored_tex",
+        "//tools/datasheet:tables",
+    ],
+    deps = ["housestyle.tex"] + glob(["datasheets/*.tex"]),
+)
+
+# The datasheets' sources, for the check that every component has one.
+filegroup(
+    name = "datasheet_sources",
+    srcs = ["datasheets.tex"] + glob(["datasheets/*.tex"]),
+)
+
+# The cover: every document, what it is for, where it is built.
+latex_document(
+    name = "cover",
+    main = "cover.tex",
+    data = [
+        ":buildstamp",
+        ":vendored_tex",
+    ],
+    deps = ["housestyle.tex"],
+)
+
+waveform(
+    name = "alu",
+    example = "//lib/examples:ex_alu",
+    lowered = ("alu", "alu"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//op=>op",
+        "//a=>a",
+        "//b=>b",
+        "//alu/r=>r",
+        "//y=>y",
+    ],
+)
+
+waveform(
+    name = "ops",
+    example = "//lib/examples:ex_ops",
+    lowered = ("ops", "ops"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//a=>a",
+        "//b=>b",
+        "//en=>en",
+        "//ops/sum=>sum",
+        "//ops/hits=>hits",
+        "//ops/tops=>tops",
+        "//ops/spread=>spread",
+        "//ops/wide=>wide",
+        "//ops/mid=>mid",
+        "//ops/nib=>nib",
+        "//ops/carry=>carry",
+        "//ops/packed=>packed",
+        "//ops/spack=>spack",
+        "//ops/same_low=>same_low",
+        "//same=>same",
+        "//below=>below",
+    ],
+)
+
+waveform(
+    name = "if",
+    example = "//lib/examples:ex_if",
+    lowered = ("pulser", "if"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//rst=>rst",
+        "//go=>go",
+        "//len=>len",
+        "//pulser/count=>count",
+        "//pulser/busy=>busy",
+        "//pulser/runs=>runs",
+        "//active=>active",
+        "//done/tx_valid=>done_valid",
+        "//done/tx_data=>done",
+    ],
+)
+
+waveform(
+    name = "inplace",
+    example = "//lib/examples:ex_inplace",
+    lowered = ("window", "inplace"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//x=>x",
+        "//en=>en",
+        "//clear=>clear",
+        "//window/acc=>acc",
+        "//window/n=>n",
+        "//window/top=>top",
+        "//sum=>sum",
+        "//full=>full",
+    ],
+)
+
+waveform(
+    name = "with",
+    example = "//lib/examples:ex_with",
+    lowered = ("tally", "with"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//we=>we",
+        "//addr=>addr",
+        "//data=>data",
+        "//clear=>clear",
+        "//table/total=>total",
+        "//table/last=>last",
+        "//table/written=>written",
+        "//word=>word",
+        "//sum=>sum",
+    ],
+)
+
+waveform(
+    name = "queue",
+    example = "//lib/examples:ex_queue",
+    lowered = ("queue4", "queue"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//inp/rx_valid=>inp_valid",
+        "//inp/rx_data=>inp",
+        "//inp/rx_ready=>inp_ready",
+        "//out/rx_valid=>out_valid",
+        "//out/rx_data=>out",
+        "//out/rx_ready=>out_ready",
+        "//queue/head=>head",
+        "//queue/tail=>tail",
+        "//queue/full=>full",
+    ],
+)
+
+waveform(
+    name = "station",
+    example = "//lib/examples:ex_station",
+    lowered = ("station", "station"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//in0/rx_valid=>in0_valid",
+        "//in0/rx_data/tag=>in0_tag",
+        "//in0/rx_data/value=>in0_value",
+        "//in0/rx_ready=>in0_ready",
+        "//in1/rx_valid=>in1_valid",
+        "//in1/rx_data/tag=>in1_tag",
+        "//in1/rx_data/value=>in1_value",
+        "//in1/rx_ready=>in1_ready",
+        "//station/occ0=>occ0",
+        "//station/occ1=>occ1",
+        "//out/rx_valid=>out_valid",
+        "//out/rx_data/tag=>out_tag",
+        "//out/rx_data/v0=>v0",
+        "//out/rx_data/v1=>v1",
+        "//out/rx_ready=>out_ready",
+    ],
+)
+
+waveform(
+    name = "stream_alu",
+    example = "//lib/examples:ex_stream_alu",
+    lowered = ("stream_alu", "stream_alu"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//inp/rx_valid=>inp_valid",
+        "//inp/rx_data/tag=>inp_tag",
+        "//inp/rx_data/op=>inp_op",
+        "//inp/rx_data/a=>inp_a",
+        "//inp/rx_data/b=>inp_b",
+        "//inp/rx_ready=>inp_ready",
+        "//alu/slots=>slots",
+        "//alu/not_v=>not_v",
+        "//alu/and2_v=>and2_v",
+        "//alu/or3_v=>or3_v",
+        "//alu/add4_v=>add4_v",
+        "//out/rx_valid=>out_valid",
+        "//out/rx_data/tag=>out_tag",
+        "//out/rx_data/value=>out_value",
+        "//out/rx_ready=>out_ready",
+    ],
+)
+
+# Razboj, the minimal GPU: the rasteriser and the framebuffer lowered, the
+# whole of a small render traced.
+waveform(
+    name = "razboj",
+    example = "//gpu/razboj:trace",
+    lowered = [
+        ("raster", "raster"),
+        ("fb", "fb"),
+    ],
+    signals = [
+        "//clocks/clk=>clk",
+        "//rdata/tx_valid=>rdata",
+        "//raster/word=>word",
+        "//raster/kind=>kind",
+        "//raster/x=>x",
+        "//raster/y=>y",
+        "//raster/hit=>hit",
+        "//issue/tx_valid=>issue",
+        "//aw/tx_valid=>aw",
+        "//req/tx_valid=>req",
+        "//wd/tx_valid=>wd",
+        "//b/tx_valid=>b",
+        "//raster/inflight=>inflight",
+    ],
+    from_tick = 1540,
+    until = 1665,
+    width = 8.2,
+)
+
+# Razboj drawing two lists one after the other: the first list done, its
+# count written back to zero, the next list written in and drawn
+# (issue 982). Only the rasteriser is lowered, since the next list
+# reaches the framebuffer's memory from the run rather than its port.
+waveform(
+    name = "razboj_lists",
+    example = "//gpu/razboj:trace_lists",
+    lowered = ("raster_lists", "raster"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//issue/tx_valid=>issue",
+        "//rdata/tx_valid=>rdata",
+        "//raster/left=>left",
+        "//raster/inflight=>inflight",
+        "//raster/finished=>finished",
+        "//idle=>idle",
+    ],
+    from_tick = 1968,
+    until = 2130,
+    width = 8.2,
+)
+
+# Razboj at the board's width (issue 1178): rows of 1024 pixels on a
+# twenty-bit link, with a rectangle across row 16 and a triangle below
+# it, where a pixel's offset passes sixteen bits. The rasteriser's
+# netlist is replayed against the run under nvc and Verilator at that
+# width; the sixteen-pixel trace above cannot reach it.
+waveform(
+    name = "razboj_wide",
+    example = "//gpu/razboj:trace_wide",
+    lowered = ("raster_wide", "raster"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//issue/tx_valid=>issue",
+        "//rdata/tx_valid=>rdata",
+        "//raster/y=>y",
+        "//idle=>idle",
+    ],
+    from_tick = 0,
+    until = 200,
+    width = 8.2,
+)
+
+# Razboj drawing in tiles (issue 1255): a scene binned into a tile table
+# on a screen two tiles across, drawn into the tile buffer and written
+# out a row a burst. The rasteriser's netlist is replayed against the
+# run under nvc and Verilator, the tile buffer's memories included.
+waveform(
+    name = "razboj_tiles",
+    example = "//gpu/razboj:trace_tiles",
+    lowered = ("raster_tiles", "raster"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//issue/tx_valid=>issue",
+        "//rdata/tx_valid=>rdata",
+        "//wbeat/tx_valid=>wbeat",
+        "//raster/tile=>tile",
+        "//raster/wr=>wr",
+        "//idle=>idle",
+    ],
+    from_tick = 0,
+    until = 200,
+    width = 8.2,
+)
+
+# Razboj's depth test (issue 992): in one tile, a clear of depth and two
+# triangles that cross in depth under GL_LESS. The rasteriser's netlist
+# is replayed against the run under nvc and Verilator, the depth bank and
+# the test included.
+waveform(
+    name = "razboj_depth",
+    example = "//gpu/razboj:trace_depth",
+    lowered = ("raster_depth", "raster"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//issue/tx_valid=>issue",
+        "//rdata/tx_valid=>rdata",
+        "//raster/zon=>zon",
+        "//raster/y=>y",
+        "//idle=>idle",
+    ],
+    from_tick = 0,
+    until = 200,
+    width = 8.2,
+)
+
+# Razboj's blending (issue 993): in one tile, a backdrop, then a list
+# without a clear, so the tile is loaded from the framebuffer, of two
+# triangles blended at their alpha, one alpha-tested, and a rectangle
+# masked to one channel. The rasteriser's netlist is replayed against the
+# run under nvc and Verilator: the load, the colour bank's copy, the
+# blend, the alpha test and the mask.
+waveform(
+    name = "razboj_blend",
+    example = "//gpu/razboj:trace_blend",
+    lowered = ("raster_blend", "raster"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//issue/tx_valid=>issue",
+        "//rdata/tx_valid=>rdata",
+        "//raster/load=>load",
+        "//raster/son=>son",
+        "//raster/y=>y",
+        "//idle=>idle",
+    ],
+    from_tick = 0,
+    until = 200,
+    width = 8.2,
+)
+
+# The demonstration's picture, rendered by Razboj and written by it.
+genrule(
+    name = "razboj_scene",
+    outs = ["scene.png"],
+    cmd = "RAZBOJ_PNG=$@ $(location //gpu/razboj:demo) > /dev/null",
+    tools = ["//gpu/razboj:demo"],
+)
+
+# An AXI4 link, peer to peer: the two trackers lowered, the five AXI
+# channels between them, and the answers out of order.
+waveform(
+    name = "axi",
+    example = "//lib/examples:ex_axi",
+    lowered = [
+        ("axi_host", "host"),
+        ("axi_per", "per"),
+    ],
+    signals = [
+        "//clocks/clk=>clk",
+        "//issue/tx_valid=>issue",
+        "//issue/tx_data/addr=>issue_addr",
+        "//grant/tx_valid=>grant",
+        "//grant/tx_data/id=>grant_id",
+        "//ar/tx_valid=>ar",
+        "//ar/tx_data/id=>ar_id",
+        "//aw/tx_valid=>aw",
+        "//w/tx_valid=>w",
+        "//w/tx_data/last=>w_last",
+        "//req/tx_valid=>req",
+        "//req/tx_data/id=>req_id",
+        "//r/tx_valid=>r",
+        "//r/tx_data/id=>r_id",
+        "//r/tx_data/last=>r_last",
+        "//b/tx_valid=>b",
+        "//b/tx_data/id=>b_id",
+        "//host/busy=>busy",
+    ],
+    until = 109,
+)
+
+# An AXI4 router: one host, three peripherals at three ranges, and a
+# fourth address that is nobody's, answered by the router itself.
+waveform(
+    name = "axi_router",
+    example = "//lib/examples:ex_axi_router",
+    lowered = ("axi_router", "router"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//ar/tx_valid=>ar",
+        "//ar/tx_data/addr=>ar_addr",
+        "//aw/tx_valid=>aw",
+        "//aw/tx_data/addr=>aw_addr",
+        "//ars_0/tx_valid=>ar0",
+        "//ars_1/tx_valid=>ar1",
+        "//aws_2/tx_valid=>aw2",
+        "//router/rerr=>rerr",
+        "//router/berr=>berr",
+        "//r/tx_valid=>r",
+        "//r/tx_data/id=>r_id",
+        "//r/tx_data/resp=>r_resp",
+        "//r/tx_data/last=>r_last",
+        "//b/tx_valid=>b",
+        "//b/tx_data/id=>b_id",
+        "//b/tx_data/resp=>b_resp",
+    ],
+    until = 109,
+)
+
+# An AXI4 arbiter: two hosts writing four beats each at the same
+# time, the write data channel held for one burst and then the other,
+# and each answer going home by the tag above its identifier.
+waveform(
+    name = "axi_arbiter",
+    example = "//lib/examples:ex_axi_arbiter",
+    lowered = ("axi_arbiter", "arbiter"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//aws_0/tx_valid=>aw0",
+        "//aws_1/tx_valid=>aw1",
+        "//ws_0/tx_valid=>w0",
+        "//ws_1/tx_valid=>w1",
+        "//arbiter/wbusy=>wbusy",
+        "//arbiter/wsel=>wsel",
+        "//w/tx_valid=>w",
+        "//w/tx_data/data=>w_data",
+        "//w/tx_data/last=>w_last",
+        "//b/tx_valid=>b",
+        "//b/tx_data/id=>b_id",
+        "//bs_0/tx_valid=>b0",
+        "//bs_1/tx_valid=>b1",
+    ],
+    from_tick = 15,
+    until = 75,
+)
+
+# An AXI4 to AXI-Lite bridge of two peripherals: bursts split into
+# transactions, two register banks, and a hole the bridge answers.
+waveform(
+    name = "axi_lite",
+    example = "//lib/examples:ex_axi_lite",
+    lowered = [
+        ("axi_lite_bridge", "bridge"),
+        ("lite_regs0", "regs0"),
+        ("lite_regs1", "regs1"),
+    ],
+    signals = [
+        "//clocks/clk=>clk",
+        "//aw/rx_valid=>aw",
+        "//ar/rx_valid=>ar",
+        "//bridge/busy=>busy",
+        "//bridge/sel=>sel",
+        "//bridge/left=>left",
+        "//aw0/tx_valid=>aw0",
+        "//ar0/tx_valid=>ar0",
+        "//aw1/tx_valid=>aw1",
+        "//ar1/tx_valid=>ar1",
+        "//r/tx_valid=>r",
+        "//r/tx_data/resp=>r_resp",
+        "//r/tx_data/last=>r_last",
+        "//b/tx_valid=>b",
+        "//b/tx_data/resp=>b_resp",
+    ],
+    until = 169,
+)
+
+# A host on AXI4 pins: the write's address phase and beats handed to the
+# link's channels, and the response handed back.
+waveform(
+    name = "axi_pins",
+    example = "//lib/examples:ex_axi_pins",
+    lowered = ("axi_pins", "pins"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//inp_pins_awvalid=>awvalid",
+        "//outp_awready=>awready",
+        "//inp_pins_wvalid=>wvalid",
+        "//outp_wready=>wready",
+        "//inp_pins_wlast=>wlast",
+        "//outp_aw/tx_valid=>aw",
+        "//outp_w/tx_valid=>w",
+        "//outp_bvalid=>bvalid",
+        "//inp_pins_bready=>bready",
+        "//outp_bid=>bid",
+    ],
+    until = 19,
+    width = 7.4,
+)
+
+# The link's peripheral end on a peripheral's AXI4 pins (issue 1023): a
+# write's address phase and beats taken off the link's channels as the
+# peripheral is ready, and its response sent back on the link.
+waveform(
+    name = "axi_per_pins",
+    example = "//lib/examples:ex_axi_per_pins",
+    lowered = ("axi_per_pins", "pins"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//inp_aw/tx_valid=>aw",
+        "//outp_awvalid=>awvalid",
+        "//inp_pins_awready=>awready",
+        "//inp_w/tx_valid=>w",
+        "//outp_wvalid=>wvalid",
+        "//outp_wlast=>wlast",
+        "//inp_pins_bvalid=>bvalid",
+        "//outp_bready=>bready",
+        "//outp_b/tx_valid=>b",
+    ],
+    until = 24,
+    width = 7.4,
+)
+
+# An I2C master: the address going out a bit at a time, the device's
+# acknowledge, and the clock the device stretches.
+waveform(
+    name = "i2c",
+    example = "//lib/examples:ex_i2c",
+    lowered = ("i2c", "i2c"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//scl_low=>scl_low",
+        "//sda_low=>sda_low",
+        "//scl_in=>scl_in",
+        "//sda_in=>sda_in",
+        "//i2c/busy=>busy",
+        "//i2c/shift=>shift",
+        "//i2c/nack=>nack",
+        "//irq=>irq",
+    ],
+    from_tick = 59,
+    until = 219,
+    width = 17.0,
+)
+
+# An MDIO master: the end of a read frame, the master letting go of
+# the line at the turnaround and the PHY driving the word.
+waveform(
+    name = "mdio",
+    example = "//lib/examples:ex_mdio",
+    lowered = ("mdio", "mdio"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//mdc=>mdc",
+        "//mdio_oe=>mdio_oe",
+        "//mdio_out=>mdio_out",
+        "//mdio_in=>mdio_in",
+        "//mdio/busy=>busy",
+        "//mdio/rx=>rx",
+    ],
+    from_tick = 869,
+    until = 1047,
+    width = 17.0,
+)
+
+# The simplest AXI peripheral: a register of one word, the first write
+# and its read back.
+waveform(
+    name = "axi_reg",
+    example = "//lib/examples:ex_axi_reg",
+    lowered = ("axi_reg", "reg"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//bus_req/rx_valid=>req",
+        "//bus_w/rx_valid=>wd",
+        "//bus_ans/tx_valid=>ans",
+        "//bus_r/tx_valid=>rb",
+        "//reg/word=>word",
+    ],
+    until = 33,
+    width = 7.4,
+)
+
+# An AXI link reaching a Wishbone peripheral: the bridge lowered, and
+# the first write offered, taken and acknowledged.
+waveform(
+    name = "axi_wb",
+    example = "//lib/examples:ex_axi_wb",
+    lowered = ("axi_wb", "bridge"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//bus_req/rx_valid=>req",
+        "//bus_w/rx_valid=>wd",
+        "//bridge/stage=>stage",
+        "//cyc=>cyc",
+        "//stb=>stb",
+        "//stall=>stall",
+        "//ack=>ack",
+        "//bus_ans/tx_valid=>ans",
+    ],
+    until = 35,
+    width = 8.2,
+)
+
+# Ethernet behind AXI-Lite: the transmitter, the receiver and the
+# peripheral, on a wire looped back with one frame corrupted.
+waveform(
+    name = "eth",
+    example = "//lib/examples:ex_eth",
+    lowered = [
+        ("eth_lite", "lite"),
+        ("eth_tx", "mac_tx"),
+        ("eth_rx", "mac_rx"),
+    ],
+    signals = [
+        "//clocks/clk=>clk",
+        "//tx/rx_valid=>tx_valid",
+        "//mac_tx/whole=>whole",
+        "//mac_tx/sent=>sent",
+        "//tx_en=>tx_en",
+        "//rx_dv=>rx_dv",
+        "//mac_rx/receiving=>receiving",
+        "//mac_rx/full=>full",
+        "//rx/rx_valid=>rx_valid",
+        "//irq=>irq",
+    ],
+    from_tick = 115,
+    until = 325,
+)
+
+# Video for an HDMI encoder chip behind AXI-Lite, and the I2C master
+# that configures the chip: a small mode, painted and shown.
+waveform(
+    name = "hdmi",
+    example = "//lib/examples:ex_hdmi",
+    lowered = [
+        ("hdmi_video", "video"),
+        ("hdmi_i2c", "master"),
+    ],
+    signals = [
+        "//bus_w/rx_valid=>w",
+        "//vsync=>vsync",
+        "//hsync=>hsync",
+        "//de=>de",
+        "//nreset=>nreset",
+        "//scl_low=>scl_low",
+        "//sda_low=>sda_low",
+        "//sda_in=>sda",
+        "//done=>done",
+    ],
+    width = 17.0,
+)
+
+# Accepting many AXI transactions and forwarding them for processing:
+# three in flight over four identifiers, recycled.
+waveform(
+    name = "axi_serve",
+    example = "//lib/examples:ex_axi_serve",
+    signals = [
+        "//clocks/clk=>clk",
+        "//issue/tx_valid=>issue",
+        "//grant/tx_data/id=>grant_id",
+        "//ar/tx_valid=>ar",
+        "//ar/tx_data/id=>ar_id",
+        "//req/tx_valid=>req",
+        "//req/tx_data/id=>req_id",
+        "//rb/tx_valid=>answer",
+        "//rb/tx_data/id=>answer_id",
+        "//r/tx_valid=>r",
+        "//r/tx_data/id=>r_id",
+        "//release/tx_valid=>release",
+        "//release/tx_data/id=>release_id",
+        "//host/busy=>busy",
+    ],
+    from_tick = 39,
+    until = 103,
+)
+
+# A foreign module inside a netlist: the netlist is simulated with the
+# hand-written module's own source, against the trace its Rust model
+# wrote.
+waveform(
+    name = "blackbox",
+    example = "//lib/examples:ex_blackbox",
+    foreign_verilog = ["//lib/examples:blinker.v"],
+    foreign_vhdl = ["//lib/examples:blinker.vhd"],
+    lowered = ("blackbox", "top"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//enable=>enable",
+        "//top/hold/held=>held",
+        "//top/blink/tick=>tick",
+        "//count=>count",
+    ],
+    until = 59,
+)
+
+# Unregistered channels (issue 1293): the same chain of three stages,
+# its inner channels registered and unregistered, both netlists
+# checked against the run.
+waveform(
+    name = "unreg",
+    example = "//lib/examples:ex_unreg",
+    lowered = [
+        ("chain", "chain"),
+        ("chain_u", "chainu"),
+    ],
+    signals = [
+        "//clocks/clk=>clk",
+        "//req/tx_valid=>req",
+        "//res/rx_valid=>res",
+        "//requ/tx_valid=>req_u",
+        "//resu/rx_valid=>res_u",
+        "//chainu/ans/full=>full_u",
+    ],
+    until = 28,
+)
+
+waveform(
+    name = "compose",
+    example = "//lib/examples:ex_compose",
+    lowered = ("top", "top"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//ops/rx_valid=>ops_valid",
+        "//ops/rx_data/tag=>ops_tag",
+        "//ops/rx_data/value=>ops_value",
+        "//ops/rx_ready=>ops_ready",
+        "//xs/rx_valid=>xs_valid",
+        "//xs/rx_data/tag=>xs_tag",
+        "//xs/rx_data/value=>xs_value",
+        "//xs/rx_ready=>xs_ready",
+        "//ys/rx_valid=>ys_valid",
+        "//ys/rx_data/tag=>ys_tag",
+        "//ys/rx_data/value=>ys_value",
+        "//ys/rx_ready=>ys_ready",
+        "//top/station/occ0=>occ0",
+        "//top/station/occ1=>occ1",
+        "//top/station/occ2=>occ2",
+        "//top/alu/slots=>slots",
+        "//out/rx_valid=>out_valid",
+        "//out/rx_data/tag=>out_tag",
+        "//out/rx_data/value=>out_value",
+        "//out/rx_ready=>out_ready",
+    ],
+    until = 53,
+)
+
+# Two clocks in one netlist, each port checked against its own edge.
+# The unit is two counters, one per clock, so what the co-simulation
+# proves is the timing of the check rather than any logic: before
+# issue 131 the slow port disagreed for part of every period.
+waveform(
+    name = "twoclock",
+    example = "//lib/examples:ex_twoclock",
+    lowered = ("two", "two"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//clocks/slow=>slow",
+        "//go=>go",
+        "//go_slow=>go_slow",
+        "//a=>a",
+        "//b=>b",
+    ],
+    until = 53,
+)
+
+# The same two counters with the slow one first, so the ports file lists
+# `slow` before `clk`; `go` and `a`, on `clk`, are replayed and checked
+# on `clk` (issue 888). On the old reading both tests fail.
+waveform(
+    name = "slowfirst",
+    example = "//lib/examples:ex_slowfirst",
+    lowered = ("slowfirst", "slowfirst"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//clocks/slow=>slow",
+        "//go=>go",
+        "//go_slow=>go_slow",
+        "//a=>a",
+        "//b=>b",
+    ],
+)
+
+# An SPI master reading a flash chip: the select held, the clock, the
+# byte going out and the byte coming back.
+waveform(
+    name = "spi",
+    example = "//lib/examples:ex_spi",
+    lowered = ("spi", "spi"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//cs_n=>cs_n",
+        "//sclk=>sclk",
+        "//mosi=>mosi",
+        "//miso=>miso",
+        "//spi/txb=>txb",
+        "//spi/rxb=>rxb",
+        "//spi/busy=>busy",
+    ],
+    from_tick = 167,
+    until = 307,
+)
+
+# The system control block: the reset a program asked for, held for
+# eight cycles, with the cause and the scratch word coming through it.
+waveform(
+    name = "syscon",
+    example = "//lib/examples:ex_syscon",
+    lowered = ("syscon", "syscon"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//por=>por",
+        "//button=>button",
+        "//srst=>srst",
+        "//block/cause=>cause",
+        "//block/hold=>hold",
+        "//block/scratch=>scratch",
+    ],
+    from_tick = 133,
+    until = 187,
+)
+
+# The watchdog, at the end of its second timeout: the count reaching
+# zero with the warning already standing, the reset asked for, and the
+# count reloaded so that the request is eight cycles and not forever.
+waveform(
+    name = "wdog",
+    example = "//lib/examples:ex_wdog",
+    lowered = ("wdog", "wdog"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//irq=>irq",
+        "//rst=>rst",
+        "//block/count=>count",
+        "//block/status=>status",
+        "//block/hold=>hold",
+    ],
+    from_tick = 549,
+    until = 599,
+)
+
+# One thing run twice and compared: a tee hands each word to both
+# copies, a check compares what they answer, and one copy is given a
+# different addend halfway through.
+waveform(
+    name = "redundant",
+    example = "//lib/examples:ex_redundant",
+    lowered = [
+        ("tee", "tee"),
+        ("check", "check"),
+    ],
+    signals = [
+        "//clocks/clk=>clk",
+        "//inp/tx_data/v=>inp",
+        "//out/tx_data/v=>out",
+        "//differs=>differs",
+    ],
+)
+
+# A register map declared once: the control word written, the counter
+# running, and a read of a word the map does not name.
+waveform(
+    name = "regmap",
+    example = "//lib/examples:ex_regmap",
+    lowered = ("knobs", "knobs"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//bus_aw/tx_valid=>aw",
+        "//bus_ar/tx_valid=>ar",
+        "//bus_r/tx_valid=>r",
+        "//knobs/run=>run",
+        "//knobs/step=>step",
+        "//knobs/count=>count",
+    ],
+    from_tick = 9,
+    until = 69,
+)
+
+# The SD host moving two blocks each way through memory, the card's
+# blocks back to back (issue 912): the second block's start on the
+# data lines, the ring between the lines and the store engine.
+waveform(
+    name = "sddma",
+    example = "//lib/examples:ex_sddma",
+    lowered = ("sd_dma", "sd"),
+    signals = [
+        "//sd/phase=>phase",
+        "//dma_out/tx_valid=>word",
+        "//sd/fill=>fill",
+        "//sd/left=>left",
+        "//store_busy=>store_busy",
+    ],
+    from_tick = 39190,
+    until = 40190,
+)
+
+# The SD host sending a command: the card clock, the command line
+# driven bit by bit with the host holding it, the phase and the bit
+# count, over the start of CMD0.
+waveform(
+    name = "sd",
+    example = "//lib/examples:ex_sd",
+    lowered = ("sd", "sd"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//sclk=>sclk",
+        "//cmd_oe=>cmd_oe",
+        "//cmd_out=>cmd_out",
+        "//sd/phase=>phase",
+        "//sd/n=>n",
+        "//sd/crc7=>crc7",
+    ],
+    from_tick = 17,
+    until = 77,
+)
+
+# The entropy source starting: the rings' samples arriving once the
+# run bit is set, the extractor keeping a bit of a pair, and the word
+# filling.
+waveform(
+    name = "trng",
+    example = "//lib/examples:ex_trng",
+    lowered = ("trng", "trng"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//en=>en",
+        "//raw=>raw",
+        "//trng/have=>have",
+        "//trng/first=>first",
+        "//trng/nbits=>nbits",
+        "//trng/runlen=>runlen",
+        "//trng/count=>count",
+    ],
+    from_tick = 9,
+    until = 69,
+)
+
+# The adaptive proportion test tripped by a biased source, checked in
+# the netlist through the trip (issue 918).
+waveform(
+    name = "trng_apt",
+    example = "//lib/examples:ex_trng_apt",
+    lowered = ("trng_apt", "trng"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//raw=>raw",
+        "//trng/aptn=>aptn",
+        "//trng/aptb=>aptb",
+        "//trng/aptfault=>aptfault",
+        "//trng/fault=>fault",
+    ],
+    from_tick = 1960,
+    until = 2000,
+)
+
+# The trace buffer filling and freezing: the ring walking, the count
+# stopping at the ring's size, and the halt taking the run bit.
+waveform(
+    name = "tracer",
+    example = "//lib/examples:ex_tracer",
+    lowered = ("tracer", "tracer"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//take=>take",
+        "//halt=>halt",
+        "//tracer/ctrl=>ctrl",
+        "//tracer/head=>head",
+        "//tracer/count=>count",
+        "//tracer/cursor=>cursor",
+    ],
+    until = 59,
+)
+
+# The configuration flash after the bitstream: the end of startup, the
+# four clocks the pins spend with the chip not selected, the window let
+# out of reset, and its first read. The startup block is a foreign
+# module, simulated from its own model in both languages.
+waveform(
+    name = "cfgflash",
+    example = "//lib/examples:ex_cfgflash",
+    foreign_verilog = ["//lib/parts:hdl/startup.v"],
+    foreign_vhdl = ["//lib/parts:hdl/startup.vhd"],
+    lowered = ("cfgflash", "cfgflash"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//flash/pins/phase=>phase",
+        "//cclk=>cclk",
+        "//flash/pins/pclk=>usrcclko",
+        "//cs_n=>cs_n",
+        "//w_rst=>w_rst",
+        "//w_cs_n=>w_cs_n",
+    ],
+    until = 59,
+)
+
+# A flash read as memory: the fast read command going out on the wires
+# under one select, and the word coming back on the bus.
+waveform(
+    name = "flashwin",
+    example = "//lib/examples:ex_flashwin",
+    lowered = ("flashwin", "flashwin"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//cs_n=>cs_n",
+        "//sclk=>sclk",
+        "//mosi=>mosi",
+        "//miso=>miso",
+        "//win/phase=>phase",
+    ],
+    from_tick = 39,
+    until = 119,
+)
+
+# A peripheral answered by a program: the transaction leaving on
+# `ask`, the wait, the answer coming back, and the bus told.
+waveform(
+    name = "remote",
+    example = "//lib/examples:ex_remote",
+    lowered = [
+        ("remote", "remote"),
+        ("remote_link", "remote_link"),
+    ],
+    signals = [
+        "//clocks/clk=>clk",
+        "//out/tx_valid=>ask",
+        "//tx/tx_valid=>byte",
+        "//tx_en=>tx_en",
+        "//wire/at=>at",
+        "//remote/busy=>busy",
+        "//remote/tag=>tag",
+    ],
+    from_tick = 3,
+    until = 93,
+)
+
+waveform(
+    name = "pwm",
+    example = "//lib/examples:ex_pwm",
+    lowered = ("pwm", "pwm"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//pwm/ctrl=>ctrl",
+        "//pwm/period=>period",
+        "//pwm/count=>count",
+        "//pins=>pins",
+    ],
+    from_tick = 99,
+    until = 179,
+)
+
+# Pins behind AXI-Lite: the direction set, a pin read through its
+# synchroniser, and an edge raising the interrupt and being cleared.
+waveform(
+    name = "gpio",
+    example = "//lib/examples:ex_gpio",
+    lowered = ("gpio", "gpio"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//pins=>pins",
+        "//drive=>drive",
+        "//dirs=>dirs",
+        "//gpio/sync1=>sync1",
+        "//gpio/status=>status",
+        "//irq=>irq",
+    ],
+    until = 199,
+)
+
+# One word behind two AXI-Lite links, each link one port of the unit:
+# a write on each side, a read on the other, then both writes at once.
+waveform(
+    name = "bundle",
+    example = "//lib/examples:ex_bundle",
+    lowered = ("shared", "shared"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//left_w/rx_valid=>left_w_valid",
+        "//left_w/rx_data=>left_w_data",
+        "//right_w/rx_valid=>right_w_valid",
+        "//right_w/rx_data=>right_w_data",
+        "//shared/word=>word",
+        "//left_r/tx_valid=>left_r_valid",
+        "//left_r/tx_data=>left_r_data",
+        "//right_r/tx_valid=>right_r_valid",
+        "//right_r/tx_data=>right_r_data",
+    ],
+)
+
+waveform(
+    name = "ports",
+    example = "//lib/examples:ex_ports",
+    lowered = ("ports", "top"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//inp_minuend/rx_valid=>minuend_valid",
+        "//inp_minuend/rx_data=>minuend_data",
+        "//inp_minuend/rx_ready=>minuend_ready",
+        "//inp_subtrahend/rx_valid=>subtrahend_valid",
+        "//inp_subtrahend/rx_data=>subtrahend_data",
+        "//inp_subtrahend/rx_ready=>subtrahend_ready",
+        "//top/diff/count=>count",
+        "//out_diff/rx_valid=>diff_valid",
+        "//out_diff/rx_data=>diff_data",
+        "//out_diff/rx_ready=>diff_ready",
+        "//out_borrow=>borrow",
+    ],
+)
+
+waveform(
+    name = "mem",
+    example = "//lib/examples:ex_mem",
+    lowered = ("scratch", "scratch"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//we=>we",
+        "//waddr=>waddr",
+        "//wdata=>wdata",
+        "//raddr=>raddr",
+        "//q=>q",
+    ],
+)
+
+waveform(
+    name = "imm",
+    example = "//lib/examples:ex_imm",
+    lowered = ("decoder", "dec"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//ir=>ir",
+        "//dec/value=>value",
+        "//dec/dest=>dest",
+        "//imm=>imm",
+        "//rd=>rd",
+    ],
+)
+
+waveform(
+    name = "mul",
+    example = "//lib/examples:ex_mul",
+    lowered = ("mac", "mac"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//a=>a",
+        "//b=>b",
+        "//clear=>clear",
+        "//mac/acc=>acc",
+        "//sum=>sum",
+    ],
+)
+
+waveform(
+    name = "wide",
+    example = "//lib/examples:ex_wide",
+    lowered = ("acc", "acc"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//clear=>clear",
+        "//mid=>mid",
+        "//top=>top",
+    ],
+)
+
+waveform(
+    name = "regs",
+    example = "//lib/examples:ex_regs",
+    lowered = ("tallies", "tallies"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//hits_0=>hits_0",
+        "//hits_1=>hits_1",
+        "//hits_2=>hits_2",
+        "//tallies/counts_0=>counts_0",
+        "//tallies/counts_1=>counts_1",
+        "//tallies/counts_2=>counts_2",
+        "//total=>total",
+    ],
+)
+
+waveform(
+    name = "lanes",
+    example = "//lib/examples:ex_lanes",
+    lowered = ("lanes", "lanes"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//xs_0=>xs_0",
+        "//xs_1=>xs_1",
+        "//xs_2=>xs_2",
+        "//lanes/lanes_0/got=>got_0",
+        "//lanes/lanes_1/got=>got_1",
+        "//lanes/lanes_2/got=>got_2",
+        "//ys_0=>ys_0",
+        "//ys_1=>ys_1",
+        "//ys_2=>ys_2",
+    ],
+)
+
+waveform(
+    name = "mesh",
+    example = "//lib/examples:ex_mesh",
+    lowered = ("mesh", "mesh"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//qx_in_0/rx_valid=>qin_0",
+        "//qx_in_1/rx_valid=>qin_1",
+        "//qx_in_2/rx_valid=>qin_2",
+        "//qx_in_3/rx_valid=>qin_3",
+        "//qx_in_4/rx_valid=>qin_4",
+        "//qx_in_5/rx_valid=>qin_5",
+        "//qx_out_0/rx_valid=>qout_0",
+        "//qx_out_1/rx_valid=>qout_1",
+        "//qx_out_2/rx_valid=>qout_2",
+        "//qx_out_3/rx_valid=>qout_3",
+        "//qx_out_4/rx_valid=>qout_4",
+        "//qx_out_5/rx_valid=>qout_5",
+        "//px_out_0/rx_valid=>pout_0",
+        "//px_out_5/rx_valid=>pout_5",
+    ],
+    until = 21,
+)
+
+waveform(
+    name = "tap",
+    example = "//lib/examples:ex_tap",
+    lowered = ("tap", "tap"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//inp/rx_valid=>inp_valid",
+        "//inp/rx_data=>inp",
+        "//inp/rx_ready=>inp_ready",
+        "//out/rx_valid=>out_valid",
+        "//out/rx_data=>out",
+        "//tap/seen=>seen",
+        "//tap/passed=>passed",
+    ],
+)
+
+waveform(
+    name = "buffer",
+    example = "//lib/examples:ex_buffer",
+    lowered = ("buffer8", "buffer"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//tx_valid=>tx_valid",
+        "//tx_data=>tx_data",
+        "//tx_ready=>tx_ready",
+        "//rx_valid=>rx_valid",
+        "//rx_data=>rx_data",
+        "//rx_ready=>rx_ready",
+        "//buffer/head_full=>head_full",
+        "//buffer/tail_full=>tail_full",
+    ],
+)
+
+waveform(
+    name = "wire",
+    example = "//lib/examples:ex_wire",
+    lowered = ("divider", "div"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//pulse=>pulse",
+        "//div/n=>n",
+        "//div/counting=>counting",
+        "//div/wrap=>wrap",
+        "//tick=>tick",
+    ],
+)
+
+waveform(
+    name = "foreign",
+    example = "//lib/examples:ex_foreign",
+    signals = [
+        "//clocks/clk=>clk",
+        "//inp/rx_ready=>inp_ready",
+        "//inp/rx_data=>inp",
+        "//out/rx_data=>out",
+        "//vinp/rx_data=>vinp",
+        "//vout/rx_data=>vout",
+        "//hinp/rx_data=>hinp",
+        "//hout/rx_data=>hout",
+        "//stage/count=>count",
+    ],
+)
+
+waveform(
+    name = "names",
+    example = "//lib/examples:ex_names",
+    lowered = ("names", "names"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//go=>go",
+        "//step=>step",
+        "//counter/count=>count",
+        "//counter/last=>last",
+        "//sum=>sum",
+        "//odd=>odd",
+    ],
+)
+
+# A whole AXI-Lite link made in one line between a relay and a word
+# (issue 498).
+waveform(
+    name = "link",
+    example = "//lib/examples:ex_link",
+    lowered = ("slice", "slice"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//bus_w/rx_valid=>bus_w_valid",
+        "//bus_w/rx_data=>bus_w_data",
+        "//slice/word/word=>word",
+        "//bus_r/tx_valid=>bus_r_valid",
+        "//bus_r/tx_data=>bus_r_data",
+    ],
+)
+
+# A struct of ports that holds two structs of ports, passed whole to a
+# child that reads through it: ex_bundle's word behind a unit of units
+# (issue 498).
+waveform(
+    name = "nested",
+    example = "//lib/examples:ex_nested",
+    lowered = ("mailbox", "mailbox"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//links_left_w/rx_valid=>left_w_valid",
+        "//links_left_w/rx_data=>left_w_data",
+        "//links_right_w/rx_valid=>right_w_valid",
+        "//links_right_w/rx_data=>right_w_data",
+        "//mailbox/shared_rw/word=>word",
+        "//links_left_r/tx_valid=>left_r_valid",
+        "//links_left_r/tx_data=>left_r_data",
+        "//links_right_r/tx_valid=>right_r_valid",
+        "//links_right_r/tx_data=>right_r_data",
+    ],
+)
+
+# A side declared in another crate, passed whole to a child: the
+# pins of ex_gpio inside a unit of units (issue 498).
+waveform(
+    name = "side",
+    example = "//lib/examples:ex_side",
+    lowered = ("wrapped", "wrapped"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//pins=>pins",
+        "//drive=>drive",
+        "//dirs=>dirs",
+        "//wrapped/gpio/status=>status",
+        "//irq=>irq",
+    ],
+    until = 199,
+)
+
+# A child's inputs held at constants by its parent (issue 498).
+waveform(
+    name = "tie",
+    example = "//lib/examples:ex_tie",
+    lowered = ("stepped", "stepped"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//x=>x",
+        "//stepped/acc/total=>total",
+        "//y=>y",
+    ],
+)
+
+# A check, an assumption and a cover point, which nvc checks in the
+# VHDL and Verilator in the Verilog while each replays the run (issue
+# 502).
+waveform(
+    name = "formal",
+    example = "//lib/examples:ex_formal",
+    lowered = ("digit", "digit"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//step=>step",
+        "//digit/count=>count",
+        "//wrap=>wrap",
+    ],
+)
+
+# begin{formal}
+# The digit's statements proved for every input, not only checked on
+# the run (issue 581): the proof as written must hold, and two broken
+# copies must fail, or the proof proves nothing. One copy has the
+# assumption removed, so a step of three is allowed, nine and three
+# wrap to two, and the check that a wrap lands on nought or one fails;
+# the other tightens a check to a count no higher
+# than eight, which nine breaks. The proof runs `abc pdr` inside the
+# pinned yosys-abc and needs no solver; the bounded runs, which give a
+# trace, and the cover run use the pinned z3.
+genrule(
+    name = "formal_broken",
+    srcs = [":formal.v"],
+    outs = [
+        "formal_noassume.v",
+        "formal_tight.v",
+    ],
+    cmd = " && ".join([
+        "grep -v 'assume ((step' $< > $(location formal_noassume.v)",
+        "sed \"s/assert ((count <= 4'h9))/assert ((count <= 4'h8))/\" $< " +
+        "> $(location formal_tight.v)",
+        "! cmp -s $< $(location formal_noassume.v)",
+        "! cmp -s $< $(location formal_tight.v)",
+    ]),
+)
+
+formal_test(
+    name = "formal_prove_test",
+    top = "digit",
+    verilog = ":formal.v",
+)
+
+formal_test(
+    name = "formal_noassume_prove_test",
+    expect = 2,
+    top = "digit",
+    verilog = ":formal_noassume.v",
+)
+
+formal_test(
+    name = "formal_tight_prove_test",
+    expect = 2,
+    top = "digit",
+    verilog = ":formal_tight.v",
+)
+
+formal_test(
+    name = "formal_bmc_test",
+    mode = "bmc",
+    top = "digit",
+    verilog = ":formal.v",
+)
+
+formal_test(
+    name = "formal_noassume_bmc_test",
+    expect = 2,
+    mode = "bmc",
+    top = "digit",
+    verilog = ":formal_noassume.v",
+)
+
+formal_test(
+    name = "formal_tight_bmc_test",
+    expect = 2,
+    mode = "bmc",
+    top = "digit",
+    verilog = ":formal_tight.v",
+)
+
+formal_test(
+    name = "formal_cover_test",
+    mode = "cover",
+    top = "digit",
+    verilog = ":formal.v",
+)
+
+# The same runs as build steps, for the document that includes their
+# logs and the counterexample's trace: the proof that holds, the
+# tightened check failing its proof, and the bounded search that finds
+# the cycle it fails in.
+formal_run(
+    name = "formal_proof",
+    top = "digit",
+    verilog = ":formal.v",
+)
+
+formal_run(
+    name = "formal_tight_proof",
+    expect = 2,
+    top = "digit",
+    verilog = ":formal_tight.v",
+)
+
+formal_run(
+    name = "formal_tight_search",
+    expect = 2,
+    mode = "bmc",
+    top = "digit",
+    verilog = ":formal_tight.v",
+)
+
+formal_run(
+    name = "formal_covered",
+    mode = "cover",
+    top = "digit",
+    verilog = ":formal.v",
+)
+
+# The two traces drawn: the counterexample the bounded search found
+# for the tightened check, and the path to the cover point.
+formal_trace(
+    name = "formal_cex",
+    run = ":formal_tight_search",
+    signals = [
+        "//digit/clk=>clk",
+        "//digit/step=>step",
+        "//digit/count=>count",
+        "//digit/over=>over",
+    ],
+    width = 3.3,
+)
+
+formal_trace(
+    name = "formal_reach",
+    run = ":formal_covered",
+    signals = [
+        "//digit/clk=>clk",
+        "//digit/step=>step",
+        "//digit/count=>count",
+        "//digit/over=>over",
+    ],
+    width = 3.3,
+)
+# end{formal}
+
+# Helpers from another file of the crate, taking and giving a struct
+# (issue 504).
+waveform(
+    name = "helpers",
+    example = "//lib/examples:ex_helpers",
+    lowered = ("coder", "coder"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//a=>a",
+        "//b=>b",
+        "//code=>code",
+        "//coder/held=>held",
+        "//mixed=>mixed",
+    ],
+)
+
+# Names VHDL or SystemVerilog reserve, escaped in both netlists, and
+# the testbench still binding each port to its trace (issue 497).
+waveform(
+    name = "reserved",
+    example = "//lib/examples:ex_reserved",
+    lowered = ("latch", "latch"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//next=>next",
+        "//begin=>begin",
+        "//latch/signal_rw=>signal",
+        "//out=>out",
+    ],
+)
+
+# A sequence that walks a store and puts each word until it is taken,
+# its address moving on the take, against a consumer that stalls at
+# random (issue 755).
+waveform(
+    name = "put",
+    example = "//lib/examples:ex_put",
+    lowered = ("walker", "walker"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//words/tx_valid=>word_valid",
+        "//words/rx_data=>word",
+        "//walker/at=>at",
+        "//out/tx_valid=>out_valid",
+        "//out/tx_ready=>out_ready",
+        "//out/tx_data=>out",
+    ],
+    until = 59,
+)
+
+# A process of several waits, lowered to a state machine whose
+# register the unit does not declare (issue 501).
+waveform(
+    name = "seq",
+    example = "//lib/examples:ex_seq",
+    lowered = ("stepper", "stepper"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//words/rx_valid=>word_valid",
+        "//words/rx_data=>word",
+        "//words/rx_ready=>word_ready",
+        "//go=>go",
+        "//stepper/held=>held",
+        "//sums/tx_valid=>sum_valid",
+        "//sums/tx_data=>sum",
+    ],
+)
+
+# A for of a constant count that waits, a counted loop: its states once
+# and a register counting the turns (issue 501).
+waveform(
+    name = "serial",
+    example = "//lib/examples:ex_serial",
+    lowered = ("serial", "serial"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//bytes/rx_valid=>byte_valid",
+        "//bytes/rx_data=>byte",
+        "//bytes/rx_ready=>byte_ready",
+        "//serial/sr=>sr",
+        "//bits/tx_valid=>bit_valid",
+        "//bits/tx_data=>bit",
+    ],
+)
+
+# A wait under if, a state the process visits when the condition holds
+# (issue 501).
+waveform(
+    name = "frame",
+    example = "//lib/examples:ex_frame",
+    lowered = ("framer", "framer"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//bytes/rx_valid=>byte_valid",
+        "//bytes/rx_data=>byte",
+        "//parity=>parity",
+        "//framer/sr=>sr",
+        "//line/tx_valid=>line_valid",
+        "//line/tx_data=>line",
+    ],
+)
+
+# An output set in some states of a process and held through the rest
+# (issue 501).
+waveform(
+    name = "hold",
+    example = "//lib/examples:ex_hold",
+    lowered = ("hold", "stepper"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//words/rx_valid=>word_valid",
+        "//words/rx_data=>word",
+        "//go=>go",
+        "//stepper/held=>held",
+        "//phase=>phase",
+        "//busy=>busy",
+        "//sums/tx_valid=>sum_valid",
+        "//sums/tx_data=>sum",
+    ],
+)
+
+# A counted loop bounded by a register (issue 611).
+waveform(
+    name = "repeat",
+    example = "//lib/examples:ex_repeat",
+    lowered = ("repeater", "repeater"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//jobs/rx_valid=>job_valid",
+        "//jobs/rx_data=>job",
+        "//repeater/times=>times",
+        "//out/tx_valid=>out_valid",
+        "//out/tx_data=>out",
+    ],
+)
+
+# An address map as a trait constant, read by the lowering when
+# `lowered` runs (issue 593).
+waveform(
+    name = "map",
+    example = "//lib/examples:ex_map",
+    lowered = ("decode", "decode"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//addr=>addr",
+        "//sel=>sel",
+        "//none=>none",
+        "//decode/hits=>hits",
+    ],
+)
+
+waveform(
+    name = "rename",
+    example = "//lib/examples:ex_rename",
+    lowered = ("queue", "rename"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//push=>push",
+        "//word=>word",
+        "//pop=>pop",
+        "//queue/nxt=>nxt",
+        "//queue/held=>held",
+        "//queue/count=>count",
+        "//head=>head",
+        "//full=>full",
+    ],
+)
+
+waveform(
+    name = "arith",
+    example = "//lib/examples:ex_arith",
+    lowered = ("arith", "arith"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//a=>a",
+        "//b=>b",
+        "//arith/prod=>prod",
+        "//arith/rest=>rest",
+        "//arith/neg=>neg",
+        "//arith/sum=>sum",
+    ],
+    until = 33,
+)
+
+waveform(
+    name = "valif",
+    example = "//lib/examples:ex_valif",
+    lowered = ("choose", "choose"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//op=>op",
+        "//a=>a",
+        "//b=>b",
+        "//choose/by_if=>by_if",
+        "//choose/by_match=>by_match",
+    ],
+    until = 33,
+)
+
+waveform(
+    name = "range",
+    example = "//lib/examples:ex_range",
+    lowered = ("classify", "classify"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//c=>c",
+        "//classify/by_select=>by_select",
+        "//classify/by_match=>by_match",
+        "//classify/digit=>digit",
+    ],
+    until = 49,
+)
+
+waveform(
+    name = "cast",
+    example = "//lib/examples:ex_cast",
+    lowered = ("ring", "ring"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//put=>put",
+        "//take=>take",
+        "//d=>d",
+        "//ring/wp=>wp",
+        "//ring/rp=>rp",
+        "//q=>q",
+    ],
+    from_tick = 499,
+    until = 539,
+)
+
+waveform(
+    name = "loop",
+    example = "//lib/examples:ex_loop",
+    lowered = ("merge", "merge"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//ins_0/rx_valid=>ins_0",
+        "//ins_1/rx_valid=>ins_1",
+        "//ins_2/rx_valid=>ins_2",
+        "//out/rx_valid=>out",
+        "//out/rx_data=>out_data",
+        "//merge/count=>count",
+    ],
+    until = 49,
+)
+
+waveform(
+    name = "litfn",
+    example = "//lib/examples:ex_litfn",
+    lowered = ("crc7", "crc7"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//start=>start",
+        "//din=>din",
+        "//crc7/crc=>crc",
+        "//sum=>sum",
+    ],
+    from_tick = 61,
+    until = 91,
+)
+
+waveform(
+    name = "fn",
+    example = "//lib/examples:ex_fn",
+    lowered = ("gray", "gray"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//step=>step",
+        "//gray/n=>n",
+        "//code=>code",
+        "//wrap=>wrap",
+        "//swap=>swap",
+    ],
+)
+
+waveform(
+    name = "twoproc",
+    example = "//lib/examples:ex_twoproc",
+    lowered = ("sampler", "sampler"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//enable=>enable",
+        "//sampler/n=>n",
+        "//sampler/half=>half",
+        "//q=>q",
+    ],
+)
+
+# The interrupt controller on the board, in Vreteno's document: three
+# sources claimed in priority order, and the edge source's second
+# pulse held through its service.
+waveform(
+    name = "plic",
+    example = "//lib/examples:ex_plic",
+    lowered = ("plic3", "plic"),
+    from_tick = 11,
+    until = 59,
+    width = 15.5,
+    signals = [
+        "//clocks/clk=>clk",
+        "//srcs_0=>src1",
+        "//srcs_1=>src2",
+        "//srcs_2=>src3",
+        "//plic/pending=>pending",
+        "//plic/active=>active",
+        "//bus_ar/rx_valid=>ar",
+        "//bus_r/tx_valid=>r",
+        "//bus_r/tx_data/data=>r_data",
+        "//irq=>irq",
+    ],
+)
+
+# Sv32 translation in Vreteno's document: a fetch that walks one level
+# and fills an entry, then hits, each answered a cycle after it asks.
+waveform(
+    name = "mmu",
+    example = "//lib/examples:ex_mmu",
+    lowered = ("mmu8", "mmu"),
+    from_tick = 7,
+    until = 36,
+    width = 15.5,
+    signals = [
+        "//clocks/clk=>clk",
+        "//ireq/req=>ireq",
+        "//ireq/va=>va",
+        "//mmu/busy=>busy",
+        "//ptw/tx_valid=>ptw",
+        "//ptw/tx_data=>ptw_addr",
+        "//pte/rx_valid=>pte",
+        "//ires/ok=>ok",
+        "//ires/pa=>pa",
+    ],
+)
+
+# Vreteno: the RV32IMAC core, its run and the opening cycles of its
+# waveform, in its own document.
+waveform(
+    name = "vreteno",
+    example = "//cpu/vreteno:vreteno",
+    lowered = [
+        ("vreteno", "cpu"),
+        ("router", "router"),
+        ("dmem", "dmem"),
+        ("timer", "timer"),
+        ("uart4", "uart"),
+        ("ubridge", "ubridge"),
+    ],
+    until = 29,
+    signals = [
+        "//clocks/clk=>clk",
+        "//rst=>rst",
+        "//cpu/pc=>pc",
+        "//instr=>instr",
+        "//wb/done=>done",
+        "//wb/rd=>rd",
+        "//wb/val=>val",
+        "//halt=>halt",
+    ],
+)
+
+# The A extension's program on the same machine, so that the core's
+# netlist is co-simulated against every atomic too (issue 1010).
+waveform(
+    name = "vreteno_amo",
+    example = "//cpu/vreteno:vreteno_amo",
+    lowered = [("vreteno_amo", "cpu")],
+    until = 60,
+    signals = [
+        "//clocks/clk=>clk",
+        "//cpu/pc=>pc",
+        "//instr=>instr",
+        "//wb/done=>done",
+        "//wb/val=>val",
+    ],
+)
+
+# Three windows on the same run: a byte going out on the port's line,
+# a byte coming in, and the bus carrying a status poll and the write.
+waveform(
+    name = "vreteno_out",
+    example = "//cpu/vreteno:vreteno",
+    from_tick = 473,
+    until = 565,
+    width = 15.5,
+    signals = [
+        "//clocks/clk=>clk",
+        "//uaw/rx_valid=>uaw_valid",
+        "//uart/bits=>bits",
+        "//uart/shift=>shift",
+        "//tx=>tx",
+    ],
+)
+
+waveform(
+    name = "vreteno_in",
+    example = "//cpu/vreteno:vreteno",
+    from_tick = 833,
+    until = 929,
+    width = 15.5,
+    signals = [
+        "//clocks/clk=>clk",
+        "//rx=>rx",
+        "//uart/line=>line",
+        "//uart/rx_bits=>rx_bits",
+        "//uart/rx_shift=>rx_shift",
+        "//uart/count=>count",
+        "//uirq=>uirq",
+    ],
+)
+
+waveform(
+    name = "vreteno_bus",
+    example = "//cpu/vreteno:vreteno",
+    from_tick = 439,
+    until = 489,
+    width = 15.5,
+    signals = [
+        "//clocks/clk=>clk",
+        "//issue/tx_valid=>issue",
+        "//ars_2/tx_valid=>ar2",
+        "//uar/rx_valid=>uar",
+        "//ur/tx_valid=>ur",
+        "//rs_2/rx_valid=>r2",
+        "//rdata/rx_valid=>rdata",
+        "//aws_2/tx_valid=>aw2",
+        "//uaw/rx_valid=>uaw",
+        "//ub/tx_valid=>ub",
+        "//cpu/dev_wait=>dev_wait",
+        "//wb/done=>done",
+    ],
+)
+
+latex_document(
+    name = "vreteno",
+    main = "vreteno.tex",
+    data = [
+        "//tools/memmap:tables",
+        "jtag_probe.txt",
+        "ila_capture.vcd",
+        ":buildstamp",
+        ":vendored_tex",
+        ":vreteno_run",
+        ":vreteno_timing",
+        ":vreteno_out_timing",
+        ":vreteno_in_timing",
+        ":vreteno_bus_timing",
+        ":plic_run",
+        ":plic_timing",
+        ":mmu_run",
+        ":mmu_timing",
+        "//lib/parts:sources",
+        "//cpu/vreteno:sources",
+        "//cpu/vreteno/rust/hal:sources",
+        "//lib/examples:sources",
+    ],
+    deps = [
+        "housestyle.tex",
+        "memmap.tex",
+    ],
+)
+
+# The cheat sheet: one page, landscape, with its own example's listing,
+# netlist and coloured waveform, and a PNG of it through ghostscript.
+waveform(
+    name = "cheat",
+    example = "//lib/examples:ex_cheat",
+    lowered = ("counter", "counter"),
+    signals = [
+        "//clocks/clk=>clk",
+        "//enable=>enable",
+        "//counter/n=>n",
+        "//tick=>tick",
+    ],
+)
+
+genrule(
+    name = "cheat_timing_color",
+    srcs = ["cheat.dt", "cheat.fst.names"],
+    outs = ["cheat_timing_color.tex"],
+    cmd = "$(location //tools/dt2tikz) $(location cheat.dt)" +
+          " --order clk,enable,n,tick --color --width 7.0" +
+          " --names $(location cheat.fst.names)" +
+          " --signals '//clocks/clk=>clk,//enable=>enable,//counter/n=>n,//tick=>tick' > $@",
+    tools = ["//tools/dt2tikz"],
+)
+
+# The paper's and the tutorial's waveforms, at column width.
+[
+    genrule(
+        name = "paper_" + name + "_timing",
+        srcs = [name + ".dt", name + ".fst.names"],
+        outs = ["paper_" + name + "_timing.tex"],
+        cmd = "$(location //tools/dt2tikz) $(location " + name + ".dt)" +
+              " --order " + order + " --only --color --width 7.0" + extra +
+              " --names $(location " + name + ".fst.names)" +
+              " --signals '" + signals + "' > $@",
+        tools = ["//tools/dt2tikz"],
+    )
+    for name, order, signals, extra in [
+        (
+            "cheat",
+            "clk,enable,n,tick",
+            "//clocks/clk=>clk,//enable=>enable,//counter/n=>n,//tick=>tick",
+            "",
+        ),
+        (
+            "stage",
+            "clk,inp_valid,inp,inp_ready,out_valid,out,count",
+            "//clocks/clk=>clk,//inp/rx_valid=>inp_valid,//inp/rx_data=>inp," +
+            "//inp/rx_ready=>inp_ready,//out/tx_valid=>out_valid," +
+            "//out/tx_data=>out,//stage/count=>count",
+            "",
+        ),
+        (
+            "case",
+            "clk,go,state,count,observed",
+            "//clocks/clk=>clk,//go=>go,//sequencer/state=>state," +
+            "//sequencer/count=>count,//observed=>observed",
+            "",
+        ),
+        (
+            "ports",
+            "clk,minuend_valid,minuend_data,subtrahend_valid," +
+            "subtrahend_data,diff_valid,diff_data,borrow",
+            "//clocks/clk=>clk,//minuend/rx_valid=>minuend_valid," +
+            "//minuend/rx_data=>minuend_data," +
+            "//subtrahend/rx_valid=>subtrahend_valid," +
+            "//subtrahend/rx_data=>subtrahend_data," +
+            "//diff/rx_valid=>diff_valid,//diff/rx_data=>diff_data," +
+            "//borrow=>borrow",
+            "",
+        ),
+        (
+            "twoclock",
+            "clk,slow,go,go_slow,a,b",
+            "//clocks/clk=>clk,//clocks/slow=>slow,//go=>go," +
+            "//go_slow=>go_slow,//a=>a,//b=>b",
+            " --until 36",
+        ),
+        (
+            "vreteno_out",
+            "clk,uaw_valid,tx",
+            "//clocks/clk=>clk,//uaw/rx_valid=>uaw_valid,//tx=>tx",
+            " --from 474 --until 566",
+        ),
+        (
+            "vreteno",
+            "clk,rst,pc,done,rd,val",
+            "//clocks/clk=>clk,//rst=>rst,//cpu/pc=>pc," +
+            "//wb/done=>done,//wb/rd=>rd,//wb/val=>val",
+            " --until 22",
+        ),
+    ]
+]
+
+latex_document(
+    name = "paper",
+    main = "paper.tex",
+    data = [
+        ":buildstamp",
+        ":vendored_tex",
+        ":cheat_run",
+        ":paper_cheat_timing",
+        ":paper_stage_timing",
+        ":paper_vreteno_timing",
+        ":paper_vreteno_out_timing",
+        ":asic_counts",
+        "//lib/examples:sources",
+        "//cpu/vreteno:sources",
+    ],
+    deps = ["housestyle.tex"],
+)
+
+latex_document(
+    name = "cheatsheet",
+    main = "cheatsheet.tex",
+    data = [
+        ":buildstamp",
+        ":vendored_tex",
+        ":cheat_run",
+        ":cheat_timing_color",
+        "//lib/examples:sources",
+    ],
+    deps = ["housestyle.tex"],
+)
+
+# The Vreteno document's waveform figures as images, one PNG each, for
+# the web: the opening cycles, a byte out, a byte in, the bus.
+latex_document(
+    name = "vreteno_figures",
+    main = "vreteno_figures.tex",
+    data = [
+        ":buildstamp",
+        ":vendored_tex",
+        ":vreteno_timing",
+        ":vreteno_out_timing",
+        ":vreteno_in_timing",
+        ":vreteno_bus_timing",
+    ],
+    deps = ["housestyle.tex"],
+)
+
+genrule(
+    name = "vreteno_figures_png",
+    srcs = [":vreteno_figures"],
+    outs = [
+        "vreteno_figure_1.png",
+        "vreteno_figure_2.png",
+        "vreteno_figure_3.png",
+        "vreteno_figure_4.png",
+    ],
+    cmd = "$(location @hermetic_latex_ghostscript//:gs.sh) -dBATCH -dNOPAUSE -q" +
+          " -sDEVICE=png16m -r200 -dTextAlphaBits=4 -dGraphicsAlphaBits=4" +
+          " -sOutputFile=$(RULEDIR)/vreteno_figure_%d.png $(location :vreteno_figures)",
+    tools = [
+        "@hermetic_latex_ghostscript//:files",
+        "@hermetic_latex_ghostscript//:gs.sh",
+    ],
+)
+
+genrule(
+    name = "cheatsheet_png",
+    srcs = [":cheatsheet"],
+    # One image per side: the sheet is printed on both sides of one page.
+    outs = [
+        "cheatsheet.png",
+        "cheatsheet_back.png",
+    ],
+    cmd = "$(location @hermetic_latex_ghostscript//:gs.sh) -dBATCH -dNOPAUSE -q" +
+          " -sDEVICE=png16m -r150 -dTextAlphaBits=4 -dGraphicsAlphaBits=4" +
+          " -sOutputFile=$(@D)/cheatsheet-%d.png $(location :cheatsheet)" +
+          " && mv $(@D)/cheatsheet-1.png $(location cheatsheet.png)" +
+          " && mv $(@D)/cheatsheet-2.png $(location cheatsheet_back.png)",
+    tools = [
+        "@hermetic_latex_ghostscript//:files",
+        "@hermetic_latex_ghostscript//:gs.sh",
+    ],
+)
+
+# The tutorial: six steps on the examples, for a beginner.
+latex_document(
+    name = "tutorial",
+    main = "tutorial.tex",
+    data = [
+        ":buildstamp",
+        ":vendored_tex",
+        ":cheat_run",
+        ":paper_cheat_timing",
+        ":case_run",
+        ":paper_case_timing",
+        ":stage_run",
+        ":paper_stage_timing",
+        ":ports_run",
+        ":paper_ports_timing",
+        ":twoclock_run",
+        ":paper_twoclock_timing",
+        "//lib/examples:sources",
+    ],
+    deps = ["housestyle.tex"],
+)
+
+# The repository in numbers: a snapshot, typed in, with its script.
+latex_document(
+    name = "stats",
+    main = "stats.tex",
+    data = [
+        ":buildstamp",
+        ":vendored_tex",
+        "//tools:repostats.sh",
+    ],
+    deps = ["housestyle.tex"],
+)
+
+# The project's timeline, drawn from the data `//tools/timeline`
+# extracted from the repository's own history. The extraction is by
+# hand, because a Bazel action has no repository to read; the drawing
+# is the build's, so the chart in the document is never a picture
+# somebody pasted in.
+genrule(
+    name = "gantt_tex",
+    srcs = ["timeline.tsv"],
+    outs = ["gantt.tex"],
+    cmd = "$(location //tools/gantt) $(location timeline.tsv) > $@",
+    tools = ["//tools/gantt"],
+)
+
+# The numbers the document quotes, as TeX macros, so its prose cannot
+# drift from the chart beside it.
+genrule(
+    name = "timeline_counts",
+    srcs = ["timeline.tsv"],
+    outs = ["timeline_counts.tex"],
+    cmd = "$(location //tools/gantt) --counts $(location timeline.tsv) > $@",
+    tools = ["//tools/gantt"],
+)
+
+# How the work actually went: the timeline and the chart.
+latex_document(
+    name = "dynamics",
+    main = "dynamics.tex",
+    data = [
+        ":buildstamp",
+        ":vendored_tex",
+        ":gantt_tex",
+        ":timeline_counts",
+    ],
+    deps = ["housestyle.tex"],
+)
+
+# The placed core, drawn from the grid the ASIC flow wrote. The layout
+# itself is `//cpu/vreteno/asic:vreteno_pnr`, which is manual because
+# it is twenty minutes of work; what it writes is two small files, and
+# those are committed, exactly as the timeline's data is.
+genrule(
+    name = "asicmap_tex",
+    srcs = ["asic_map.tsv"],
+    outs = ["asicmap.tex"],
+    cmd = "$(location //tools/denmap) $(location asic_map.tsv) > $@",
+    tools = ["//tools/denmap"],
+)
+
+# The numbers that run produced, as TeX macros, so the prose beside
+# the table cannot drift from it.
+genrule(
+    name = "asic_counts",
+    srcs = [
+        "asic_map.tsv",
+        "asic.tsv",
+    ],
+    outs = ["asic_counts.tex"],
+    cmd = "$(location //tools/denmap) --counts $(location asic_map.tsv) " +
+          "$(location asic.tsv) > $@",
+    tools = ["//tools/denmap"],
+)
+
+# Vreteno through an open ASIC flow: the mapping onto standard cells,
+# which the build runs, and the layout, whose numbers are committed.
+latex_document(
+    name = "tapeout",
+    main = "tapeout.tex",
+    data = [
+        ":buildstamp",
+        ":vendored_tex",
+        ":asicmap_tex",
+        ":asic_counts",
+        "//cpu/vreteno/asic:sources",
+    ],
+    deps = ["housestyle.tex"],
+)
+
+# From zero: the blinky workspace under //tutorial/blinky, run by
+# the build, its printout and its netlist included.
+genrule(
+    name = "zero_run",
+    outs = ["out_zero.txt"],
+    cmd = "$(location //tutorial/blinky:blinky) > $@",
+    tools = ["//tutorial/blinky:blinky"],
+)
+
+# The blinky workspace names the Rust the tree compiles with, since
+# the Rust rules read the version only from the root module; this
+# fails when the two copies part (issue 840).
+sh_test(
+    name = "zero_rust_test",
+    srcs = ["zero_rust_test.sh"],
+    args = [
+        "$(rootpath //:MODULE.bazel)",
+        "$(rootpath //tutorial/blinky:MODULE.bazel)",
+    ],
+    data = [
+        "//:MODULE.bazel",
+        "//tutorial/blinky:MODULE.bazel",
+    ],
+)
+
+latex_document(
+    name = "zero",
+    main = "zero.tex",
+    data = [
+        ":buildstamp",
+        ":vendored_tex",
+        ":zero_run",
+        "//tutorial/blinky:blinky.v",
+        "//tutorial/blinky:sources",
+    ],
+    deps = ["housestyle.tex"],
+)
+
+# What `station!` wrote for the two-input station, as the example
+# prints it, and the size of that text beside the hand-written
+# Verilog's: both for the tutorial, neither typed by hand.
+genrule(
+    name = "station_source",
+    outs = [
+        "station2.rs",
+        "station2_marked.rs",
+    ],
+    cmd = " && ".join([
+        "$(location //lib/examples:ex_station) --source " +
+        "> $(location station2_marked.rs)",
+        "grep -v '^// \\(begin\\|end\\){' $(location station2_marked.rs) " +
+        "> $(location station2.rs)",
+    ]),
+    tools = ["//lib/examples:ex_station"],
+)
+
+genrule(
+    name = "station_sizes",
+    srcs = [
+        ":station2.rs",
+        "//lib/examples:station.v",
+    ],
+    outs = ["station_sizes.txt"],
+    cmd = " && ".join([
+        "echo \"lines  file\" > $@",
+        "wc -l < $(location //lib/examples:station.v) | " +
+        "xargs printf '%5d  station.v, by hand\\n' >> $@",
+        "grep -v '^ *//' $(location :station2.rs) | wc -l | " +
+        "xargs printf '%5d  station2.rs, as station! wrote it, comments left out\\n' >> $@",
+        "grep -v '^ *//' $(location //lib/examples:station.v) | wc -l | " +
+        "xargs printf '%5d  station.v, comments left out\\n' >> $@",
+    ]),
+)
+
+# Two pages on the whole of it: the language, the parts, the core and
+# the GPU, for a reader deciding whether to read the rest.
+latex_document(
+    name = "showcase",
+    main = "showcase.tex",
+    data = [
+        ":asic_counts",
+        ":buildstamp",
+        ":vendored_tex",
+        ":razboj_scene",
+        ":paper_cheat_timing",
+        "//lib/examples:sources",
+    ],
+    deps = ["housestyle.tex"],
+)
+
+# Razboj, a minimal GPU in TxHDL: the rasteriser, the framebuffer, the
+# picture Razboj drew and the waveform of the traced run.
+latex_document(
+    name = "razboj",
+    main = "razboj.tex",
+    data = [
+        ":buildstamp",
+        ":vendored_tex",
+        ":razboj_lists_timing",
+        ":razboj_run",
+        ":razboj_timing",
+        ":razboj_scene",
+        "//gpu/razboj:sources",
+    ],
+    deps = ["housestyle.tex"],
+)
+
+# The picture Razboj drew while the core ran, out of the memory they
+# share on the lattice.
+genrule(
+    name = "soc_scene",
+    outs = ["soc_scene.png"],
+    cmd = "SOC_PNG=$@ $(location //soc:demo) > /dev/null",
+    tools = ["//soc:demo"],
+)
+
+# A network on chip in TxHDL: nodes on a lattice, virtual channels,
+# and the bridges that put an AXI link across it.
+latex_document(
+    name = "noc",
+    main = "noc.tex",
+    data = [
+        "//tools/memmap:tables",
+        ":buildstamp",
+        ":vendored_tex",
+        ":soc_scene",
+        "//lib/parts:sources",
+        "//soc:sources",
+    ],
+    deps = [
+        "housestyle.tex",
+        "memmap.tex",
+    ],
+)
+
+# Ethernet in TxHDL: the MAC's two halves and the AXI-Lite peripheral,
+# the example's run and waveform, and the board's hand-written echo
+# design.
+latex_document(
+    name = "eth",
+    main = "eth.tex",
+    data = [
+        "//tools/memmap:tables",
+        ":buildstamp",
+        ":vendored_tex",
+        ":eth_run",
+        ":eth_timing",
+        "//eth:sources",
+        "//lib/board:sources",
+        "//lib/examples:sources",
+        "//lib/parts:sources",
+    ],
+    deps = [
+        "housestyle.tex",
+        "memmap.tex",
+    ],
+)
+
+# HDMI in TxHDL: the video peripheral and the I2C master, the example's
+# run and waveform, and the board's hand-written demonstration.
+latex_document(
+    name = "hdmi",
+    main = "hdmi.tex",
+    data = [
+        "//tools/memmap:tables",
+        ":buildstamp",
+        ":vendored_tex",
+        ":hdmi_run",
+        ":hdmi_timing",
+        "//hdmi:sources",
+        "//lib/examples:sources",
+        "//lib/parts:sources",
+    ],
+    deps = [
+        "housestyle.tex",
+        "memmap.tex",
+    ],
+)
+
+# Where the flagship's subsystems landed on the part, drawn and
+# tabulated from what //flagship:place_report read off the routed
+# checkpoint. The TSV is committed, as the layout numbers are.
+genrule(
+    name = "flagship_map",
+    srcs = ["flagship_place.tsv"],
+    outs = ["flagshipmap.tex"],
+    cmd = "$(location //tools/fpgamap) $(location flagship_place.tsv) > $@",
+    tools = ["//tools/fpgamap"],
+)
+
+genrule(
+    name = "flagship_totals",
+    srcs = ["flagship_place.tsv"],
+    outs = ["flagshiptotals.tex"],
+    cmd = "$(location //tools/fpgamap) --totals " +
+          "$(location flagship_place.tsv) > $@",
+    tools = ["//tools/fpgamap"],
+)
+
+# The TxHDL Flagship: the one bitstream that holds every part of the
+# system proven on the board, and lives in the board's flash.
+latex_document(
+    name = "flagship",
+    main = "flagship.tex",
+    data = [
+        "//tools/memmap:tables",
+        "remote_run.txt",
+        ":buildstamp",
+        ":vendored_tex",
+        ":flagship_map",
+        ":flagship_totals",
+        "//cpu/vreteno:sources",
+        "//flagship:sources",
+        "//lib/board:sources",
+        "//lib/logo:sources",
+        "//tools/logo2rs:sources",
+    ],
+    deps = [
+        "housestyle.tex",
+        "memmap.tex",
+    ],
+)
+
+# PCIe in TxHDL: the endpoint the build generates, the part that joins
+# its master's pins to the link, the design behind BAR1, and the board.
+latex_document(
+    name = "pcie",
+    main = "pcie.tex",
+    data = [
+        "//tools/memmap:tables",
+        ":buildstamp",
+        ":vendored_tex",
+        ":axi_pins_run",
+        ":axi_pins_timing",
+        ":axi_per_pins_run",
+        ":axi_per_pins_timing",
+        "//lib/examples:sources",
+        "//lib/parts:sources",
+        "//pcie:sources",
+    ],
+    deps = [
+        "housestyle.tex",
+        "memmap.tex",
+    ],
+)
+
+# AXI in TxHDL: the tutorial on the bus, its two examples' runs and
+# waveforms included, and the two trackers' netlists.
+latex_document(
+    name = "axi",
+    main = "axi.tex",
+    data = [
+        ":buildstamp",
+        ":vendored_tex",
+        ":axi_run",
+        ":axi_timing",
+        ":axi_serve_run",
+        ":axi_serve_timing",
+        ":axi_arbiter_run",
+        ":axi_arbiter_timing",
+        ":axi_router_run",
+        ":axi_router_timing",
+        ":axi_wb_run",
+        ":axi_wb_timing",
+        ":axi_reg_run",
+        ":axi_reg_timing",
+        ":axi_lite_run",
+        ":axi_lite_timing",
+        "//lib/examples:sources",
+        "//lib/parts:sources",
+    ],
+    deps = ["housestyle.tex"],
+)
+
+# A reservation station in TxHDL: the tutorial on the part, its
+# example's run and waveform included, and the same station in
+# Verilog beside it.
+# The tutorial on formal verification: the digit of ex_formal proved
+# for every input, a broken copy failing with its counterexample, and
+# the cover point reached, every log and trace the build's (issue
+# 581).
+latex_document(
+    name = "prove",
+    main = "prove.tex",
+    data = [
+        ":buildstamp",
+        ":vendored_tex",
+        ":formal_run",
+        ":formal_timing",
+        ":formal_proof",
+        ":formal_tight_proof",
+        ":formal_tight_search",
+        ":formal_covered",
+        ":formal_cex_timing",
+        ":formal_reach_timing",
+        "BUILD.bazel",
+        "//lib/examples:sources",
+        "//tools/formal:formal.sh",
+    ],
+    deps = ["housestyle.tex"],
+)
+
+latex_document(
+    name = "station",
+    main = "station.tex",
+    data = [
+        ":buildstamp",
+        ":vendored_tex",
+        ":station_run",
+        ":station_timing",
+        ":station_source",
+        ":station_sizes",
+        ":queue_run",
+        "//lib/examples:sources",
+        "//lib/parts:sources",
+    ],
+    deps = ["housestyle.tex"],
+)
+
+# Every document, in the order the combined file and the cover give them.
+DOCUMENTS = [
+    ":cover",
+    ":showcase",
+    ":cheatsheet",
+    ":tutorial",
+    ":zero",
+    ":prove",
+    ":station",
+    ":axi",
+    ":razboj",
+    ":noc",
+    ":eth",
+    ":hdmi",
+    ":flagship",
+    ":pcie",
+    ":datasheets",
+    ":article",
+    ":embedding",
+    ":runtime",
+    ":examples",
+    ":vreteno",
+    ":tapeout",
+    ":paper",
+    ":stats",
+    ":dynamics",
+]
+
+# Every word of every document lies on its page, or the test names
+# the document, the page and the word (issue 457). A table wider than
+# its column loses its right edge without a word from LaTeX; this
+# reads the rendered pages back, which is what a reader sees.
+pdf_edge_test(
+    name = "edge_test",
+    pdfs = DOCUMENTS,
+)
+
+# Every listing line ends inside its frame, or the test names the
+# document, the page and the word (issue 1061). A source line wider
+# than its column runs past the frame and stays on the page, so the
+# edge test above passes it, and neither LaTeX nor rustfmt says a word.
+pdf_frame_test(
+    name = "frame_test",
+    pdfs = DOCUMENTS,
+)
+
+# Every document in sequence, one file, with a bookmark per document.
+combined_pdf(
+    name = "all",
+    out = "txhdl.pdf",
+    bookmarks = [
+        "TxHDL Documents",
+        "TxHDL: What Has Been Built",
+        "TxHDL cheat sheet",
+        "TxHDL, Step by Step",
+        "TxHDL from Zero: A Blinky in Bazel",
+        "Formal Verification in TxHDL",
+        "A Reservation Station in TxHDL",
+        "AXI in TxHDL",
+        "Razboj: A Minimal GPU in TxHDL",
+        "A Network on Chip in TxHDL",
+        "Ethernet in TxHDL",
+        "HDMI in TxHDL",
+        "The TxHDL Flagship",
+        "PCIe in TxHDL",
+        "TxHDL Datasheets",
+        "TxHDL: Unifying a Dataflow and a Transaction HDL",
+        "Deleting a Language: Embedding TxHDL in Rust",
+        "The TxHDL Runtime",
+        "TxHDL by Example",
+        "Vreteno: An RV32IMAC Core in TxHDL",
+        "A Tapeout Prep in TxHDL: Vreteno on an Open 45 nm Node",
+        "TxHDL: A Hardware Description Language That Is a Rust Library",
+        "TxHDL by the Numbers",
+        "The Dynamics of a Project",
+    ],
+    parts = DOCUMENTS,
+)

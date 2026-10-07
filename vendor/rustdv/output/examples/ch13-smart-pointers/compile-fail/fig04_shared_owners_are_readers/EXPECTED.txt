@@ -1,0 +1,8 @@
+error[E0594]: cannot assign to data in an `Rc`
+ --> src/main.rs:9:5
+  |
+9 |     handle.errors += 1;
+  |     ^^^^^^^^^^^^^^^^^^ cannot assign
+  |
+  = help: trait `DerefMut` is required to modify through a dereference,
+          but it is not implemented for `Rc<Scoreboard>`

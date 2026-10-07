@@ -1,0 +1,2 @@
+equal? true
+AluCommand { a: 170, b: 85, op: Xor }

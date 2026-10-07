@@ -1,0 +1,15 @@
+# Local Cargo manifest. Upstream TxHDL builds this library with Bazel
+# (`lib/BUILD.bazel`, target `txhdl`). This file exists so the Verilog IDE
+# workspace can compile the same sources. The only crate dependency is the
+# one Bazel already pins: fst-writer.
+[package]
+name = "txhdl"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "TxHDL hardware description language (vendored)"
+
+[dependencies]
+fst-writer = "0.3.1"
+txhdl_macros = { path = "macros" }

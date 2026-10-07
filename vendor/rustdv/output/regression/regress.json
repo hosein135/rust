@@ -1,0 +1,32 @@
+{
+  "comment": "Configuration for regress.py. Paths are relative to the repo root.",
+  "book_src": "book-pdf/src",
+  "examples": "output/examples",
+  "deviations": {
+    "comment": "Figures whose example intentionally differs from the book by a marked line. Currently none \u2014 the ERRATA.md issues were fixed in the manuscript on 2026-07-08. Book-sync only checks listed figures for a deviation marker.",
+    "figures": []
+  },
+  "compare_modes": {
+    "comment": "Binaries with nondeterministic output (HashMap iteration). 'unordered_lines' ignores line order (map iterated one entry per line). 'normalized_maps' sorts the entries inside {...} on each line (map printed inline via {:?}). Everything else compares exactly.",
+    "bins": {
+      "ch08_fig07_hashmap_ops_u32_op": "unordered_lines",
+      "ch12_fig06_dictionary_comprehension_collected_into": "normalized_maps"
+    }
+  },
+  "quarantine": {
+    "comment": "ch21_macros is the only entry and it is NOT pending conversion: it is a macro demonstration with no simulator test at all, so it never comes off this list. See no_sim_test below. Every other chapter crate runs. If you ever add a chapter here, say why and say what would take it off again.",
+    "packages": [
+      "ch21_macros"
+    ],
+    "custom_tests": [],
+    "no_sim_test": [
+      "ch21_macros"
+    ]
+  },
+  "cargo_test_packages": {
+    "comment": "Packages whose unit tests run as part of the examples suite. Add future crates (e.g. rustdv) here or as custom tests.",
+    "packages": [
+      "ch14_modules_crates_cargo"
+    ]
+  }
+}

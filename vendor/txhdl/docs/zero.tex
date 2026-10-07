@@ -1,0 +1,174 @@
+% SPDX-License-Identifier: Apache-2.0
+%
+% TxHDL from zero: a blinky in Bazel, from an empty directory to a
+% netlist, for somebody who has neither the tree nor Bazel. Built by
+% //docs:zero. Every file shown is included from tutorial/blinky/,
+% whose design the tree builds against its own library as a check,
+% and every printout is what that build produced by running it. The
+% pin in its MODULE.bazel is checked by building the workspace outside
+% the tree, which no action here does (issue 733).
+\documentclass[journal,9pt]{IEEEtran}
+
+\newcommand{\listingsize}{\fontsize{6}{7}\selectfont}
+\input{housestyle}
+
+\InputIfFileExists{buildstamp.tex}{}{}
+\providecommand{\buildstamp}{Draft build (outside the Bazel flow).}
+
+\title{TxHDL from Zero: A Blinky in Bazel}
+
+\author{Filip Filmar and Dragiša Janković%
+\thanks{Both authors are independent. Filip Filmar is the
+corresponding author, at f@hdlfactory.com; Dragiša Janković is
+reached at linkedin.com/in/dragisa-jankovic.}%
+\thanks{This bootstrap guide configures a standalone hardware project
+from an empty workspace: with only Bazelisk and Git installed and without
+cloning the monorepo, a developer compiles, simulates, and synthesizes an LED
+blinky to Verilog. Listings are extracted directly from \code{tutorial/blinky/}
+in the repository \code{HDL/txhdl}, and execution logs reflect live build
+output. Architectural foundations appear in~\cite{tutorial} and the cheat
+sheet~\cite{cheatsheet}; the project index~\cite{cover} catalogues all companion
+reports.}%
+\thanks{The authors used a large language model, Claude, as an
+assistant in exploring concepts and in drafting and constructing
+the documents and implementations; every repository commit documents
+this collaboration and includes the prompt sequence verbatim.}%
+\thanks{\buildstamp}}
+
+\markboth{TxHDL from Zero}{Filmar and Janković: TxHDL from Zero}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+TxHDL is a hardware description language implemented directly as a Rust
+library, built and lowered through Bazel. This guide starts from an empty
+directory and delivers an operational blinky module that simulates in software,
+renders an execution trace, and derives synthesizable Verilog as a build
+artifact. The setup requires exactly five configuration and design files,
+predicated on two host utilities: Bazelisk and Git.
+\end{abstract}
+
+\section{What You Need}
+\label{sec:z-need}
+
+Two prerequisites suffice: Bazelisk, provisioned as \code{bazel} to fetch the
+pinned Bazel release automatically, and Git. All compilers, linkers, Rust
+toolchains, and runtime dependencies are resolved hermetically by Bazel. No
+external Verilog toolchain is required; synthesizable RTL is derived and printed
+directly by the compiled binary.
+
+\section{The Workspace}
+\label{sec:z-files}
+
+A standalone workspace requires five files: four environment configuration
+files detailed below, and the design file discussed in
+Section~\ref{sec:z-blinky}. First, \code{.bazelversion} pins the Bazel release
+guaranteeing reproducible execution:
+
+\lstinputlisting[style=ascii,caption={\code{.bazelversion}: one line.},label={lst:z-version}]{tutorial/blinky/.bazelversion}
+
+Second, \code{.bazelrc} declares registry endpoints for external module
+resolution, prioritizing the project registry over the Bazel Central Registry
+(BCR):
+
+\lstinputlisting[style=ascii,caption={\code{.bazelrc}: where modules come from.},label={lst:z-rc}]{tutorial/blinky/.bazelrc}
+
+Third, \code{MODULE.bazel} defines the workspace, binding external dependencies
+on \code{rules\_rust} and the TxHDL GitHub mirror pinned to an immutable commit.
+Because Bzlmod toolchain registration is governed by the root module, the
+workspace explicitly configures Rust 1.90.0 to match TxHDL's compiler baseline:
+
+\lstinputlisting[style=ascii,caption={\code{MODULE.bazel}: two dependencies, one of them by commit, and the Rust compiler.},label={lst:z-module}]{tutorial/blinky/MODULE.bazel}
+
+Fourth, \code{BUILD.bazel} declares build targets. The primary target is a
+\code{rust\_binary} linking TxHDL runtime libraries and procedural macros; a
+companion \code{genrule} invokes the binary with \code{--verilog} to capture
+synthesized RTL into \code{blinky.v}:
+
+\lstinputlisting[style=ascii,caption={\code{BUILD.bazel}: the binary, its netlist, and the sources.},label={lst:z-build}]{tutorial/blinky/BUILD.bazel}
+
+\section{The Blinky}
+\label{sec:z-blinky}
+
+The hardware design comprises a 32-bit counter register and a scalar output.
+Sequential state resides in struct fields, while temporal behavior is
+implemented within \code{Unit::run}: an infinite loop initiated by an edge
+wait, making each iteration represent one clock cycle. Macro \code{when!}
+handles counter wrap-around, and combinational output \code{led} is driven via
+\code{set}. The procedural attribute \code{\#[lower]} derives synthesizable
+Verilog via \code{Blinky::verilog}. Embedded function \code{main} executes the
+simulation across two full periods, printing character output or emitting
+Verilog on request.
+
+\lstinputlisting[caption={\code{blinky.rs}: the design, and a \code{main} that runs it or prints it.},label={lst:z-rs}]{tutorial/blinky/blinky.rs}
+
+\section{Build and Run}
+\label{sec:z-run}
+
+Execute the design directly from the workspace root:
+
+\begin{lstlisting}[style=ascii]
+bazel run //:blinky
+\end{lstlisting}
+
+The initial run fetches Bazel, the Rust toolchain, and TxHDL with all
+transitive dependencies, compiling all artifacts in approximately two minutes.
+Subsequent runs execute in seconds from cache. Simulation prints one character
+per cycle, asserting the LED for the initial eight cycles of each sixteen-cycle
+period:
+
+\lstinputlisting[style=ascii,caption={What \code{bazel run //:blinky} printed when this document was built.},label={lst:z-out}]{out_zero.txt}
+
+\section{The Netlist as a File}
+\label{sec:z-netlist}
+
+Synthesize standalone Verilog via:
+
+\begin{lstlisting}[style=ascii]
+bazel build //:blinky.v
+cat bazel-bin/blinky.v
+\end{lstlisting}
+
+The emitted module contains the registered counter, synchronous reset and wrap
+guards, and continuous assignment driving the output, with constants folded
+at compile time:
+
+\lstinputlisting[style=ascii,caption={\code{blinky.v}, as the build wrote it.},label={lst:z-v}]{tutorial/blinky/blinky.v}
+
+\section{From Here}
+\label{sec:z-next}
+
+Modifying \code{PERIOD} updates both simulation traces and synthesized RTL
+immediately. Deriving \code{Trace} on additional registers exposes them in
+waveforms, as detailed in the step-by-step tutorial~\cite{tutorial}. Companion
+references include the one-page cheat sheet~\cite{cheatsheet}, verified
+examples~\cite{examples}, and the processor implementation~\cite{vreteno}.
+Updating the pinned commit in \code{MODULE.bazel} pulls upstream enhancements
+seamlessly.
+
+\begin{thebibliography}{9}
+
+\bibitem{tutorial}
+F.~Filmar and D.~Janković, ``TxHDL, step by step,'' project
+repository \code{HDL/txhdl}, \code{//docs:tutorial}, 2026.
+
+\bibitem{cheatsheet}
+F.~Filmar and D.~Janković, ``TxHDL cheat sheet,'' project repository
+\code{HDL/txhdl}, \code{//docs:cheatsheet}, 2026.
+
+\bibitem{examples}
+F.~Filmar and D.~Janković, ``TxHDL by example,'' project repository
+\code{HDL/txhdl}, \code{//docs:examples}, 2026.
+
+\bibitem{vreteno}
+F.~Filmar and D.~Janković, ``Vreteno: an RV32IMAC core in TxHDL,''
+project repository \code{HDL/txhdl}, \code{//docs:vreteno}, 2026.
+
+\bibitem{cover}
+F.~Filmar and D.~Janković, ``TxHDL documents,'' project repository
+\code{HDL/txhdl}, \code{//docs:cover}, 2026.
+
+\end{thebibliography}
+
+\end{document}

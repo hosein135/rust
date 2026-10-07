@@ -1,0 +1,12 @@
+[package]
+name = "ch38_fibonacci_testbench_7_2"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/ch38_fibonacci_testbench_7_2.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+rustdv = { path = "../../../rustdv" }
+tinyalu_utils = { path = "../tinyalu-utils" }

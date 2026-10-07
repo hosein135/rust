@@ -1,0 +1,13 @@
+[package]
+name = "ch34_connections_testbench_6_0"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+# Crate root named after the crate, not lib.rs (D29).
+path = "src/ch34_connections_testbench_6_0.rs"
+
+[dependencies]
+rustdv = { path = "../../../rustdv" }
+tinyalu_utils = { path = "../tinyalu-utils" }
