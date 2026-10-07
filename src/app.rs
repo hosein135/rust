@@ -13,7 +13,7 @@ use crate::project::{
     OpenFile, TreeNode,
 };
 use crate::sim::{self, SimResult};
-use crate::templates::{self, counter_example};
+use crate::templates;
 use crate::waveform::{self, ViewMode, WaveNav, WaveView};
 use iced::keyboard::{self, Key};
 use iced::widget::text::Wrapping;
@@ -250,18 +250,9 @@ impl VerilogIde {
                     )
                 }
             }
-            Message::SampleFolderPicked(Ok(Some(parent))) => {
-                let root = parent.join("verilog-sample");
-                if let Err(e) = std::fs::create_dir_all(&root) {
-                    self.log_err(&e.to_string());
-                } else {
-                    let (n1, c1, n2, c2) = counter_example();
-                    let _ = std::fs::write(root.join(n1), c1);
-                    let _ = std::fs::write(root.join(n2), c2);
-                    self.open_project(root);
-                    self.log("Created sample counter + testbench project.\n");
-                }
-                editor::scroll_to_y(0.0)
+            Message::SampleFolderPicked(Ok(Some(_parent))) => {
+                self.log_err("Bundled Rust sample was not found (samples/full_adder).");
+                Task::none()
             }
             Message::SampleFolderPicked(_) => Task::none(),
             Message::CloseProject => {

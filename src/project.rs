@@ -76,10 +76,8 @@ pub fn locate_samples_dir() -> Option<PathBuf> {
 
     candidates.into_iter().find(|p| {
         p.is_dir()
-            && (p.join("counter.v").is_file()
-                || p.read_dir()
-                    .map(|mut d| d.next().is_some())
-                    .unwrap_or(false))
+            && (p.join("full_adder").join("src").join("adder.rs").is_file()
+                || p.join("src").join("adder.rs").is_file())
     })
 }
 

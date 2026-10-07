@@ -4,11 +4,10 @@ Desktop IDE for **Verilog** HDL and **testbenches**, written in Rust with [iced]
 
 ## Features
 
-- Project explorer for `.v` / `.sv` / `.vh` files
+- Project explorer for `.rs`, `.v`, `.sv`, and `.vh` files
 - Multi-tab code editor with line numbers and syntax highlighting
-- New module / new testbench templates
-- Sample counter + testbench under `samples/`
-- Rust full adder (`samples/full_adder`): TxHDL unit `src/adder.rs` and rustdv testbench `src/full_adder_tb.rs`. File → Open Sample Folder opens it. Run compiles both, writes `full_adder.vcd` (clock, inputs, sum, carry, and the unit's registers), and opens the waveform. New File accepts `.rs` (HDL) and `*_tb.rs` (testbench) as well as Verilog.
+- New module / new testbench templates, in Rust (`.rs`, `*_tb.rs`) or Verilog
+- Rust full adder (`samples/full_adder`): TxHDL unit `src/adder.rs` and rustdv testbench `src/full_adder_tb.rs`. File → Open Sample Folder opens it. Run compiles both, writes `full_adder.vcd`, and opens the waveform.
 - **Run** button (F5): simulate Verilog + testbench with [xezim](https://github.com/aionhw/xezim) and write a `.vcd` waveform
 - **Waveform / Text Editor** modes: click a `.vcd` to view traces (via [wellen](https://github.com/ekiwi/wellen) from [Surfer](https://gitlab.com/surfer-project/surfer)) or the dump as text
 - Console + problems panel, find, save shortcuts
@@ -52,9 +51,11 @@ Useful flags:
 
 ## Simulate (VCD)
 
-Open a folder that contains RTL plus a testbench (`*_tb.v`), then click **▶ Run** (or press **F5**).
+Open a folder that contains RTL plus a testbench, then click **▶ Run** (or press **F5**).
 
-The IDE saves dirty files and runs the bundled [xezim](https://github.com/aionhw/xezim) simulator **in-process** (vendored at `vendor/xezim`, compiled with `cargo build` / `cargo run`). Waveform support is enabled the same way as xezim `--wave`. The sample `samples/counter_tb.v` already calls `$dumpfile` / `$dumpvars`; the waveform lands at `counter.vcd` in the project folder.
+The bundled sample is Rust: `samples/full_adder/src/adder.rs` (TxHDL) and `src/full_adder_tb.rs` (rustdv). Run compiles them and writes `full_adder.vcd`.
+
+A Verilog folder (`.v` / `.sv` plus a `*_tb.v`) still runs the bundled [xezim](https://github.com/aionhw/xezim) simulator **in-process**. Waveform support is enabled the same way as xezim `--wave`.
 
 ## Waveforms (Surfer / wellen)
 
@@ -86,7 +87,7 @@ vendor/xezim-core Vendored xezim-core (xezim path/patch dep)
 vendor/surfer     Vendored [Surfer](https://gitlab.com/surfer-project/surfer) v0.7.0
 vendor/txhdl      Vendored [TxHDL](https://github.com/filmil/hdl-txhdl) (Bazel upstream; `lib/Cargo.toml` is the local Cargo entry)
 vendor/rustdv     Vendored [rustdv](https://github.com/rustdv/rustdv)
-samples/          Example counter + testbench, and `full_adder/` (TxHDL + rustdv)
+samples/full_adder  TxHDL full adder (`src/adder.rs`) and rustdv testbench (`src/full_adder_tb.rs`)
 Cargo.lock        Pinned Rust crate graph
 rust-toolchain.toml  Rust 1.92.0 (rustup)
 devops/flake.nix  Nix dev shell (nixpkgs 25.05)
