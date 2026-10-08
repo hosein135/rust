@@ -33,10 +33,14 @@ walkdir = "2"
 
 [workspace]
 resolver = "2"
-members = [".", "samples/full_adder"]
-# `cargo build` / `cargo test` stay the IDE plus the full-adder sample.
-# Path dependencies under vendor/ are still compiled when something uses
-# them; `--workspace` is what also selects every vendored package.
+# The root package is a member because this file defines `[workspace]`.
+# Do not also list `"."` here: Cargo treats that entry as a prefix of every
+# path in the repo, which disables `exclude` and pulls vendored crates in as
+# members. Their `[profile]` tables are then ignored.
+# Plain `cargo build` / `cargo test` still select the IDE and the sample.
+# Vendored path deps compile when something uses them; they are not
+# workspace members, so `--workspace` does not select them.
+members = ["samples/full_adder"]
 default-members = [".", "samples/full_adder"]
 exclude = [
     "vendor/xezim",
